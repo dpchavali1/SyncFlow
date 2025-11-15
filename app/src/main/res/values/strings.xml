@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">SyncFlow</string>
+    <string name="conversations_title">SyncFlow Messages</string>
+    <string name="send_sms_title">New Message</string>
+</resources>
