@@ -1,106 +1,53 @@
 package com.phoneintegration.app
 
 import com.google.mlkit.nl.smartreply.SmartReply
-import com.google.mlkit.nl.smartreply.SmartReplyGenerator
 import com.google.mlkit.nl.smartreply.TextMessage
-import kotlinx.coroutines.tasks.await
-import com.google.android.gms.tasks.Tasks
 
 class SmartReplyHelper {
 
-    private val smartReply: SmartReplyGenerator = SmartReply.getClient()
+    fun generateReplies(list: List<SmsMessage>): List<String> {
+        if (list.isEmpty()) return emptyList()
 
-    /**
-     * Generate smart reply suggestions based on conversation history
-     * Returns up to 3 suggested replies
-     */
-    suspend fun generateReplies(messages: List<SmsMessage>): List<String> {
-        return try {
-            if (messages.isEmpty()) {
-                return emptyList()
-            }
+        val sorted = list.sortedBy { it.date }
+        val conversation = mutableListOf<TextMessage>()
 
-            // Convert SMS messages to ML Kit format
-            val conversation = messages
-                .takeLast(10) // Only use last 10 messages for context
-                .map { message ->
-                    if (message.type == 1) {
-                        // Received message - from remote user
-                        TextMessage.createForRemoteUser(
-                            message.body,
-                            message.date,
-                            message.getDisplayName()
-                        )
-                    } else {
-                        // Sent message - from local user
-                        TextMessage.createForLocalUser(
-                            message.body,
-                            message.date
-                        )
-                    }
-                }
+        sorted.forEach { sms ->
+            // Unique user ID for remote user
+            val uid = sms.address ?: "user"
 
-            // Get suggestions from ML Kit
-            val result = smartReply.suggestReplies(conversation).await()
-
-            // Check the status
-            val status = result.status
-            android.util.Log.d("SmartReply", "Status: $status")
-
-            // Return suggestions if available
-            val suggestions = result.suggestions
-            if (suggestions.isNotEmpty()) {
-                suggestions.map { suggestion -> suggestion.text }
-            } else {
-                android.util.Log.d("SmartReply", "No suggestions available")
-                emptyList()
-            }
-
-        } catch (e: Exception) {
-            android.util.Log.e("SmartReply", "Error generating replies: ${e.message}", e)
-            emptyList()
-        }
-    }
-
-    /**
-     * Get quick reply for a single message (simpler version)
-     */
-    suspend fun getQuickReplies(lastMessage: String, isFromRemote: Boolean = true): List<String> {
-        return try {
-            val conversation = listOf(
-                if (isFromRemote) {
+            if (sms.type == 1) { // received
+                conversation.add(
                     TextMessage.createForRemoteUser(
-                        lastMessage,
-                        System.currentTimeMillis(),
-                        "User"
+                        sms.body,
+                        sms.date,
+                        uid
                     )
-                } else {
+                )
+            } else { // sent
+                conversation.add(
                     TextMessage.createForLocalUser(
-                        lastMessage,
-                        System.currentTimeMillis()
+                        sms.body,
+                        sms.date
                     )
-                }
-            )
+                )
+            }
+        }
 
-            val result = smartReply.suggestReplies(conversation).await()
-            val suggestions = result.suggestions
+        var replies = emptyList<String>()
+        val lock = Object()
 
-            if (suggestions.isNotEmpty()) {
-                suggestions.map { it.text }
-            } else {
-                emptyList()
+        SmartReply.getClient()
+            .suggestReplies(conversation)
+            .addOnSuccessListener { result ->
+                replies = result.suggestions.map { it.text }
+                synchronized(lock) { lock.notify() }
+            }
+            .addOnFailureListener {
+                synchronized(lock) { lock.notify() }
             }
 
-        } catch (e: Exception) {
-            android.util.Log.e("SmartReply", "Error: ${e.message}")
-            emptyList()
-        }
-    }
+        synchronized(lock) { lock.wait(300) }
 
-    /**
-     * Clean up resources
-     */
-    fun close() {
-        smartReply.close()
+        return replies
     }
 }

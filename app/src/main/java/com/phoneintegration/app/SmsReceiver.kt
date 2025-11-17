@@ -16,37 +16,37 @@ class SmsReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context?, intent: Intent?) {
-        if (intent?.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
-            val bundle = intent.extras
-            if (bundle != null && context != null) {
-                val pdus = bundle.get("pdus") as Array<*>
-                val messages = pdus.map { pdu ->
-                    Telephony.Sms.Intents.getMessagesFromIntent(intent)[0]
-                }
+        if (context == null || intent == null) return
 
-                messages.forEach { smsMessage ->
-                    val sender = smsMessage.displayOriginatingAddress
-                    val messageBody = smsMessage.messageBody
+        val action = intent.action
 
-                    Log.d("SMS_RECEIVER", "Received SMS from: $sender")
-                    Log.d("SMS_RECEIVER", "Message: $messageBody")
+        // Samsung sends SMS only through SMS_DELIVER, not SMS_RECEIVED
+        if (action == Telephony.Sms.Intents.SMS_DELIVER_ACTION ||
+            action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
 
-                    // Get contact name
-                    val contactHelper = ContactHelper(context)
-                    val contactName = contactHelper.getContactName(sender)
+            val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+            if (messages.isNullOrEmpty()) return
 
-                    // Show notification
-                    val notificationHelper = NotificationHelper(context)
-                    notificationHelper.showSmsNotification(sender, messageBody, contactName)
+            val sender = messages[0].displayOriginatingAddress
+            val fullMessage = messages.joinToString(separator = "") { it.messageBody }
 
-                    // Broadcast locally that new SMS arrived
-                    val broadcastIntent = Intent(SMS_RECEIVED_ACTION).apply {
-                        putExtra(EXTRA_ADDRESS, sender)
-                        putExtra(EXTRA_MESSAGE, messageBody)
-                    }
-                    context.sendBroadcast(broadcastIntent)
-                }
+            Log.d("SMS_RECEIVER", "Received SMS from $sender: $fullMessage")
+
+            // Get contact name
+            val contactHelper = ContactHelper(context)
+            val contactName = contactHelper.getContactName(sender)
+
+            // Show notification
+            val notificationHelper = NotificationHelper(context)
+            notificationHelper.showSmsNotification(sender, fullMessage, contactName)
+
+            // Broadcast locally to update UI & ViewModel
+            val broadcast = Intent(SMS_RECEIVED_ACTION).apply {
+                putExtra(EXTRA_ADDRESS, sender)
+                putExtra(EXTRA_MESSAGE, fullMessage)
             }
+
+            LocalBroadcastManager.getInstance(context).sendBroadcast(broadcast)
         }
     }
 }

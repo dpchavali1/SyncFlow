@@ -1,198 +1,233 @@
 package com.phoneintegration.app
 
+import android.content.ContentResolver
 import android.content.Context
+import android.net.Uri
+import android.provider.ContactsContract
 import android.provider.Telephony
-import androidx.annotation.WorkerThread
+import android.telephony.SmsManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class SmsRepository(private val context: Context) {
 
-    @WorkerThread
-    fun getAllSmsMessages(): List<SmsMessage> {
-        val messages = mutableListOf<SmsMessage>()
+    private val resolver: ContentResolver = context.contentResolver
+    
+    // Cache for contact names to avoid repeated lookups
+    private val contactCache = mutableMapOf<String, String?>()
 
-        try {
-            val projection = arrayOf(
-                Telephony.Sms._ID,
-                Telephony.Sms.ADDRESS,
-                Telephony.Sms.BODY,
-                Telephony.Sms.DATE,
-                Telephony.Sms.TYPE
-            )
+    // -------------------------------------------------------------
+    // CONTACT NAME LOOKUP (with caching)
+    // -------------------------------------------------------------
+    private fun getContactName(address: String): String? {
+        // Check cache first
+        if (contactCache.containsKey(address)) {
+            return contactCache[address]
+        }
 
-            android.util.Log.d("SmsRepository", "Querying SMS content provider...")
+        val uri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+            Uri.encode(address)
+        )
 
-            val cursor = context.contentResolver.query(
+        val name = resolver.query(
+            uri,
+            arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getString(0)
+            } else null
+        }
+
+        // Cache the result
+        contactCache[address] = name
+        return name
+    }
+
+    // -------------------------------------------------------------
+    // LOAD CONVERSATION MESSAGES (Paginated, Optimized)
+    // -------------------------------------------------------------
+    suspend fun getMessages(address: String, limit: Int, offset: Int): List<SmsMessage> =
+        withContext(Dispatchers.IO) {
+
+            val list = mutableListOf<SmsMessage>()
+
+            val cursor = resolver.query(
                 Telephony.Sms.CONTENT_URI,
-                projection,
-                null,
-                null,
-                "${Telephony.Sms.DATE} DESC"  // Sort by date descending
-            )
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE
+                ),
+                "${Telephony.Sms.ADDRESS} = ?",
+                arrayOf(address),
+                "${Telephony.Sms.DATE} DESC LIMIT $limit OFFSET $offset"
+            ) ?: return@withContext emptyList()
 
-            cursor?.use { c ->
-                val idIndex = c.getColumnIndex(Telephony.Sms._ID)
-                val addressIndex = c.getColumnIndex(Telephony.Sms.ADDRESS)
-                val bodyIndex = c.getColumnIndex(Telephony.Sms.BODY)
-                val dateIndex = c.getColumnIndex(Telephony.Sms.DATE)
-                val typeIndex = c.getColumnIndex(Telephony.Sms.TYPE)
+            // Get contact name once for this address
+            val contactName = getContactName(address)
 
-                android.util.Log.d("SmsRepository", "Cursor has ${c.count} rows")
-
-                var count = 0
+            cursor.use { c ->
                 while (c.moveToNext()) {
-                    try {
-                        val id = if (idIndex >= 0) c.getLong(idIndex) else 0L
-                        val address = if (addressIndex >= 0) c.getString(addressIndex) ?: "" else ""
-                        val body = if (bodyIndex >= 0) c.getString(bodyIndex) ?: "" else ""
-                        val date = if (dateIndex >= 0) c.getLong(dateIndex) else System.currentTimeMillis()
-                        val type = if (typeIndex >= 0) c.getInt(typeIndex) else 1
 
-                        if (address.isNotBlank() && body.isNotBlank()) {
-                            val message = SmsMessage(
-                                id = id,
-                                address = address,
-                                body = body,
-                                date = date,
-                                type = type
-                            )
-                            messages.add(message)
-                            count++
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("SmsRepository", "Error reading message row", e)
-                    }
-                }
+                    val id = c.getLong(0)
+                    val addr = c.getString(1) ?: ""
+                    val body = c.getString(2) ?: ""
+                    val date = c.getLong(3)
+                    val type = c.getInt(4)
 
-                android.util.Log.d("SmsRepository", "Successfully read $count messages")
-            } ?: run {
-                android.util.Log.e("SmsRepository", "Cursor is null - permission issue?")
-            }
+                    // Build SmsMessage with cached contact name
+                    val sms = SmsMessage(
+                        id = id,
+                        address = addr,
+                        body = body,
+                        date = date,
+                        type = type,
+                        contactName = contactName
+                    )
 
-            // Populate contact names in a batch
-            if (messages.isNotEmpty()) {
-                android.util.Log.d("SmsRepository", "Populating contact names...")
-                val contactHelper = ContactHelper(context)
+                    // Categorization
+                    sms.category = MessageCategorizer.categorizeMessage(sms)
+                    sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
 
-                var contactCount = 0
-                for (message in messages) {
-                    try {
-                        message.contactName = contactHelper.getContactName(message.address)
-                        if (message.contactName != null) contactCount++
-                    } catch (e: Exception) {
-                        android.util.Log.e("SmsRepository", "Error getting contact for ${message.address}", e)
-                    }
-                }
-
-                android.util.Log.d("SmsRepository", "Found contact names for $contactCount messages")
-            }
-
-        } catch (e: SecurityException) {
-            android.util.Log.e("SmsRepository", "Security exception - missing permissions?", e)
-        } catch (e: Exception) {
-            android.util.Log.e("SmsRepository", "Error loading messages", e)
-            e.printStackTrace()
-        }
-
-        android.util.Log.d("SmsRepository", "Returning ${messages.size} messages")
-        return messages
-    }
-
-    @WorkerThread
-    fun getConversations(messages: List<SmsMessage>): List<Conversation> {
-        try {
-            android.util.Log.d("SmsRepository", "Creating conversations from ${messages.size} messages")
-
-            val conversations = messages
-                .groupBy { it.address }
-                .mapNotNull { (address, msgs) ->
-                    try {
-                        val sortedMsgs = msgs.sortedByDescending { it.date }
-                        val lastMessage = sortedMsgs.firstOrNull() ?: return@mapNotNull null
-
-                        Conversation(
-                            address = address,
-                            contactName = lastMessage.contactName,
-                            messages = sortedMsgs,
-                            lastMessage = lastMessage
-                        )
-                    } catch (e: Exception) {
-                        android.util.Log.e("SmsRepository", "Error creating conversation for $address", e)
-                        null
-                    }
-                }
-                .sortedByDescending { it.lastMessage.date }
-
-            android.util.Log.d("SmsRepository", "Created ${conversations.size} conversations")
-            return conversations
-
-        } catch (e: Exception) {
-            android.util.Log.e("SmsRepository", "Error creating conversations", e)
-            return emptyList()
-        }
-    }
-
-    @WorkerThread
-    fun categorizeMessages(messages: List<SmsMessage>) {
-        try {
-            android.util.Log.d("SmsRepository", "Categorizing ${messages.size} messages...")
-
-            var categorized = 0
-            for (message in messages) {
-                if (message.category == null) {
-                    message.category = MessageCategorizer.categorizeMessage(message)
-
-                    if (message.category == MessageCategory.OTP) {
-                        message.otpInfo = MessageCategorizer.extractOtp(message.body)
-                    }
-
-                    categorized++
+                    list.add(sms)
                 }
             }
 
-            android.util.Log.d("SmsRepository", "Categorized $categorized messages")
-
-        } catch (e: Exception) {
-            android.util.Log.e("SmsRepository", "Error categorizing messages", e)
+            list
         }
-    }
 
-    @WorkerThread
-    fun getConversationMessages(address: String): List<SmsMessage> {
-        try {
-            android.util.Log.d("SmsRepository", "Loading messages for address: $address")
+    // -------------------------------------------------------------
+    // GET CONVERSATION LIST SUMMARY (Optimized with LIMIT)
+    // -------------------------------------------------------------
+    suspend fun getConversations(): List<ConversationInfo> =
+        withContext(Dispatchers.IO) {
 
-            val allMessages = getAllSmsMessages()
-            val conversationMessages = allMessages.filter { it.address == address }
+            val map = LinkedHashMap<String, ConversationInfo>()
 
-            android.util.Log.d("SmsRepository", "Found ${conversationMessages.size} messages for this conversation")
-
-            return conversationMessages
-
-        } catch (e: Exception) {
-            android.util.Log.e("SmsRepository", "Error loading conversation messages", e)
-            return emptyList()
-        }
-    }
-
-    @WorkerThread
-    fun markMessageAsDeleted(id: Long): Boolean {
-        return try {
-            android.util.Log.d("SmsRepository", "Deleting message with id: $id")
-
-            val deletedRows = context.contentResolver.delete(
+            // Query with LIMIT to load faster initially
+            val cursor = resolver.query(
                 Telephony.Sms.CONTENT_URI,
-                "${Telephony.Sms._ID} = ?",
-                arrayOf(id.toString())
-            )
+                arrayOf(
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.READ
+                ),
+                null,
+                null,
+                "${Telephony.Sms.DATE} DESC LIMIT 500"  // Limit for faster initial load
+            ) ?: return@withContext emptyList()
 
-            val success = deletedRows > 0
-            android.util.Log.d("SmsRepository", "Delete result: $success (rows: $deletedRows)")
+            cursor.use { c ->
 
-            success
-        } catch (e: Exception) {
-            android.util.Log.e("SmsRepository", "Error deleting message", e)
-            e.printStackTrace()
-            false
+                while (c.moveToNext()) {
+
+                    val addr = c.getString(0) ?: continue
+                    val body = c.getString(1) ?: ""
+                    val ts = c.getLong(2)
+                    val isRead = c.getInt(3) == 1
+
+                    val existing = map[addr]
+
+                    if (existing == null) {
+                        // Only lookup contact name for new conversations
+                        val name = getContactName(addr)
+                        
+                        map[addr] = ConversationInfo(
+                            address = addr,
+                            contactName = name,
+                            lastMessage = body,
+                            timestamp = ts,
+                            unreadCount = if (isRead) 0 else 1
+                        )
+                    } else {
+                        // Just increment unread count for existing
+                        if (!isRead) existing.unreadCount += 1
+                    }
+                }
+            }
+
+            map.values.toList()
         }
-    }
+
+    // -------------------------------------------------------------
+    // SEND SMS (with delay for database write)
+    // -------------------------------------------------------------
+    suspend fun sendSms(address: String, body: String): Boolean =
+        withContext(Dispatchers.IO) {
+            return@withContext try {
+                SmsManager.getDefault().sendTextMessage(address, null, body, null, null)
+                // Give system time to write to SMS database
+                kotlinx.coroutines.delay(200)
+                true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
+        }
+
+    // -------------------------------------------------------------
+    // DELETE MESSAGE
+    // -------------------------------------------------------------
+    suspend fun deleteMessage(id: Long): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                val uri = Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, id.toString())
+                resolver.delete(uri, null, null) > 0
+            } catch (e: Exception) {
+                false
+            }
+        }
+    
+    // -------------------------------------------------------------
+    // GET LATEST MESSAGE (for quick refresh after send)
+    // -------------------------------------------------------------
+    suspend fun getLatestMessage(address: String): SmsMessage? =
+        withContext(Dispatchers.IO) {
+            val cursor = resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE
+                ),
+                "${Telephony.Sms.ADDRESS} = ?",
+                arrayOf(address),
+                "${Telephony.Sms.DATE} DESC LIMIT 1"
+            ) ?: return@withContext null
+
+            cursor.use { c ->
+                if (c.moveToFirst()) {
+                    val id = c.getLong(0)
+                    val addr = c.getString(1) ?: ""
+                    val body = c.getString(2) ?: ""
+                    val date = c.getLong(3)
+                    val type = c.getInt(4)
+                    
+                    val contactName = getContactName(addr)
+
+                    val sms = SmsMessage(
+                        id = id,
+                        address = addr,
+                        body = body,
+                        date = date,
+                        type = type,
+                        contactName = contactName
+                    )
+                    
+                    sms.category = MessageCategorizer.categorizeMessage(sms)
+                    sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
+                    
+                    sms
+                } else null
+            }
+        }
 }
