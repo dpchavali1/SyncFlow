@@ -11,6 +11,7 @@ import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.remember
+import com.google.android.gms.ads.MobileAds
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.ui.navigation.MainNavigation
 import com.phoneintegration.app.ui.theme.PhoneIntegrationTheme
@@ -38,6 +39,7 @@ class MainActivity : ComponentActivity() {
 
         preferencesManager = PreferencesManager(this)
         askRequiredPermissions()
+        MobileAds.initialize(this)
 
         setContent {
             PhoneIntegrationTheme {

@@ -11,6 +11,8 @@ import com.phoneintegration.app.ui.chat.ConversationDetailScreen
 import com.phoneintegration.app.ui.stats.MessageStatsScreen
 import com.phoneintegration.app.ui.settings.*
 import com.phoneintegration.app.ui.splash.SplashScreen
+import com.phoneintegration.app.ui.conversations.AdConversationScreen
+
 
 @Composable
 fun MainNavigation(
@@ -29,7 +31,14 @@ fun MainNavigation(
                 ConversationListScreen(
                     viewModel = viewModel,
                     onOpen = { address: String, name: String ->
-                        navController.navigate("chat/$address/$name")
+
+                        if (address == "syncflow_ads") {
+                            // Open Ads screen
+                            navController.navigate("ads")
+                        } else {
+                            // Open normal SMS chat
+                            navController.navigate("chat/$address/$name")
+                        }
                     },
                     onOpenStats = {
                         navController.navigate("stats")
@@ -118,6 +127,13 @@ fun MainNavigation(
             
             composable("settings/backup") {
                 BackupScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // Ads Conversation Screen
+            composable("ads") {
+                AdConversationScreen(
                     onBack = { navController.popBackStack() }
                 )
             }

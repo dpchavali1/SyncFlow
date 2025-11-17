@@ -1,5 +1,6 @@
 package com.phoneintegration.app.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -7,6 +8,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.phoneintegration.app.data.PreferencesManager
 
@@ -16,6 +18,8 @@ fun ThemeSettingsScreen(
     prefsManager: PreferencesManager,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    
     Scaffold(
         topBar = {
             TopAppBar(
@@ -47,6 +51,7 @@ fun ThemeSettingsScreen(
                     .fillMaxWidth()
                     .clickable { 
                         prefsManager.setAutoTheme(true)
+                        Toast.makeText(context, "Theme set to System Default", Toast.LENGTH_SHORT).show()
                     },
                 colors = if (prefsManager.isAutoTheme.value) {
                     CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
@@ -66,7 +71,10 @@ fun ThemeSettingsScreen(
                     }
                     RadioButton(
                         selected = prefsManager.isAutoTheme.value,
-                        onClick = { prefsManager.setAutoTheme(true) }
+                        onClick = { 
+                            prefsManager.setAutoTheme(true)
+                            Toast.makeText(context, "Theme set to System Default", Toast.LENGTH_SHORT).show()
+                        }
                     )
                 }
             }
@@ -78,6 +86,7 @@ fun ThemeSettingsScreen(
                     .clickable { 
                         prefsManager.setAutoTheme(false)
                         prefsManager.setDarkMode(false)
+                        Toast.makeText(context, "Theme set to Light", Toast.LENGTH_SHORT).show()
                     },
                 colors = if (!prefsManager.isAutoTheme.value && !prefsManager.isDarkMode.value) {
                     CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
@@ -100,6 +109,7 @@ fun ThemeSettingsScreen(
                         onClick = { 
                             prefsManager.setAutoTheme(false)
                             prefsManager.setDarkMode(false)
+                            Toast.makeText(context, "Theme set to Light", Toast.LENGTH_SHORT).show()
                         }
                     )
                 }
@@ -112,6 +122,7 @@ fun ThemeSettingsScreen(
                     .clickable { 
                         prefsManager.setAutoTheme(false)
                         prefsManager.setDarkMode(true)
+                        Toast.makeText(context, "Theme set to Dark", Toast.LENGTH_SHORT).show()
                     },
                 colors = if (!prefsManager.isAutoTheme.value && prefsManager.isDarkMode.value) {
                     CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
@@ -134,7 +145,30 @@ fun ThemeSettingsScreen(
                         onClick = { 
                             prefsManager.setAutoTheme(false)
                             prefsManager.setDarkMode(true)
+                            Toast.makeText(context, "Theme set to Dark", Toast.LENGTH_SHORT).show()
                         }
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "💡 Note",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Theme changes take effect immediately. Restart the app if you don't see changes.",
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }

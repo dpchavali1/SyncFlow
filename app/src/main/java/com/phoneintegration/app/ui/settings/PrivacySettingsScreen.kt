@@ -1,5 +1,6 @@
 package com.phoneintegration.app.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -8,6 +9,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.phoneintegration.app.data.PreferencesManager
 
@@ -17,6 +19,8 @@ fun PrivacySettingsScreen(
     prefsManager: PreferencesManager,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    
     Scaffold(
         topBar = {
             TopAppBar(
@@ -44,10 +48,15 @@ fun PrivacySettingsScreen(
             )
             
             SwitchCard(
-                title = "Require Fingerprint",
+                title = "Require Fingerprint (Coming Soon)",
                 subtitle = "Lock app with fingerprint authentication",
                 checked = prefsManager.requireFingerprint.value,
-                onCheckedChange = { prefsManager.setRequireFingerprint(it) }
+                onCheckedChange = { 
+                    Toast.makeText(context, 
+                        "Fingerprint authentication coming in next update!", 
+                        Toast.LENGTH_LONG).show()
+                    prefsManager.setRequireFingerprint(it)
+                }
             )
             
             Divider(modifier = Modifier.padding(vertical = 8.dp))
@@ -62,14 +71,24 @@ fun PrivacySettingsScreen(
                 title = "Hide Message Preview",
                 subtitle = "Don't show message content in recents",
                 checked = prefsManager.hideMessagePreview.value,
-                onCheckedChange = { prefsManager.setHideMessagePreview(it) }
+                onCheckedChange = { 
+                    prefsManager.setHideMessagePreview(it)
+                    Toast.makeText(context, 
+                        if (it) "Message previews hidden" else "Message previews shown", 
+                        Toast.LENGTH_SHORT).show()
+                }
             )
             
             SwitchCard(
                 title = "Incognito Mode",
                 subtitle = "Don't save conversation history",
                 checked = prefsManager.incognitoMode.value,
-                onCheckedChange = { prefsManager.setIncognitoMode(it) }
+                onCheckedChange = { 
+                    prefsManager.setIncognitoMode(it)
+                    Toast.makeText(context, 
+                        if (it) "Incognito mode enabled" else "Incognito mode disabled", 
+                        Toast.LENGTH_SHORT).show()
+                }
             )
             
             Divider(modifier = Modifier.padding(vertical = 8.dp))

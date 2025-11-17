@@ -12,18 +12,15 @@ import kotlinx.coroutines.withContext
 class SmsRepository(private val context: Context) {
 
     private val resolver: ContentResolver = context.contentResolver
-    
-    // Cache for contact names to avoid repeated lookups
+
+    // Cache to avoid repeated contact lookups
     private val contactCache = mutableMapOf<String, String?>()
 
-    // -------------------------------------------------------------
-    // CONTACT NAME LOOKUP (with caching)
-    // -------------------------------------------------------------
-    private fun getContactName(address: String): String? {
-        // Check cache first
-        if (contactCache.containsKey(address)) {
-            return contactCache[address]
-        }
+    // ---------------------------------------------------------------------
+    //  CONTACT NAME LOOKUP (Slow → Use only in background)
+    // ---------------------------------------------------------------------
+    fun resolveContactName(address: String): String? {
+        if (contactCache.containsKey(address)) return contactCache[address]
 
         val uri = Uri.withAppendedPath(
             ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
@@ -36,22 +33,40 @@ class SmsRepository(private val context: Context) {
             null,
             null,
             null
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                cursor.getString(0)
-            } else null
+        )?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
         }
 
-        // Cache the result
         contactCache[address] = name
         return name
     }
 
-    // -------------------------------------------------------------
-    // LOAD CONVERSATION MESSAGES (Paginated, Optimized)
-    // -------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    //  GET THREAD ID FOR PHONE NUMBER
+    // ---------------------------------------------------------------------
+    private fun findThreadIdForAddress(address: String): Long? {
+        val cursor = resolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms.THREAD_ID),
+            "${Telephony.Sms.ADDRESS} = ?",
+            arrayOf(address),
+            null
+        )
+
+        cursor?.use {
+            if (it.moveToFirst()) return it.getLong(0)
+        }
+        return null
+    }
+
+    // ---------------------------------------------------------------------
+    //  LOAD MESSAGES (FAST — THREAD BASED)
+    // ---------------------------------------------------------------------
     suspend fun getMessages(address: String, limit: Int, offset: Int): List<SmsMessage> =
         withContext(Dispatchers.IO) {
+
+            val threadId = findThreadIdForAddress(address)
+                ?: return@withContext emptyList()
 
             val list = mutableListOf<SmsMessage>()
 
@@ -64,34 +79,25 @@ class SmsRepository(private val context: Context) {
                     Telephony.Sms.DATE,
                     Telephony.Sms.TYPE
                 ),
-                "${Telephony.Sms.ADDRESS} = ?",
-                arrayOf(address),
+                "${Telephony.Sms.THREAD_ID} = ?",
+                arrayOf(threadId.toString()),
                 "${Telephony.Sms.DATE} DESC LIMIT $limit OFFSET $offset"
             ) ?: return@withContext emptyList()
 
-            // Get contact name once for this address
-            val contactName = getContactName(address)
+            val cachedName = contactCache[address] ?: address
 
             cursor.use { c ->
                 while (c.moveToNext()) {
 
-                    val id = c.getLong(0)
-                    val addr = c.getString(1) ?: ""
-                    val body = c.getString(2) ?: ""
-                    val date = c.getLong(3)
-                    val type = c.getInt(4)
-
-                    // Build SmsMessage with cached contact name
                     val sms = SmsMessage(
-                        id = id,
-                        address = addr,
-                        body = body,
-                        date = date,
-                        type = type,
-                        contactName = contactName
+                        id = c.getLong(0),
+                        address = c.getString(1) ?: "",
+                        body = c.getString(2) ?: "",
+                        date = c.getLong(3),
+                        type = c.getInt(4),
+                        contactName = cachedName
                     )
 
-                    // Categorization
                     sms.category = MessageCategorizer.categorizeMessage(sms)
                     sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
 
@@ -102,18 +108,18 @@ class SmsRepository(private val context: Context) {
             list
         }
 
-    // -------------------------------------------------------------
-    // GET CONVERSATION LIST SUMMARY (Optimized with LIMIT)
-    // -------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    //  LOAD CONVERSATIONS (SUPER FAST)
+    // ---------------------------------------------------------------------
     suspend fun getConversations(): List<ConversationInfo> =
         withContext(Dispatchers.IO) {
 
-            val map = LinkedHashMap<String, ConversationInfo>()
+            val map = LinkedHashMap<Long, ConversationInfo>()
 
-            // Query with LIMIT to load faster initially
             val cursor = resolver.query(
                 Telephony.Sms.CONTENT_URI,
                 arrayOf(
+                    Telephony.Sms.THREAD_ID,
                     Telephony.Sms.ADDRESS,
                     Telephony.Sms.BODY,
                     Telephony.Sms.DATE,
@@ -121,34 +127,40 @@ class SmsRepository(private val context: Context) {
                 ),
                 null,
                 null,
-                "${Telephony.Sms.DATE} DESC LIMIT 500"  // Limit for faster initial load
+                "${Telephony.Sms.DATE} DESC"
             ) ?: return@withContext emptyList()
 
             cursor.use { c ->
-
                 while (c.moveToNext()) {
 
-                    val addr = c.getString(0) ?: continue
-                    val body = c.getString(1) ?: ""
-                    val ts = c.getLong(2)
-                    val isRead = c.getInt(3) == 1
+                    val threadId = c.getLong(0)
+                    val address = c.getString(1) ?: continue
+                    val body = c.getString(2) ?: ""
+                    val ts = c.getLong(3)
+                    val isRead = c.getInt(4) == 1
 
-                    val existing = map[addr]
+                    val existing = map[threadId]
 
                     if (existing == null) {
-                        // Only lookup contact name for new conversations
-                        val name = getContactName(addr)
-                        
-                        map[addr] = ConversationInfo(
-                            address = addr,
-                            contactName = name,
+
+                        // FAST: No contacts lookup here. Use cache → number.
+                        val cachedName = contactCache[address] ?: address
+
+                        map[threadId] = ConversationInfo(
+                            threadId = threadId,
+                            address = address,
+                            contactName = cachedName,
                             lastMessage = body,
                             timestamp = ts,
                             unreadCount = if (isRead) 0 else 1
                         )
+
                     } else {
-                        // Just increment unread count for existing
-                        if (!isRead) existing.unreadCount += 1
+                        map[threadId] = existing.copy(
+                            lastMessage = if (ts > existing.timestamp) body else existing.lastMessage,
+                            timestamp = maxOf(ts, existing.timestamp),
+                            unreadCount = existing.unreadCount + if (isRead) 0 else 1
+                        )
                     }
                 }
             }
@@ -156,40 +168,42 @@ class SmsRepository(private val context: Context) {
             map.values.toList()
         }
 
-    // -------------------------------------------------------------
-    // SEND SMS (with delay for database write)
-    // -------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    //  SEND SMS
+    // ---------------------------------------------------------------------
     suspend fun sendSms(address: String, body: String): Boolean =
         withContext(Dispatchers.IO) {
-            return@withContext try {
+            try {
                 SmsManager.getDefault().sendTextMessage(address, null, body, null, null)
-                // Give system time to write to SMS database
                 kotlinx.coroutines.delay(200)
                 true
             } catch (e: Exception) {
-                e.printStackTrace()
                 false
             }
         }
 
-    // -------------------------------------------------------------
-    // DELETE MESSAGE
-    // -------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    //  DELETE SMS
+    // ---------------------------------------------------------------------
     suspend fun deleteMessage(id: Long): Boolean =
         withContext(Dispatchers.IO) {
             try {
-                val uri = Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, id.toString())
-                resolver.delete(uri, null, null) > 0
+                resolver.delete(
+                    Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, id.toString()),
+                    null,
+                    null
+                ) > 0
             } catch (e: Exception) {
                 false
             }
         }
-    
-    // -------------------------------------------------------------
-    // GET LATEST MESSAGE (for quick refresh after send)
-    // -------------------------------------------------------------
+
+    // ---------------------------------------------------------------------
+    //  GET LATEST MESSAGE (AFTER SEND)
+    // ---------------------------------------------------------------------
     suspend fun getLatestMessage(address: String): SmsMessage? =
         withContext(Dispatchers.IO) {
+
             val cursor = resolver.query(
                 Telephony.Sms.CONTENT_URI,
                 arrayOf(
@@ -206,28 +220,40 @@ class SmsRepository(private val context: Context) {
 
             cursor.use { c ->
                 if (c.moveToFirst()) {
-                    val id = c.getLong(0)
-                    val addr = c.getString(1) ?: ""
-                    val body = c.getString(2) ?: ""
-                    val date = c.getLong(3)
-                    val type = c.getInt(4)
-                    
-                    val contactName = getContactName(addr)
-
+                    val cachedName = contactCache[address] ?: address
                     val sms = SmsMessage(
-                        id = id,
-                        address = addr,
-                        body = body,
-                        date = date,
-                        type = type,
-                        contactName = contactName
+                        id = c.getLong(0),
+                        address = c.getString(1) ?: "",
+                        body = c.getString(2) ?: "",
+                        date = c.getLong(3),
+                        type = c.getInt(4),
+                        contactName = cachedName
                     )
-                    
                     sms.category = MessageCategorizer.categorizeMessage(sms)
                     sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
-                    
                     sms
                 } else null
             }
         }
+    fun resolveContactPhoto(address: String): String? {
+        val lookupUri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+            Uri.encode(address)
+        )
+
+        resolver.query(
+            lookupUri,
+            arrayOf(
+                ContactsContract.PhoneLookup.PHOTO_URI
+            ),
+            null,
+            null,
+            null
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                return c.getString(0) // photo URI
+            }
+        }
+        return null
+    }
 }

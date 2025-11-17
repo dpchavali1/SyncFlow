@@ -1,7 +1,8 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose") version "2.0.0" // Add this line
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.0"
+    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.23"
 }
 
 android {
@@ -75,9 +76,12 @@ dependencies {
     implementation("androidx.compose.material:material")   // for SwipeToDismiss
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
+    implementation(libs.play.services.ads.api)
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+
 
     // ──────────────────────────────────────────────
     // NAVIGATION — MUST MATCH COMPOSE VERSION
@@ -89,13 +93,15 @@ dependencies {
     // ──────────────────────────────────────────────
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+
 
     implementation("com.google.mlkit:smart-reply:17.0.3")
     implementation("com.google.android.gms:play-services-base:18.3.0")
     implementation("com.google.android.material:material:1.11.0")
 
-
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
+    implementation("io.coil-kt:coil-compose:2.4.0")
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")

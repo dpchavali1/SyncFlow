@@ -5,6 +5,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -12,8 +15,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import com.phoneintegration.app.SmsViewModel
 import com.phoneintegration.app.ConversationInfo
+import coil.compose.AsyncImage
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,7 +102,13 @@ fun ConversationListScreen(
                         items(filtered) { convo ->
                             ConversationListItem(info = convo) {
                                 val name = convo.contactName ?: convo.address
-                                onOpen(convo.address, name)
+                                if (convo.isAdConversation) {
+                                    // Navigate to Ads screen instead of opening SMS thread
+                                    onOpen("syncflow_ads", "SyncFlow Deals")
+                                } else {
+                                    val name = convo.contactName ?: convo.address
+                                    onOpen(convo.address, name)
+                                }
                             }
                         }
                     }
@@ -115,18 +128,61 @@ fun ConversationListItem(
             .fillMaxWidth()
             .clickable { onOpen() }
     ) {
-        Column(Modifier.padding(14.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
 
-            Text(
-                text = info.contactName ?: info.address,
-                style = MaterialTheme.typography.titleMedium
-            )
+            // -------------------------------
+            // CONTACT PHOTO (OPTION A)
+            // -------------------------------
+            if (info.photoUri != null) {
+                AsyncImage(
+                    model = info.photoUri,
+                    contentDescription = "Contact photo",
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                )
+            } else {
+                // Fallback circle with first letter
+                val label = (info.contactName ?: info.address).firstOrNull()?.uppercase() ?: "?"
 
-            Text(
-                text = info.lastMessage,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1
-            )
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // -------------------------------
+            // NAME + LAST MESSAGE
+            // -------------------------------
+            Column {
+                Text(
+                    text = info.contactName ?: info.address,
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Text(
+                    text = info.lastMessage,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1
+                )
+            }
         }
     }
 }

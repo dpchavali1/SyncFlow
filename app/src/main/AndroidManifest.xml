@@ -6,9 +6,11 @@
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.WRITE_SMS" />
 
     <!-- MMS support -->
     <uses-permission android:name="android.permission.RECEIVE_MMS" />
+    <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
     <!-- Contacts -->
@@ -17,7 +19,7 @@
     <!-- Android 13+ notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- So SyncFlow can read phone number formats -->
+    <!-- Phone number formats -->
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
 
     <!-- For SMS app capability -->
@@ -33,6 +35,7 @@
     </queries>
 
     <application
+        android:name=".SyncFlowApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -52,17 +55,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
 
-            <!-- Receive shared text from any app -->
+            <!-- REQUIRED #1: Handle SEND and SENDTO for SMS -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="text/plain"/>
-            </intent-filter>
-
-            <!-- Handles sms:12345?body=Hello links -->
-            <intent-filter>
                 <action android:name="android.intent.action.SENDTO"/>
                 <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="sms"/>
                 <data android:scheme="smsto"/>
                 <data android:scheme="mms"/>
@@ -70,25 +68,64 @@
             </intent-filter>
         </activity>
 
-        <!-- SMS RECEIVER -->
+        <!-- REQUIRED #2: BroadcastReceiver for SMS_DELIVER -->
         <receiver
             android:name=".SmsReceiver"
-            android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
+            android:exported="true">
 
-            <intent-filter android:priority="1000">
-                <action android:name="android.provider.Telephony.SMS_DELIVER" />
-            </intent-filter>
-
-            <intent-filter android:priority="1000">
+            <!-- Required for ALL SMS apps (even if not default) -->
+            <intent-filter>
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+
+            <!-- Required for default SMS app -->
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
         </receiver>
 
-        <!-- Required for SMS apps to be set as default -->
+
+        <!-- REQUIRED #3: BroadcastReceiver for WAP_PUSH_DELIVER (MMS) -->
+        <receiver
+            android:name=".MmsReceiver"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_RECEIVED" />
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+
+        </receiver>
+
+        <!-- REQUIRED #4: Service for RESPOND_VIA_MESSAGE (Quick Reply) -->
+        <service
+            android:name=".HeadlessSmsSendService"
+            android:exported="true"
+            android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE">
+
+            <intent-filter>
+                <action android:name="android.intent.action.RESPOND_VIA_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </service>
+
         <meta-data
-            android:name="android.sms.defaultApplication"
-            android:value="true" />
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713"/>
 
     </application>
 

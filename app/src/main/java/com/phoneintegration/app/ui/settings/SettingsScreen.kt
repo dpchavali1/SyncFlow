@@ -16,7 +16,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.phoneintegration.app.MainActivity
 import com.phoneintegration.app.data.PreferencesManager
+import com.phoneintegration.app.utils.DefaultSmsHelper
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,6 +34,8 @@ fun SettingsScreen(
     onNavigateToBackup: () -> Unit
 ) {
     val context = LocalContext.current
+    val activity = context as? MainActivity
+    val isDefaultSmsApp = remember { DefaultSmsHelper.isDefaultSmsApp(context) }
     
     Scaffold(
         topBar = {
@@ -51,6 +55,54 @@ fun SettingsScreen(
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
         ) {
+            // Default SMS App Section
+            if (!isDefaultSmsApp) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Message,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Set as Default SMS App",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    "Get the full SyncFlow experience",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                activity?.let { DefaultSmsHelper.requestDefaultSmsApp(it) }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Set as Default")
+                        }
+                    }
+                }
+            }
+            
             // App Settings
             SettingsSection("App Settings")
             
@@ -124,7 +176,7 @@ fun SettingsScreen(
             SettingsItem(
                 icon = Icons.Filled.Info,
                 title = "About SyncFlow",
-                subtitle = "Version 2.0 - Feature Complete",
+                subtitle = "Version 2.2 - Default SMS Ready",
                 onClick = {
                     // Show about dialog
                 }
@@ -179,7 +231,7 @@ fun SettingsScreen(
             
             // App Version
             Text(
-                text = "SyncFlow SMS v2.0",
+                text = "SyncFlow SMS v2.2",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
