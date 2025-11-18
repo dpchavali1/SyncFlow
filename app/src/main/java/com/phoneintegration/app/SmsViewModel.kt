@@ -7,10 +7,32 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.net.Uri
+import kotlinx.coroutines.delay
+import android.util.Log
 
 class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
+    private var currentThreadId: Long? = null
+
     private val repo = SmsRepository(app.applicationContext)
+
+    // Tracks whether SyncFlow is the default SMS app
+    private val _isDefaultSmsApp = MutableStateFlow(false)
+    val isDefaultSmsApp = _isDefaultSmsApp.asStateFlow()
+    /**
+     * Called when the system default SMS role changes.
+     * - Called from MainActivity.onResume()
+     * - Called after user accepts the RoleManager popup
+     */
+    fun onDefaultSmsAppChanged(isDefault: Boolean) {
+        _isDefaultSmsApp.value = isDefault
+
+        if (isDefault) {
+            // Reload everything because now we have full SMS/MMS access
+            loadConversations()
+        }
+    }
 
     private val _conversations = MutableStateFlow<List<ConversationInfo>>(emptyList())
     val conversations = _conversations.asStateFlow()
@@ -115,7 +137,17 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             currentAddress = address
             offset = 0
 
-            val firstPage = repo.getMessages(address, pageSize, 0)
+            // Resolve threadId for fastest load
+            val threadId = repo.getThreadIdForAddress(address)
+            currentThreadId = threadId
+
+            if (threadId == null) {
+                _conversationMessages.value = emptyList()
+                _hasMore.value = false
+                return@launch
+            }
+
+            val firstPage = repo.getMessagesByThreadId(threadId, pageSize, 0)
 
             _conversationMessages.value = firstPage
             _hasMore.value = firstPage.size == pageSize
@@ -123,9 +155,9 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             resolveNameForMessages(address)
 
             if (firstPage.isNotEmpty()) {
-                val lastMessage = firstPage.first()
-                if (lastMessage.type == 1) {
-                    _smartReplies.value = generateSmartReplies(lastMessage.body)
+                val last = firstPage.first()
+                if (last.type == 1) {
+                    _smartReplies.value = generateSmartReplies(last.body)
                 }
             }
         }
@@ -236,6 +268,53 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
+        }
+    }
+    fun sendMms(address: String, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+
+            Log.d("SmsViewModel", "sendMms() called with uri = $uri")
+
+            val ok = MmsHelper.sendMms(getApplication(), address, uri)
+
+            if (ok) {
+                Log.d("SmsViewModel", "MMS send request succeeded, waiting DB insert…")
+
+                delay(1800)  // Telephony inserts MMS asynchronously
+
+                currentThreadId?.let { id ->
+                    val updated = repo.getMessagesByThreadId(id, pageSize, 0)
+                    withContext(Dispatchers.Main) {
+                        _conversationMessages.value = updated
+                    }
+                }
+            } else {
+                // Insert a temporary failed message bubble
+                val failedMsg = SmsMessage(
+                    id = -System.currentTimeMillis(),
+                    address = address,
+                    body = "[MMS image]",
+                    date = System.currentTimeMillis(),
+                    type = 2,
+                    isMms = true,
+                    mmsAttachments = emptyList(),
+                    category = null,
+                    otpInfo = null
+                )
+
+                withContext(Dispatchers.Main) {
+                    // Prepend failed message into conversation
+                    _conversationMessages.value = listOf(failedMsg) + _conversationMessages.value
+                }
+            }
+        }
+    }
+
+    fun retryMms(sms: SmsMessage) {
+        viewModelScope.launch {
+            val uri = sms.mmsAttachments.firstOrNull()?.filePath ?: return@launch
+
+            sendMms(sms.address, Uri.parse(uri))
         }
     }
 }

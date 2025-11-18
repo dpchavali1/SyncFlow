@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import android.util.Log
 
 class NotificationHelper(private val context: Context) {
 
@@ -71,4 +72,57 @@ class NotificationHelper(private val context: Context) {
             android.util.Log.e("NotificationHelper", "Permission denied: ${e.message}")
         }
     }
+    fun showMmsNotification(title: String, message: String) {
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .build()
+
+        if (NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            try {
+                NotificationManagerCompat.from(context).notify(
+                    (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
+                    notification
+                )
+            } catch (e: SecurityException) {
+                Log.e("NotificationHelper", "Notification permission denied", e)
+            }
+        } else {
+            Log.e("NotificationHelper", "Notification permission not granted")
+        }
+
+        try {
+            val manager = NotificationManagerCompat.from(context)
+
+            if (manager.areNotificationsEnabled()) {
+                manager.notify(
+                    (System.currentTimeMillis().toInt()),
+                    notification
+                )
+            } else {
+                android.util.Log.e("NotificationHelper", "Notification permission not granted")
+            }
+
+        } catch (e: SecurityException) {
+            android.util.Log.e("NotificationHelper", "Permission denied: ${e.message}")
+        }
+    }
+
 }

@@ -3,10 +3,16 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Required SMS permissions -->
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
-    <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.WRITE_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
 
     <!-- MMS support -->
     <uses-permission android:name="android.permission.RECEIVE_MMS" />
@@ -92,20 +98,16 @@
         <receiver
             android:name=".MmsReceiver"
             android:exported="true">
-
-            <intent-filter>
-                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
-                <category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="application/vnd.wap.mms-message" />
-            </intent-filter>
-
             <intent-filter>
                 <action android:name="android.provider.Telephony.WAP_PUSH_RECEIVED" />
                 <category android:name="android.intent.category.DEFAULT"/>
                 <data android:mimeType="application/vnd.wap.mms-message" />
             </intent-filter>
-
         </receiver>
+
+        <receiver
+            android:name=".mms.MmsDeliveredReceiver"
+            android:exported="true" />
 
         <!-- REQUIRED #4: Service for RESPOND_VIA_MESSAGE (Quick Reply) -->
         <service
@@ -127,6 +129,19 @@
             android:name="com.google.android.gms.ads.APPLICATION_ID"
             android:value="ca-app-pub-3940256099942544~3347511713"/>
 
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.provider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
     </application>
 
 </manifest>

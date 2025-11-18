@@ -116,7 +116,10 @@ class SmsRepository(private val context: Context) {
 
             val map = LinkedHashMap<Long, ConversationInfo>()
 
-            val cursor = resolver.query(
+            // ------------------------------
+            // 1) Load SMS conversations
+            // ------------------------------
+            val smsCursor = resolver.query(
                 Telephony.Sms.CONTENT_URI,
                 arrayOf(
                     Telephony.Sms.THREAD_ID,
@@ -127,10 +130,10 @@ class SmsRepository(private val context: Context) {
                 ),
                 null,
                 null,
-                "${Telephony.Sms.DATE} DESC"
-            ) ?: return@withContext emptyList()
+                null
+            )
 
-            cursor.use { c ->
+            smsCursor?.use { c ->
                 while (c.moveToNext()) {
 
                     val threadId = c.getLong(0)
@@ -139,13 +142,10 @@ class SmsRepository(private val context: Context) {
                     val ts = c.getLong(3)
                     val isRead = c.getInt(4) == 1
 
+                    val cachedName = contactCache[address] ?: address
+
                     val existing = map[threadId]
-
                     if (existing == null) {
-
-                        // FAST: No contacts lookup here. Use cache → number.
-                        val cachedName = contactCache[address] ?: address
-
                         map[threadId] = ConversationInfo(
                             threadId = threadId,
                             address = address,
@@ -154,7 +154,6 @@ class SmsRepository(private val context: Context) {
                             timestamp = ts,
                             unreadCount = if (isRead) 0 else 1
                         )
-
                     } else {
                         map[threadId] = existing.copy(
                             lastMessage = if (ts > existing.timestamp) body else existing.lastMessage,
@@ -165,7 +164,52 @@ class SmsRepository(private val context: Context) {
                 }
             }
 
-            map.values.toList()
+            // ------------------------------
+            // 2) Load MMS conversations
+            // ------------------------------
+            val mmsCursor = resolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id", "thread_id", "date", "sub"),
+                null,
+                null,
+                null
+            )
+
+            mmsCursor?.use { c ->
+                while (c.moveToNext()) {
+                    val mmsId = c.getLong(0)
+                    val threadId = c.getLong(1)
+                    val dateSec = c.getLong(2)
+                    val subject = c.getString(3) ?: "(MMS)"
+
+                    val timestamp = dateSec * 1000L
+                    val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+
+                    val cachedName = contactCache[address] ?: address
+
+                    val existing = map[threadId]
+                    if (existing == null) {
+                        map[threadId] = ConversationInfo(
+                            threadId = threadId,
+                            address = address,
+                            contactName = cachedName,
+                            lastMessage = subject,
+                            timestamp = timestamp,
+                            unreadCount = 0
+                        )
+                    } else {
+                        map[threadId] = existing.copy(
+                            lastMessage = if (timestamp > existing.timestamp) subject else existing.lastMessage,
+                            timestamp = maxOf(timestamp, existing.timestamp)
+                        )
+                    }
+                }
+            }
+
+            // ------------------------------
+            // 3) Return sorted list
+            // ------------------------------
+            return@withContext map.values.sortedByDescending { it.timestamp }
         }
 
     // ---------------------------------------------------------------------
@@ -256,4 +300,161 @@ class SmsRepository(private val context: Context) {
         }
         return null
     }
+    suspend fun getMessagesByThreadId(
+        threadId: Long,
+        limit: Int,
+        offset: Int
+    ): List<SmsMessage> = withContext(Dispatchers.IO) {
+
+        val final = mutableListOf<SmsMessage>()
+
+        // ------------------------------
+        // 1) Load SMS
+        // ------------------------------
+        val smsCursor = resolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(
+                Telephony.Sms._ID,
+                Telephony.Sms.ADDRESS,
+                Telephony.Sms.BODY,
+                Telephony.Sms.DATE,
+                Telephony.Sms.TYPE
+            ),
+            "${Telephony.Sms.THREAD_ID} = ?",
+            arrayOf(threadId.toString()),
+            null
+        )
+
+        smsCursor?.use { c ->
+            while (c.moveToNext()) {
+                val sms = SmsMessage(
+                    id = c.getLong(0),
+                    address = c.getString(1) ?: "",
+                    body = c.getString(2) ?: "",
+                    date = c.getLong(3),
+                    type = c.getInt(4),
+                    contactName = resolveContactName(c.getString(1) ?: "")
+                )
+
+                sms.category = MessageCategorizer.categorizeMessage(sms)
+                sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
+
+                final.add(sms)
+            }
+        }
+
+        // ------------------------------
+        // 2) Load MMS
+        // ------------------------------
+        val mmsList = loadMmsForThread(threadId)
+        final.addAll(mmsList)
+
+        // ------------------------------
+        // 3) Sort newest -> oldest
+        // ------------------------------
+        final.sortByDescending { it.date }
+
+        // ------------------------------
+        // 4) Apply limit/offset
+        // ------------------------------
+        return@withContext final.drop(offset).take(limit)
+    }
+
+    private fun loadMmsForThread(threadId: Long): List<SmsMessage> {
+        val final = mutableListOf<SmsMessage>()
+
+        val mmsCursor = resolver.query(
+            Uri.parse("content://mms"),
+            arrayOf("_id", "date", "sub", "sub_cs", "m_type", "msg_box"),
+            "thread_id = ?",
+            arrayOf(threadId.toString()),
+            null
+        ) ?: return emptyList()
+
+        mmsCursor.use { c ->
+            while (c.moveToNext()) {
+                val mmsId = c.getLong(0)
+                val dateSec = c.getLong(1)
+                val subject = c.getString(2)
+                val msgBox = c.getInt(5)  // 1 = inbox, 2 = sent
+
+                val timestamp = dateSec * 1000L
+
+                val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                val text = MmsHelper.getMmsText(resolver, mmsId)
+
+                val attachments = loadMmsParts(mmsId)
+
+                final.add(
+                    SmsMessage(
+                        id = mmsId,
+                        address = address,
+                        body = text ?: "",
+                        date = timestamp,
+                        type = if (msgBox == 2) 2 else 1,
+                        contactName = resolveContactName(address),
+                        isMms = true,
+                        mmsAttachments = attachments,
+                        mmsSubject = subject
+                    )
+                )
+            }
+        }
+
+        return final
+    }
+
+    private fun loadMmsParts(mmsId: Long): List<MmsAttachment> {
+        val list = mutableListOf<MmsAttachment>()
+
+        val partCursor = resolver.query(
+            Uri.parse("content://mms/part"),
+            arrayOf("_id", "ct", "name", "text", "fn", "cid"),
+            "mid = ?",
+            arrayOf(mmsId.toString()),
+            null
+        ) ?: return emptyList()
+
+        partCursor.use { pc ->
+            while (pc.moveToNext()) {
+                val partId = pc.getLong(0)
+                val contentType = pc.getString(1) ?: ""
+                val fileName = pc.getString(2) ?: pc.getString(4)
+
+                val partUri = "content://mms/part/$partId"
+
+                val data: ByteArray? =
+                    if (contentType.startsWith("image/") ||
+                        contentType.startsWith("video/") ||
+                        contentType.startsWith("audio/")
+                    ) {
+                        resolver.openInputStream(Uri.parse(partUri))?.readBytes()
+                    } else null
+
+                list.add(
+                    MmsAttachment(
+                        id = partId,
+                        contentType = contentType,
+                        filePath = partUri,
+                        data = data,
+                        fileName = fileName
+                    )
+                )
+            }
+        }
+
+        return list
+    }
+    fun getThreadIdForAddress(address: String): Long? {
+        return resolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms.THREAD_ID),
+            "${Telephony.Sms.ADDRESS} = ?",
+            arrayOf(address),
+            null
+        )?.use { c ->
+            if (c.moveToFirst()) c.getLong(0) else null
+        }
+    }
+
 }
