@@ -77,8 +77,7 @@ class SmsSyncWorker(
             val smsRepository = SmsRepository(applicationContext)
 
             // Get recent messages (last 50)
-            val messages = smsRepository.getAllMessages()
-                .take(50)
+            val messages = smsRepository.getAllRecentMessages(limit = 50)
 
             Log.d(TAG, "Syncing ${messages.size} messages")
 

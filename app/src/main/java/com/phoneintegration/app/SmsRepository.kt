@@ -279,6 +279,52 @@ class SmsRepository(private val context: Context) {
                 } else null
             }
         }
+
+    // ---------------------------------------------------------------------
+    //  GET ALL RECENT MESSAGES (FOR DESKTOP SYNC)
+    // ---------------------------------------------------------------------
+    suspend fun getAllRecentMessages(limit: Int = 100): List<SmsMessage> =
+        withContext(Dispatchers.IO) {
+            val list = mutableListOf<SmsMessage>()
+
+            val cursor = resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE
+                ),
+                null,
+                null,
+                "${Telephony.Sms.DATE} DESC LIMIT $limit"
+            ) ?: return@withContext emptyList()
+
+            cursor.use { c ->
+                while (c.moveToNext()) {
+                    val address = c.getString(1) ?: continue
+                    val cachedName = contactCache[address] ?: address
+
+                    val sms = SmsMessage(
+                        id = c.getLong(0),
+                        address = address,
+                        body = c.getString(2) ?: "",
+                        date = c.getLong(3),
+                        type = c.getInt(4),
+                        contactName = cachedName
+                    )
+
+                    sms.category = MessageCategorizer.categorizeMessage(sms)
+                    sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
+
+                    list.add(sms)
+                }
+            }
+
+            list
+        }
+
     fun resolveContactPhoto(address: String): String? {
         val lookupUri = Uri.withAppendedPath(
             ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
