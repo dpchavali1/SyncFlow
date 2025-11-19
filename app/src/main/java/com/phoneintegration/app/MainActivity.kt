@@ -37,23 +37,35 @@ class MainActivity : ComponentActivity() {
     // Default SMS picker — SINGLE launcher
     // -------------------------------------------------------------
     private val defaultSmsRoleLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            android.util.Log.d("MainActivity", "=== Default SMS launcher callback ===")
+            android.util.Log.d("MainActivity", "Result code: ${result.resultCode}")
             val isDefault = DefaultSmsHelper.isDefaultSmsApp(this)
+            android.util.Log.d("MainActivity", "Is now default SMS app: $isDefault")
             viewModel.onDefaultSmsAppChanged(isDefault)
         }
 
     fun requestDefaultSmsAppViaRole() {
+        android.util.Log.d("MainActivity", "=== requestDefaultSmsAppViaRole() called ===")
+        android.util.Log.d("MainActivity", "Android version: ${Build.VERSION.SDK_INT}")
+
         val intent =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                android.util.Log.d("MainActivity", "Using RoleManager (Android 10+)")
                 val rm = getSystemService(RoleManager::class.java)
+                val isRoleAvailable = rm.isRoleAvailable(RoleManager.ROLE_SMS)
+                android.util.Log.d("MainActivity", "SMS Role available: $isRoleAvailable")
                 rm.createRequestRoleIntent(RoleManager.ROLE_SMS)
             } else {
+                android.util.Log.d("MainActivity", "Using legacy ACTION_CHANGE_DEFAULT")
                 Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
                     putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
                 }
             }
 
+        android.util.Log.d("MainActivity", "Launching intent: $intent")
         defaultSmsRoleLauncher.launch(intent)
+        android.util.Log.d("MainActivity", "Intent launched successfully")
     }
 
     // -------------------------------------------------------------

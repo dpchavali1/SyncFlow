@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
+    <!-- Required for MMS (internet connectivity to MMSC gateway) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
     <!-- MMS support -->
     <uses-permission android:name="android.permission.RECEIVE_MMS" />
@@ -77,6 +81,7 @@
         <!-- REQUIRED #2: BroadcastReceiver for SMS_DELIVER -->
         <receiver
             android:name=".SmsReceiver"
+            android:permission="android.permission.BROADCAST_SMS"
             android:exported="true">
 
             <!-- Required for ALL SMS apps (even if not default) -->
@@ -97,11 +102,29 @@
         <!-- REQUIRED #3: BroadcastReceiver for WAP_PUSH_DELIVER (MMS) -->
         <receiver
             android:name=".MmsReceiver"
+            android:permission="android.permission.BROADCAST_WAP_PUSH"
             android:exported="true">
+
+            <!-- Required for ALL SMS apps (even if not default) -->
             <intent-filter>
                 <action android:name="android.provider.Telephony.WAP_PUSH_RECEIVED" />
                 <category android:name="android.intent.category.DEFAULT"/>
                 <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+
+            <!-- Required for default SMS app -->
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".mms.MmsSentReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="MMS_SENT" />
             </intent-filter>
         </receiver>
 

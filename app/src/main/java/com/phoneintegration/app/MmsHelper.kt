@@ -26,9 +26,20 @@ object MmsHelper {
         subject: String? = null
     ): Boolean {
         return try {
+            Log.d(TAG, "=== Starting MMS send ===")
+            Log.d(TAG, "To: $address")
+            Log.d(TAG, "Source URI: $sourceUri")
+
+            // Check if app is default SMS app
+            val isDefault = SmsPermissions.isDefaultSmsApp(ctx)
+            Log.d(TAG, "Is default SMS app: $isDefault")
+            if (!isDefault) {
+                Log.w(TAG, "⚠ WARNING: App is NOT set as default SMS app. MMS may fail!")
+            }
 
             // 1. Copy the picked file into app cache (required by carrier)
             val file = copyUriToCache(ctx, sourceUri)
+            Log.d(TAG, "File copied to cache: ${file.absolutePath} (${file.length()} bytes)")
 
             // 2. Convert to content:// URI through FileProvider
             val contentUri = FileProvider.getUriForFile(
@@ -36,17 +47,24 @@ object MmsHelper {
                 ctx.packageName + ".provider",
                 file
             )
+            Log.d(TAG, "FileProvider URI: $contentUri")
 
-            Log.d(TAG, "MMS sending file: $contentUri")
+            // 3. Grant read permission to system for MMS access
+            ctx.grantUriPermission(
+                "com.android.mms",
+                contentUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+            Log.d(TAG, "URI permissions granted to com.android.mms")
 
             val smsManager = SmsManager.getDefault()
 
-            // 3. Optional overrides
+            // 4. Optional overrides
             val configOverrides = Bundle().apply {
                 putString(SmsManager.MMS_CONFIG_HTTP_PARAMS, "")
             }
 
-            // 4. Callback for success/failure
+            // 5. Callback for success/failure
             val sentPI = PendingIntent.getBroadcast(
                 ctx, 0,
                 Intent("MMS_SENT").setClass(ctx, com.phoneintegration.app.mms.MmsSentReceiver::class.java),
@@ -59,6 +77,7 @@ object MmsHelper {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
+            Log.d(TAG, "Calling sendMultimediaMessage()...")
             smsManager.sendMultimediaMessage(
                 ctx,
                 contentUri,
@@ -67,12 +86,12 @@ object MmsHelper {
                 sentPI
             )
 
-            Log.d(TAG, "sendMultimediaMessage() triggered")
-
+            Log.d(TAG, "✓ sendMultimediaMessage() call completed")
             true
 
         } catch (e: Exception) {
-            Log.e(TAG, "MMS SEND FAILED", e)
+            Log.e(TAG, "✗ MMS SEND FAILED - Exception: ${e.message}", e)
+            e.printStackTrace()
             false
         }
     }

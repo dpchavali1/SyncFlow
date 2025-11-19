@@ -87,6 +87,8 @@ fun SettingsScreen(
                         Button(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
+                                android.util.Log.d("SettingsScreen", "Set as Default button clicked")
+                                android.util.Log.d("SettingsScreen", "Activity: $activity")
                                 activity?.requestDefaultSmsAppViaRole()
                             }
                         ) {

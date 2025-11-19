@@ -13,8 +13,8 @@ android {
         applicationId = "com.phoneintegration.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 999  // CHANGED TO FORCE NEW INSTALL
+        versionName = "999.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
