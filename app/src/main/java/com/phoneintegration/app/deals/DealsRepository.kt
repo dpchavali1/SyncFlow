@@ -4,9 +4,10 @@ import android.content.Context
 import com.phoneintegration.app.deals.cloud.CloudDealsService
 import com.phoneintegration.app.deals.model.Deal
 import com.phoneintegration.app.deals.local.LocalDealsLoader
+import com.phoneintegration.app.deals.storage.DealCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import com.phoneintegration.app.deals.storage.DealCache
+
 class DealsRepository(private val context: Context) {
 
     private val cloud = CloudDealsService()
@@ -16,23 +17,50 @@ class DealsRepository(private val context: Context) {
     private val githubUrl =
         "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals.json"
 
-    suspend fun getDeals(): List<Deal> = withContext(Dispatchers.IO) {
+    // ---------------------------------------------------------
+    // LOAD DEALS (Cloud ➜ Cache ➜ Local fallback)
+    // ---------------------------------------------------------
+    suspend fun getDeals(forceRefresh: Boolean = false): List<Deal> = withContext(Dispatchers.IO) {
 
-        // 1) Try cloud with 3-second timeout
+        if (!forceRefresh) {
+            // 1) Use cache first
+            val cached = cache.loadDeals()
+            if (cached.isNotEmpty()) return@withContext cached
+        }
+
+        // 2) Try cloud fetch
         val cloudDeals = cloud.loadFromUrl(githubUrl)
         if (cloudDeals.isNotEmpty()) {
             cache.saveDeals(cloudDeals)
             return@withContext cloudDeals
         }
 
-        // 2) Load cached deals (fast!)
-        val cached = cache.loadDeals()
-        if (cached.isNotEmpty()) {
-            return@withContext cached
-        }
-
-        // 3) Use local assets (always works)
+        // 3) Local fallback
         return@withContext local.loadFromAssets()
     }
-}
 
+    // ---------------------------------------------------------
+    // REFRESH FROM CLOUD
+    // ---------------------------------------------------------
+    suspend fun refreshFromCloud(): Boolean = withContext(Dispatchers.IO) {
+        val fresh = cloud.loadFromUrl(githubUrl)
+        return@withContext if (fresh.isNotEmpty()) {
+            cache.saveDeals(fresh)
+            true
+        } else {
+            false
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Wrapper used by SmsViewModel.refreshDeals()
+    // ---------------------------------------------------------
+    suspend fun refreshDeals(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val newDeals = getDeals(forceRefresh = true)
+            newDeals.isNotEmpty()
+        } catch (e: Exception) {
+            false
+        }
+    }
+}

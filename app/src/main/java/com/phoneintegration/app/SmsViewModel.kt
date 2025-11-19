@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import android.net.Uri
 import kotlinx.coroutines.delay
 import android.util.Log
+import com.phoneintegration.app.deals.DealsRepository
 
 class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -315,6 +316,17 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             val uri = sms.mmsAttachments.firstOrNull()?.filePath ?: return@launch
 
             sendMms(sms.address, Uri.parse(uri))
+        }
+    }
+
+    fun refreshDeals(onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val ok = DealsRepository(getApplication()).refreshFromCloud()
+            if (ok) {
+                // Force reload conversations, including SyncFlow Deals
+                loadConversations()
+            }
+            onDone(ok)
         }
     }
 }

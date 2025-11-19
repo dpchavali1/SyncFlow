@@ -14,7 +14,8 @@ data class CloudDealEntity(
     val image: String,
     val price: String,
     val url: String,
-    val category: String = "Tech"
+    val category: String = "Tech",
+    val timestamp: Long = 0
 )
 
 @Serializable

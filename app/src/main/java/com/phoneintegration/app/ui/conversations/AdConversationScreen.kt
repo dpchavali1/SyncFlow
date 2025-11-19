@@ -15,7 +15,9 @@ import com.phoneintegration.app.deals.model.Deal
 import com.phoneintegration.app.deals.DealsRepository
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -27,10 +29,15 @@ fun AdConversationScreen(
 
     var deals by remember { mutableStateOf<List<Deal>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
+    var refreshing by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf("All") }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    // Load initial deals
     LaunchedEffect(Unit) {
-        deals = repo.getDeals()
+        deals = repo.getDeals().sortedByDescending { it.timestamp }
         loading = false
     }
 
@@ -44,6 +51,41 @@ fun AdConversationScreen(
                     }
                 }
             )
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = {
+                    scope.launch {
+                        refreshing = true
+
+                        // 🔥 FIX: use refreshFromCloud()
+                        val result = repo.refreshFromCloud()
+
+                        deals = repo.getDeals()
+                            .sortedByDescending { it.timestamp }
+
+                        refreshing = false
+
+                        if (result) {
+                            snackbarHostState.showSnackbar("Deals updated ✓")
+                        } else {
+                            snackbarHostState.showSnackbar("Failed to refresh deals")
+                        }
+                    }
+                }
+            ) {
+                if (refreshing) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(26.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh Deals")
+                }
+            }
         }
     ) { padding ->
 
@@ -59,9 +101,9 @@ fun AdConversationScreen(
                 onSelected = { selectedCategory = it }
             )
 
-            val filtered = deals.filter {
-                selectedCategory == "All" || it.category == selectedCategory
-            }
+            val filtered = deals
+                .filter { selectedCategory == "All" || it.category == selectedCategory }
+                .sortedByDescending { it.timestamp }
 
             if (loading) {
                 LazyColumn {
@@ -70,8 +112,6 @@ fun AdConversationScreen(
                     }
                 }
             } else {
-                val context = LocalContext.current   // ✔ allowed at top level
-
                 LazyColumn {
                     items(filtered.size) { index ->
                         val deal = filtered[index]
@@ -79,14 +119,13 @@ fun AdConversationScreen(
                         DealCard(
                             deal = deal,
                             onClick = {
-                                val url = "${deal.url}?tag=syncflow-20"
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                context.startActivity(intent)   // ✔ use context inside lambda
+                                // ❗ FIX: URL already has affiliate tag
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(deal.url))
+                                context.startActivity(intent)
                             }
                         )
                     }
                 }
-
             }
         }
     }

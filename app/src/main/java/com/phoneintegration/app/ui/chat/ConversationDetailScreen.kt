@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,6 +33,7 @@ import com.phoneintegration.app.SmsViewModel
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +55,9 @@ fun ConversationDetailScreen(
     var input by remember { mutableStateOf("") }
     var selectedMessage by remember { mutableStateOf<SmsMessage?>(null) }
     var showActions by remember { mutableStateOf(false) }
+
+    // FAB only for SyncFlow Deals fake conversation
+    val isDealsConversation = address == "syncflow_ads"
 
     // Attachment state
     var showAttachmentSheet by remember { mutableStateOf(false) }
@@ -105,6 +110,14 @@ fun ConversationDetailScreen(
                 }
             )
         },
+
+        // ⭐ FAB only for SyncFlow Deals conversation
+        floatingActionButton = {
+            if (isDealsConversation) {
+                DealsRefreshFab(viewModel)
+            }
+        },
+
         bottomBar = {
             Column(
                 Modifier
@@ -149,8 +162,7 @@ fun ConversationDetailScreen(
                                 if (input.isNotBlank()) {
                                     viewModel.sendSms(address, input) { ok ->
                                         if (ok) input = ""
-                                        else Toast.makeText(context, "Failed", Toast.LENGTH_SHORT)
-                                            .show()
+                                        else Toast.makeText(context, "Failed", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
@@ -298,6 +310,47 @@ fun ConversationDetailScreen(
                     }
                 }
             )
+        }
+    }
+}
+
+
+/* -------------------------------------------------------------
+   ⭐ Floating Action Button – SyncFlow Deals Pull FAB
+------------------------------------------------------------- */
+@Composable
+fun DealsRefreshFab(viewModel: SmsViewModel) {
+    val context = LocalContext.current
+
+    FloatingActionButton(
+        onClick = {
+            viewModel.refreshDeals { ok ->
+                Toast.makeText(
+                    context,
+                    if (ok) "Deals updated!" else "Failed to refresh",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        shape = RoundedCornerShape(20.dp),
+        elevation = FloatingActionButtonDefaults.elevation(
+            defaultElevation = 8.dp,
+            pressedElevation = 12.dp
+        )
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        ) {
+            Icon(
+                Icons.Default.Refresh,
+                contentDescription = "Refresh Deals",
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Pull Deals")
         }
     }
 }
