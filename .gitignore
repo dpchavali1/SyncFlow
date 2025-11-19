@@ -7,9 +7,30 @@
 /.idea/workspace.xml
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
+/.idea/.name
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+
+# Claude Code settings
+.claude/settings.local.json
+
+# Android Studio
+.idea/
+
+# Gradle
+.gradle/
+build/
+
+# Local configuration
+local.properties
+
+# Log Files
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
