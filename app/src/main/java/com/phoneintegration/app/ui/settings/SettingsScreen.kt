@@ -31,7 +31,8 @@ fun SettingsScreen(
     onNavigateToPrivacy: () -> Unit,
     onNavigateToMessages: () -> Unit,
     onNavigateToTemplates: () -> Unit,
-    onNavigateToBackup: () -> Unit
+    onNavigateToBackup: () -> Unit,
+    onNavigateToDesktop: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
@@ -162,6 +163,17 @@ fun SettingsScreen(
                 title = "Blocked Numbers",
                 subtitle = "Manage blocked numbers",
                 onClick = { /* TODO */ }
+            )
+
+            Divider(Modifier.padding(vertical = 8.dp))
+
+            SettingsSection("Desktop Integration")
+
+            SettingsItem(
+                icon = Icons.Filled.Computer,
+                title = "Desktop Sync",
+                subtitle = "Use SyncFlow on MacBook or PC",
+                onClick = onNavigateToDesktop
             )
 
             Divider(Modifier.padding(vertical = 8.dp))

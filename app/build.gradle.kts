@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.0"
     id("org.jetbrains.kotlin.plugin.serialization") version "1.9.23"
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -102,6 +103,19 @@ dependencies {
 
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
     implementation("io.coil-kt:coil-compose:2.4.0")
+
+    // ──────────────────────────────────────────────
+    // FIREBASE - Desktop Integration
+    // ──────────────────────────────────────────────
+    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
+    implementation("com.google.firebase:firebase-database-ktx")
+    implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-storage-ktx")
+    implementation("com.google.firebase:firebase-messaging-ktx")
+
+    // QR Code generation for pairing
+    implementation("com.google.zxing:core:3.5.2")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")

@@ -12,6 +12,7 @@ import com.phoneintegration.app.ui.stats.MessageStatsScreen
 import com.phoneintegration.app.ui.settings.*
 import com.phoneintegration.app.ui.splash.SplashScreen
 import com.phoneintegration.app.ui.conversations.AdConversationScreen
+import com.phoneintegration.app.ui.desktop.DesktopIntegrationScreen
 
 
 @Composable
@@ -79,7 +80,8 @@ fun MainNavigation(
                     onNavigateToPrivacy = { navController.navigate("settings/privacy") },
                     onNavigateToMessages = { navController.navigate("settings/messages") },
                     onNavigateToTemplates = { navController.navigate("settings/templates") },
-                    onNavigateToBackup = { navController.navigate("settings/backup") }
+                    onNavigateToBackup = { navController.navigate("settings/backup") },
+                    onNavigateToDesktop = { navController.navigate("settings/desktop") }
                 )
             }
             
@@ -127,6 +129,12 @@ fun MainNavigation(
             
             composable("settings/backup") {
                 BackupScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable("settings/desktop") {
+                DesktopIntegrationScreen(
                     onBack = { navController.popBackStack() }
                 )
             }
