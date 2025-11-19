@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(./gradlew clean:*)",
+      "Bash(./gradlew assembleDebug:*)",
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)"
     ],
     "deny": [],
     "ask": []
