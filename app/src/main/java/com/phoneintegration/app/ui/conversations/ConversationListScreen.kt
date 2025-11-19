@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -13,6 +15,7 @@ import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.CardGiftcard
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -24,6 +27,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
 import com.phoneintegration.app.SmsViewModel
 import com.phoneintegration.app.ConversationInfo
 import coil.compose.AsyncImage
@@ -250,64 +254,89 @@ fun ConversationListItem(
     info: ConversationInfo,
     onOpen: () -> Unit
 ) {
+    val context = LocalContext.current
+
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onOpen() }
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable { onOpen() }
                 .padding(14.dp),
-            horizontalArrangement = Arrangement.Start,
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                // -------------------------------
+                // CONTACT PHOTO
+                // -------------------------------
+                if (info.photoUri != null) {
+                    AsyncImage(
+                        model = info.photoUri,
+                        contentDescription = "Contact photo",
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                    )
+                } else {
+                    // Fallback circle with first letter
+                    val label = (info.contactName ?: info.address).firstOrNull()?.uppercase() ?: "?"
 
-            // -------------------------------
-            // CONTACT PHOTO (OPTION A)
-            // -------------------------------
-            if (info.photoUri != null) {
-                AsyncImage(
-                    model = info.photoUri,
-                    contentDescription = "Contact photo",
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                )
-            } else {
-                // Fallback circle with first letter
-                val label = (info.contactName ?: info.address).firstOrNull()?.uppercase() ?: "?"
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                }
 
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
+                Spacer(modifier = Modifier.width(12.dp))
+
+                // -------------------------------
+                // NAME + LAST MESSAGE
+                // -------------------------------
+                Column(
+                    modifier = Modifier.weight(1f)
                 ) {
                     Text(
-                        text = label,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        text = info.contactName ?: info.address,
                         style = MaterialTheme.typography.titleMedium
+                    )
+
+                    Text(
+                        text = info.lastMessage,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
-
             // -------------------------------
-            // NAME + LAST MESSAGE
+            // CALL BUTTON
             // -------------------------------
-            Column {
-                Text(
-                    text = info.contactName ?: info.address,
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                Text(
-                    text = info.lastMessage,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1
+            IconButton(
+                onClick = {
+                    val intent = Intent(Intent.ACTION_CALL).apply {
+                        data = Uri.parse("tel:${info.address}")
+                    }
+                    context.startActivity(intent)
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Phone,
+                    contentDescription = "Call",
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
         }
