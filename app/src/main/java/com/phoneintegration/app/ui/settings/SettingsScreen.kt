@@ -166,22 +166,6 @@ fun SettingsScreen(
 
             Divider(Modifier.padding(vertical = 8.dp))
 
-            SettingsSection("Desktop Integration")
-
-            SettingsItem(
-                icon = Icons.Filled.Computer,
-                title = "Messages for Web",
-                subtitle = "Use messages on your computer",
-                onClick = {
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        data = Uri.parse("https://messages.google.com/web")
-                    }
-                    context.startActivity(intent)
-                }
-            )
-
-            Divider(Modifier.padding(vertical = 8.dp))
-
             SettingsSection("About")
 
             SettingsItem(
