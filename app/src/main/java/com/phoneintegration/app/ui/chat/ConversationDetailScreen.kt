@@ -8,6 +8,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import android.util.Log
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.phoneintegration.app.SmsReceiver
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -43,7 +49,11 @@ fun ConversationDetailScreen(
     address: String,
     contactName: String,
     viewModel: SmsViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    threadId: Long? = null,  // Optional thread ID for direct loading (used for groups)
+    groupMembers: List<String>? = null,  // Optional list of group member names
+    groupId: Long? = null,  // Optional group ID for deletion
+    onDeleteGroup: ((Long) -> Unit)? = null  // Callback for group deletion
 ) {
     val context = LocalContext.current
     val messages by viewModel.conversationMessages.collectAsState()
@@ -90,8 +100,14 @@ fun ConversationDetailScreen(
     }
 
     // First time load
-    LaunchedEffect(address) {
-        viewModel.loadConversation(address)
+    LaunchedEffect(address, threadId) {
+        if (threadId != null) {
+            // Load by thread ID directly (for groups)
+            viewModel.loadConversationByThreadId(threadId, contactName)
+        } else {
+            // Load by address (for regular conversations)
+            viewModel.loadConversation(address)
+        }
     }
 
     // Scroll to bottom on new messages
@@ -101,18 +117,98 @@ fun ConversationDetailScreen(
         }
     }
 
+    // Listen for incoming SMS/MMS broadcasts to refresh this conversation
+    DisposableEffect(address, threadId) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                val receivedAddress = intent?.getStringExtra(SmsReceiver.EXTRA_ADDRESS)
+                Log.d("ConversationDetailScreen", "SMS/MMS received from $receivedAddress - current address: $address")
+
+                // Reload conversation
+                // For MMS, we don't have address info, so always reload
+                // For SMS, check if it matches current conversation
+                if (intent?.action == "com.phoneintegration.app.MMS_RECEIVED" ||
+                    receivedAddress == address) {
+
+                    if (threadId != null) {
+                        viewModel.loadConversationByThreadId(threadId, contactName)
+                    } else {
+                        viewModel.loadConversation(address)
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(SmsReceiver.SMS_RECEIVED_ACTION)
+            addAction("com.phoneintegration.app.MMS_RECEIVED")
+        }
+        LocalBroadcastManager.getInstance(context).registerReceiver(receiver, filter)
+
+        onDispose {
+            LocalBroadcastManager.getInstance(context).unregisterReceiver(receiver)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(contactName) },
+                title = {
+                    Column {
+                        Text(contactName)
+                        // Show group members if this is a group
+                        if (!groupMembers.isNullOrEmpty()) {
+                            Text(
+                                text = groupMembers.joinToString(", "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
                     }
                 },
                 actions = {
-                    // Don't show call button for SyncFlow Deals conversation
-                    if (!isDealsConversation) {
+                    // Show delete button for groups
+                    if (groupId != null && onDeleteGroup != null) {
+                        var showDeleteDialog by remember { mutableStateOf(false) }
+
+                        IconButton(onClick = { showDeleteDialog = true }) {
+                            Icon(
+                                painter = painterResource(id = android.R.drawable.ic_menu_delete),
+                                contentDescription = "Delete Group",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+
+                        if (showDeleteDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showDeleteDialog = false },
+                                title = { Text("Delete Group") },
+                                text = { Text("Are you sure you want to delete this group? This will only remove the group from your list, not delete the messages.") },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        showDeleteDialog = false
+                                        onDeleteGroup(groupId)
+                                    }) {
+                                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showDeleteDialog = false }) {
+                                        Text("Cancel")
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    // Don't show call button for SyncFlow Deals conversation or groups
+                    if (!isDealsConversation && groupMembers.isNullOrEmpty()) {
                         IconButton(
                             onClick = {
                                 val intent = Intent(Intent.ACTION_CALL).apply {
@@ -181,9 +277,12 @@ fun ConversationDetailScreen(
                         keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                             onSend = {
                                 if (input.isNotBlank()) {
-                                    viewModel.sendSms(address, input) { ok ->
-                                        if (ok) input = ""
-                                        else Toast.makeText(context, "Failed", Toast.LENGTH_SHORT).show()
+                                    val messageToSend = input
+                                    input = "" // Clear immediately to prevent spam
+                                    viewModel.sendSms(address, messageToSend) { ok ->
+                                        if (!ok) {
+                                            Toast.makeText(context, "Failed to send", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             }
@@ -201,9 +300,12 @@ fun ConversationDetailScreen(
                     // Send button
                     IconButton(onClick = {
                         if (input.isNotBlank()) {
-                            viewModel.sendSms(address, input) { ok ->
-                                if (ok) input = ""
-                                else Toast.makeText(context, "Failed", Toast.LENGTH_SHORT).show()
+                            val messageToSend = input
+                            input = "" // Clear immediately to prevent spam
+                            viewModel.sendSms(address, messageToSend) { ok ->
+                                if (!ok) {
+                                    Toast.makeText(context, "Failed to send", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
                     }) {

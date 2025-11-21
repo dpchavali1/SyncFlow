@@ -109,6 +109,43 @@ class SmsRepository(private val context: Context) {
         }
 
     // ---------------------------------------------------------------------
+    //  GET ALL MESSAGES (for AI Assistant)
+    // ---------------------------------------------------------------------
+    suspend fun getAllMessages(limit: Int = 500): List<SmsMessage> =
+        withContext(Dispatchers.IO) {
+            val list = mutableListOf<SmsMessage>()
+
+            val cursor = resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE
+                ),
+                null,
+                null,
+                "${Telephony.Sms.DATE} DESC LIMIT $limit"
+            ) ?: return@withContext emptyList()
+
+            cursor.use { c ->
+                while (c.moveToNext()) {
+                    val sms = SmsMessage(
+                        id = c.getLong(0),
+                        address = c.getString(1) ?: "",
+                        body = c.getString(2) ?: "",
+                        date = c.getLong(3),
+                        type = c.getInt(4)
+                    )
+                    list.add(sms)
+                }
+            }
+
+            list
+        }
+
+    // ---------------------------------------------------------------------
     //  LOAD CONVERSATIONS (SUPER FAST)
     // ---------------------------------------------------------------------
     suspend fun getConversations(): List<ConversationInfo> =
@@ -138,6 +175,12 @@ class SmsRepository(private val context: Context) {
 
                     val threadId = c.getLong(0)
                     val address = c.getString(1) ?: continue
+
+                    // Filter out RBM (Rich Business Messaging) spam
+                    if (address.contains("@rbm.goog", ignoreCase = true)) {
+                        continue
+                    }
+
                     val body = c.getString(2) ?: ""
                     val ts = c.getLong(3)
                     val isRead = c.getInt(4) == 1
@@ -183,24 +226,40 @@ class SmsRepository(private val context: Context) {
                     val subject = c.getString(3) ?: "(MMS)"
 
                     val timestamp = dateSec * 1000L
-                    val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
 
-                    val cachedName = contactCache[address] ?: address
+                    // Get ALL recipients to detect group conversations
+                    val allRecipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
+                    if (allRecipients.isEmpty()) continue
+
+                    // Filter out RBM spam
+                    if (allRecipients.any { it.contains("@rbm.goog", ignoreCase = true) }) {
+                        continue
+                    }
+
+                    val isGroup = allRecipients.size > 1
+                    val address = allRecipients.joinToString(", ")
+                    val contactNames = allRecipients.joinToString(", ") { addr ->
+                        contactCache[addr] ?: addr
+                    }
 
                     val existing = map[threadId]
                     if (existing == null) {
                         map[threadId] = ConversationInfo(
                             threadId = threadId,
                             address = address,
-                            contactName = cachedName,
+                            contactName = contactNames,
                             lastMessage = subject,
                             timestamp = timestamp,
-                            unreadCount = 0
+                            unreadCount = 0,
+                            isGroupConversation = isGroup,
+                            recipientCount = allRecipients.size
                         )
                     } else {
                         map[threadId] = existing.copy(
                             lastMessage = if (timestamp > existing.timestamp) subject else existing.lastMessage,
-                            timestamp = maxOf(timestamp, existing.timestamp)
+                            timestamp = maxOf(timestamp, existing.timestamp),
+                            isGroupConversation = isGroup || existing.isGroupConversation,
+                            recipientCount = maxOf(allRecipients.size, existing.recipientCount)
                         )
                     }
                 }
@@ -286,6 +345,7 @@ class SmsRepository(private val context: Context) {
     suspend fun getAllRecentMessages(limit: Int = 100): List<SmsMessage> =
         withContext(Dispatchers.IO) {
             val list = mutableListOf<SmsMessage>()
+            val uniqueAddresses = mutableSetOf<String>()
 
             val cursor = resolver.query(
                 Telephony.Sms.CONTENT_URI,
@@ -301,10 +361,11 @@ class SmsRepository(private val context: Context) {
                 "${Telephony.Sms.DATE} DESC LIMIT $limit"
             ) ?: return@withContext emptyList()
 
+            // First pass: collect messages and unique addresses
             cursor.use { c ->
                 while (c.moveToNext()) {
                     val address = c.getString(1) ?: continue
-                    val cachedName = contactCache[address] ?: address
+                    uniqueAddresses.add(address)
 
                     val sms = SmsMessage(
                         id = c.getLong(0),
@@ -312,7 +373,7 @@ class SmsRepository(private val context: Context) {
                         body = c.getString(2) ?: "",
                         date = c.getLong(3),
                         type = c.getInt(4),
-                        contactName = cachedName
+                        contactName = null // Will fill in next step
                     )
 
                     sms.category = MessageCategorizer.categorizeMessage(sms)
@@ -320,6 +381,18 @@ class SmsRepository(private val context: Context) {
 
                     list.add(sms)
                 }
+            }
+
+            // Second pass: batch lookup contact names for unique addresses
+            uniqueAddresses.forEach { address ->
+                if (!contactCache.containsKey(address)) {
+                    resolveContactName(address) // This caches it
+                }
+            }
+
+            // Third pass: apply contact names from cache
+            list.forEach { sms ->
+                sms.contactName = contactCache[sms.address]
             }
 
             list

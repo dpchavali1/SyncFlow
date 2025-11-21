@@ -1,47 +1,88 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { QrCode, Smartphone, Monitor, CheckCircle, AlertCircle } from 'lucide-react'
-import { pairDeviceWithToken } from '@/lib/firebase'
+import { QrCode, Smartphone, Monitor, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
-import QRScanner from './QRScanner'
+import { QRCodeSVG } from 'qrcode.react'
+import { generatePairingToken, listenForPairingCompletion, signInAnon, waitForAuth } from '@/lib/firebase'
 
 export default function PairingScreen() {
   const router = useRouter()
-  const { setUserId, setIsPairing } = useAppStore()
-  const [step, setStep] = useState<'intro' | 'scanning' | 'pairing' | 'success' | 'error'>('intro')
+  const { setUserId } = useAppStore()
+  const [step, setStep] = useState<'intro' | 'showing-qr' | 'pairing' | 'success' | 'error'>('intro')
   const [errorMessage, setErrorMessage] = useState('')
+  const [pairingToken, setPairingToken] = useState('')
   const [deviceName, setDeviceName] = useState('')
 
-  const handleScanComplete = async (token: string) => {
-    setStep('pairing')
+  // Initialize Firebase authentication on mount
+  useEffect(() => {
+    const initAuth = async () => {
+      console.log('🔥 Pre-authenticating Firebase in background...')
+      const currentUser = await waitForAuth()
+      if (!currentUser) {
+        try {
+          await signInAnon()
+          console.log('✅ Background authentication complete')
+        } catch (error) {
+          console.error('❌ Background authentication failed:', error)
+        }
+      } else {
+        console.log('✅ Already authenticated:', currentUser)
+      }
+    }
+    initAuth()
+  }, [])
 
+  const handleGenerateQR = async () => {
     try {
-      const name = deviceName || `Desktop - ${new Date().toLocaleDateString()}`
-      const result = await pairDeviceWithToken(token, name)
+      console.log('⏱️ Starting QR generation...')
+      setStep('showing-qr')
 
-      // Store user ID in localStorage
-      localStorage.setItem('syncflow_user_id', result.userId)
-      setUserId(result.userId)
+      // Wait for auth and sign in if needed
+      const currentUser = await waitForAuth()
+      if (!currentUser) {
+        console.log('⏱️ Not authenticated, signing in to Firebase...')
+        await signInAnon()
+        console.log('✅ Firebase sign-in complete')
+      } else {
+        console.log('✅ Already authenticated as:', currentUser)
+      }
 
-      setStep('success')
+      console.log('⏱️ Generating pairing token...')
+      const token = await generatePairingToken()
+      console.log('✅ Token generated:', token)
+      setPairingToken(token)
 
-      // Redirect to messages after 2 seconds
+      // Listen for pairing completion
+      const cleanup = listenForPairingCompletion(token, (userId) => {
+        if (userId) {
+          setStep('pairing')
+          // Store user ID
+          localStorage.setItem('syncflow_user_id', userId)
+          setUserId(userId)
+
+          setStep('success')
+
+          // Redirect to messages
+          setTimeout(() => {
+            router.push('/messages')
+          }, 2000)
+        }
+      })
+
+      // Cleanup listener after 5 minutes
       setTimeout(() => {
-        router.push('/messages')
-      }, 2000)
+        cleanup()
+        if (step === 'showing-qr') {
+          setErrorMessage('QR code expired. Please generate a new one.')
+          setStep('error')
+        }
+      }, 5 * 60 * 1000)
     } catch (error: any) {
       setStep('error')
-      setErrorMessage(error.message || 'Failed to pair device')
+      setErrorMessage(error.message || 'Failed to generate QR code')
     }
-  }
-
-  const handleStartScanning = () => {
-    if (!deviceName) {
-      setDeviceName(`Desktop - ${new Date().toLocaleDateString()}`)
-    }
-    setStep('scanning')
   }
 
   return (
@@ -67,7 +108,7 @@ export default function PairingScreen() {
                 Pair Your Phone
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                To get started, you'll need to scan a QR code from your phone's SyncFlow app.
+                To get started, scan the QR code with your phone's SyncFlow app.
               </p>
 
               <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-6 mb-6">
@@ -77,54 +118,75 @@ export default function PairingScreen() {
                 <ol className="text-left text-gray-700 dark:text-gray-300 space-y-2">
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">1.</span>
-                    <span>Open SyncFlow app on your phone</span>
+                    <span>Click "Generate QR Code" below</span>
                   </li>
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">2.</span>
-                    <span>Go to Settings → Desktop Integration</span>
+                    <span>Open SyncFlow app on your phone</span>
                   </li>
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">3.</span>
-                    <span>Tap "Pair New Device"</span>
+                    <span>Go to Settings → Desktop Integration</span>
                   </li>
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">4.</span>
-                    <span>Scan the QR code with your computer's camera</span>
+                    <span>Tap "Scan QR Code" and scan the code shown here</span>
                   </li>
                 </ol>
               </div>
 
-              <div className="mb-6">
-                <label className="block text-left text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Device Name (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={deviceName}
-                  onChange={(e) => setDeviceName(e.target.value)}
-                  placeholder={`Desktop - ${new Date().toLocaleDateString()}`}
-                  className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-
               <button
-                onClick={handleStartScanning}
+                onClick={handleGenerateQR}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center"
               >
                 <QrCode className="w-5 h-5 mr-2" />
-                Start Scanning
+                Generate QR Code
               </button>
             </div>
           )}
 
-          {step === 'scanning' && (
+          {step === 'showing-qr' && (
             <div className="text-center">
-              <QRScanner onScanComplete={handleScanComplete} />
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-4">
+                Scan this QR Code
+              </h2>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Open SyncFlow app on your phone and scan this code
+              </p>
+
+              {/* QR Code Display */}
+              <div className="bg-white p-6 rounded-xl mb-6 inline-block">
+                <QRCodeSVG
+                  value={pairingToken}
+                  size={256}
+                  level="H"
+                  includeMargin={true}
+                />
+              </div>
+
+              {/* Manual Code */}
+              <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 mb-6">
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                  Or enter this code manually:
+                </p>
+                <code className="text-lg font-mono text-gray-900 dark:text-white bg-white dark:bg-gray-800 px-4 py-2 rounded border border-gray-200 dark:border-gray-600 inline-block">
+                  {pairingToken}
+                </code>
+              </div>
+
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                This code will expire in 5 minutes
+              </p>
+
               <button
-                onClick={() => setStep('intro')}
-                className="mt-4 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                onClick={() => {
+                  setStep('intro')
+                  setPairingToken('')
+                }}
+                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white flex items-center justify-center mx-auto"
               >
-                Cancel
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Generate New Code
               </button>
             </div>
           )}

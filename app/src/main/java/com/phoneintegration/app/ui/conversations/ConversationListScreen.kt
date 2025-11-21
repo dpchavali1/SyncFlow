@@ -16,6 +16,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -30,7 +32,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalContext
 import com.phoneintegration.app.SmsViewModel
 import com.phoneintegration.app.ConversationInfo
+import com.phoneintegration.app.SmsReceiver
 import coil.compose.AsyncImage
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import android.util.Log
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,13 +46,36 @@ fun ConversationListScreen(
     viewModel: SmsViewModel,
     onOpen: (address: String, name: String) -> Unit,
     onOpenStats: () -> Unit = {},
-    onOpenSettings: () -> Unit = {}
+    onOpenSettings: () -> Unit = {},
+    onNewMessage: () -> Unit = {},
+    onOpenAI: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val conversations by viewModel.conversations.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     var query by remember { mutableStateOf(TextFieldValue("")) }
 
     LaunchedEffect(Unit) { viewModel.loadConversations() }
+
+    // Listen for incoming SMS/MMS broadcasts to refresh conversation list
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                Log.d("ConversationListScreen", "SMS/MMS received broadcast - refreshing conversations")
+                viewModel.loadConversations()
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(SmsReceiver.SMS_RECEIVED_ACTION)
+            addAction("com.phoneintegration.app.MMS_RECEIVED")
+        }
+        LocalBroadcastManager.getInstance(context).registerReceiver(receiver, filter)
+
+        onDispose {
+            LocalBroadcastManager.getInstance(context).unregisterReceiver(receiver)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -58,14 +89,41 @@ fun ConversationListScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onOpenStats,
-                containerColor = MaterialTheme.colorScheme.primaryContainer
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Analytics,
-                    contentDescription = "Statistics"
-                )
+                // AI Assistant FAB
+                SmallFloatingActionButton(
+                    onClick = onOpenAI,
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                ) {
+                    Text(
+                        text = "🧠",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+
+                // Statistics FAB
+                SmallFloatingActionButton(
+                    onClick = onOpenStats,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Analytics,
+                        contentDescription = "Statistics"
+                    )
+                }
+
+                // New Message FAB
+                FloatingActionButton(
+                    onClick = onNewMessage,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "New Message"
+                    )
+                }
             }
         }
     ) { padding ->
@@ -309,10 +367,32 @@ fun ConversationListItem(
                 Column(
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text(
-                        text = info.contactName ?: info.address,
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    // Name with group indicator
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = info.contactName ?: info.address,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        // Group conversation indicator
+                        if (info.isGroupConversation) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Icon(
+                                imageVector = Icons.Default.Groups,
+                                contentDescription = "Group conversation",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "(${info.recipientCount})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(start = 2.dp)
+                            )
+                        }
+                    }
 
                     Text(
                         text = info.lastMessage,

@@ -1,6 +1,10 @@
 package com.phoneintegration.app
 
 import android.app.Application
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
+import android.provider.Telephony
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.*
@@ -11,12 +15,61 @@ import android.net.Uri
 import kotlinx.coroutines.delay
 import android.util.Log
 import com.phoneintegration.app.deals.DealsRepository
+import com.phoneintegration.app.data.GroupRepository
+import com.phoneintegration.app.desktop.DesktopSyncService
 
 class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
     private var currentThreadId: Long? = null
 
     private val repo = SmsRepository(app.applicationContext)
+    private val groupRepository = GroupRepository(app.applicationContext)
+    private val syncService = DesktopSyncService(app.applicationContext)
+
+    // ContentObserver to detect SMS/MMS changes
+    private val smsObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            Log.d("SmsViewModel", "SMS database changed - reloading conversations")
+            viewModelScope.launch {
+                // Small delay to ensure SMS/MMS is fully written to database
+                delay(500)
+
+                Log.d("SmsViewModel", "Reloading conversations after database change")
+                // Reload conversation list
+                loadConversations()
+
+                // Reload current conversation if viewing one
+                currentThreadId?.let { threadId ->
+                    Log.d("SmsViewModel", "Reloading current conversation thread: $threadId")
+                    val firstPage = repo.getMessagesByThreadId(threadId, pageSize, 0)
+                    _conversationMessages.value = firstPage
+                    Log.d("SmsViewModel", "Reloaded ${firstPage.size} messages for thread $threadId")
+                }
+            }
+        }
+    }
+
+    init {
+        // Register ContentObserver to watch for SMS/MMS changes
+        app.contentResolver.registerContentObserver(
+            Telephony.Sms.CONTENT_URI,
+            true,
+            smsObserver
+        )
+        app.contentResolver.registerContentObserver(
+            Uri.parse("content://mms"),
+            true,
+            smsObserver
+        )
+        Log.d("SmsViewModel", "ContentObserver registered for SMS/MMS changes")
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // Unregister ContentObserver
+        getApplication<Application>().contentResolver.unregisterContentObserver(smsObserver)
+        Log.d("SmsViewModel", "ContentObserver unregistered")
+    }
 
     // Tracks whether SyncFlow is the default SMS app
     private val _isDefaultSmsApp = MutableStateFlow(false)
@@ -96,8 +149,62 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------
     fun loadConversations() {
         viewModelScope.launch {
+            Log.d("SmsViewModel", "=== loadConversations() started ===")
             _isLoading.value = true
-            val list = repo.getConversations()
+
+            // Fetch SMS conversations
+            val smsList = repo.getConversations()
+            Log.d("SmsViewModel", "Loaded ${smsList.size} SMS conversations from repository")
+
+            // Fetch groups from database
+            val groups = withContext(Dispatchers.IO) {
+                groupRepository.getAllGroupsWithMembers().first()
+            }
+
+            // Sync groups to Firebase in background
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    syncService.syncGroups(groups)
+                    Log.d("SmsViewModel", "Synced ${groups.size} groups to Firebase")
+                } catch (e: Exception) {
+                    Log.e("SmsViewModel", "Failed to sync groups to Firebase", e)
+                }
+            }
+
+            // Convert groups to ConversationInfo
+            val groupConversations = groups.map { groupWithMembers ->
+                val group = groupWithMembers.group
+                val members = groupWithMembers.members
+
+                ConversationInfo(
+                    threadId = group.threadId ?: -(group.id + 1000), // Negative ID for groups without thread
+                    address = members.joinToString(", ") { it.phoneNumber },
+                    contactName = group.name,
+                    lastMessage = if (group.threadId != null) {
+                        "Group conversation"  // Will be replaced by actual last message
+                    } else {
+                        "Tap to start chatting"
+                    },
+                    timestamp = group.lastMessageAt,
+                    unreadCount = 0,
+                    photoUri = null,
+                    isAdConversation = false,
+                    isGroupConversation = true,
+                    recipientCount = members.size,
+                    groupId = group.id
+                )
+            }
+
+            // Filter out SMS conversations that match saved groups (to avoid duplicates)
+            val groupThreadIds = groups.mapNotNull { it.group.threadId }.toSet()
+            val filteredSmsList = smsList.filterNot { smsConvo ->
+                groupThreadIds.contains(smsConvo.threadId)
+            }
+
+            // Combine filtered SMS and group conversations, sort by timestamp
+            val allConversations = (filteredSmsList + groupConversations)
+                .sortedByDescending { it.timestamp }
+
             // Insert Fake Ads Conversation
             val adsConversation = ConversationInfo(
                 threadId = -1L,
@@ -109,14 +216,20 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 photoUri = null,
                 isAdConversation = true
             )
-            _conversations.value = listOf(adsConversation) + list
+
+            _conversations.value = listOf(adsConversation) + allConversations
             _isLoading.value = false
 
-            // background name resolution
-            resolveContactNames(list)
-            // background photo resolution
-            resolveContactPhotos(list)
-            // Insert our fake Ads conversation at top
+            Log.d("SmsViewModel", "=== Conversations updated ===")
+            Log.d("SmsViewModel", "Total conversations in state: ${_conversations.value.size}")
+            _conversations.value.take(5).forEach { convo ->
+                Log.d("SmsViewModel", "  - ${convo.contactName}: ${convo.lastMessage.take(30)}...")
+            }
+
+            // background name resolution (only for SMS conversations)
+            resolveContactNames(smsList)
+            // background photo resolution (only for SMS conversations)
+            resolveContactPhotos(smsList)
         }
     }
 
@@ -160,6 +273,38 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 if (last.type == 1) {
                     _smartReplies.value = generateSmartReplies(last.body)
                 }
+            }
+        }
+    }
+
+    // Load conversation by thread ID directly (for groups)
+    fun loadConversationByThreadId(threadId: Long, displayName: String) {
+        viewModelScope.launch {
+            Log.d("SmsViewModel", "=== LOADING CONVERSATION BY THREAD ID ===")
+            Log.d("SmsViewModel", "Thread ID: $threadId")
+            Log.d("SmsViewModel", "Display Name: $displayName")
+
+            currentAddress = displayName
+            offset = 0
+            currentThreadId = threadId
+
+            val firstPage = repo.getMessagesByThreadId(threadId, pageSize, 0)
+
+            Log.d("SmsViewModel", "Loaded ${firstPage.size} messages for thread $threadId")
+            firstPage.forEach { msg ->
+                Log.d("SmsViewModel", "  - Message ${msg.id}: ${msg.body.take(50)}... (type=${msg.type}, date=${msg.date})")
+            }
+
+            _conversationMessages.value = firstPage
+            _hasMore.value = firstPage.size == pageSize
+
+            if (firstPage.isNotEmpty()) {
+                val last = firstPage.first()
+                if (last.type == 1) {
+                    _smartReplies.value = generateSmartReplies(last.body)
+                }
+            } else {
+                Log.d("SmsViewModel", "No messages found for thread ID $threadId")
             }
         }
     }

@@ -1,23 +1,21 @@
 package com.phoneintegration.app.ui.desktop
 
-import android.graphics.Bitmap
-import android.graphics.Color
-import androidx.compose.foundation.Image
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.desktop.PairedDevice
 import kotlinx.coroutines.launch
@@ -34,10 +32,39 @@ fun DesktopIntegrationScreen(
     val syncService = remember { DesktopSyncService(context) }
 
     var pairedDevices by remember { mutableStateOf<List<PairedDevice>>(emptyList()) }
-    var showPairingDialog by remember { mutableStateOf(false) }
-    var pairingToken by remember { mutableStateOf("") }
-    var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(false) }
+    var showManualInput by remember { mutableStateOf(false) }
+    var manualCode by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var successMessage by remember { mutableStateOf<String?>(null) }
+    var showSuccessDialog by remember { mutableStateOf(false) }
+    var isBackgroundSyncEnabled by remember { mutableStateOf(false) }
+
+    // Check if service is running
+    LaunchedEffect(Unit) {
+        isBackgroundSyncEnabled = isServiceRunning(context)
+    }
+
+    // QR Code Scanner Launcher
+    val scanLauncher = rememberLauncherForActivityResult(
+        contract = ScanContract()
+    ) { result ->
+        if (result.contents != null) {
+            val token = result.contents
+            scope.launch {
+                try {
+                    isLoading = true
+                    syncService.pairWithToken(token)
+                    pairedDevices = syncService.getPairedDevices()
+                    showSuccessDialog = true
+                    isLoading = false
+                } catch (e: Exception) {
+                    errorMessage = e.message ?: "Failed to pair device"
+                    isLoading = false
+                }
+            }
+        }
+    }
 
     // Load paired devices
     LaunchedEffect(Unit) {
@@ -90,25 +117,135 @@ fun DesktopIntegrationScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Send and receive SMS, make calls, and transfer files from your MacBook or PC",
+                            text = "Send and receive SMS from your MacBook or PC browser",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                         )
                         Spacer(modifier = Modifier.height(16.dp))
+
+                        // Scan QR Code Button
                         Button(
                             onClick = {
-                                scope.launch {
-                                    val token = syncService.generatePairingToken()
-                                    pairingToken = token
-                                    qrBitmap = generateQRCode(token)
-                                    showPairingDialog = true
-                                }
+                                val options = ScanOptions()
+                                options.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                options.setPrompt("Scan QR code from SyncFlow website")
+                                options.setBeepEnabled(true)
+                                options.setOrientationLocked(true)
+                                scanLauncher.launch(options)
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isLoading
                         ) {
-                            Icon(Icons.Default.QrCode, null)
+                            Icon(Icons.Default.QrCodeScanner, null)
                             Spacer(Modifier.width(8.dp))
-                            Text("Pair New Device")
+                            Text("Scan QR Code")
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Manual Code Entry Button
+                        OutlinedButton(
+                            onClick = { showManualInput = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isLoading
+                        ) {
+                            Icon(Icons.Default.Input, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Enter Code Manually")
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Sync Now Button
+                        if (pairedDevices.isNotEmpty()) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        isLoading = true
+                                        successMessage = null
+                                        errorMessage = null
+                                        try {
+                                            val smsRepository = com.phoneintegration.app.SmsRepository(context)
+                                            val messages = smsRepository.getAllRecentMessages(50)
+                                            syncService.syncMessages(messages)
+                                            successMessage = "Successfully synced ${messages.size} messages to desktop!"
+                                        } catch (e: Exception) {
+                                            errorMessage = "Sync failed: ${e.message}"
+                                        }
+                                        isLoading = false
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isLoading
+                            ) {
+                                Icon(Icons.Default.Sync, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Sync Messages to Desktop")
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Check for Outgoing Messages Button
+                            OutlinedButton(
+                                onClick = {
+                                    com.phoneintegration.app.desktop.OutgoingMessageWorker.checkNow(context)
+                                    successMessage = "Checking for messages from desktop..."
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isLoading
+                            ) {
+                                Icon(Icons.Default.Download, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Send Messages from Desktop")
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // Background Sync Toggle
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Background Sync",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        Text(
+                                            text = if (isBackgroundSyncEnabled) "Running" else "Stopped",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = isBackgroundSyncEnabled,
+                                        onCheckedChange = { enabled ->
+                                            if (enabled) {
+                                                com.phoneintegration.app.desktop.OutgoingMessageService.start(context)
+                                                successMessage = "Background sync started"
+                                            } else {
+                                                com.phoneintegration.app.desktop.OutgoingMessageService.stop(context)
+                                                successMessage = "Background sync stopped"
+                                            }
+                                            isBackgroundSyncEnabled = enabled
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isLoading) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
                         }
                     }
                 }
@@ -126,25 +263,107 @@ fun DesktopIntegrationScreen(
             item {
                 InstructionCard(
                     number = "1",
-                    title = "Open on your computer",
-                    description = "Visit syncflow.app on your MacBook or PC browser"
+                    title = "Open website",
+                    description = "Visit localhost:3000 or syncflow.app on your computer"
                 )
             }
 
             item {
                 InstructionCard(
                     number = "2",
-                    title = "Tap 'Pair New Device'",
-                    description = "Click the button above to generate a QR code"
+                    title = "Generate QR code",
+                    description = "Click 'Generate QR Code' on the website"
                 )
             }
 
             item {
                 InstructionCard(
                     number = "3",
-                    title = "Scan the QR code",
-                    description = "Use your computer's webcam or enter the code manually"
+                    title = "Scan with phone",
+                    description = "Tap 'Scan QR Code' above and scan the code from your screen"
                 )
+            }
+
+            // Success Message
+            successMessage?.let { success ->
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Sync Complete",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    success,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                            IconButton(onClick = { successMessage = null }) {
+                                Icon(Icons.Default.Close, "Dismiss")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Error Message
+            errorMessage?.let { error ->
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Error,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Error",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                            IconButton(onClick = { errorMessage = null }) {
+                                Icon(Icons.Default.Close, "Dismiss")
+                            }
+                        }
+                    }
+                }
             }
 
             // Paired Devices Section
@@ -158,7 +377,7 @@ fun DesktopIntegrationScreen(
                 )
             }
 
-            if (isLoading) {
+            if (isLoading && pairedDevices.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
@@ -200,45 +419,79 @@ fun DesktopIntegrationScreen(
         }
     }
 
-    // Pairing Dialog
-    if (showPairingDialog) {
+    // Manual Input Dialog
+    if (showManualInput) {
         AlertDialog(
-            onDismissRequest = { showPairingDialog = false },
-            title = { Text("Scan QR Code") },
+            onDismissRequest = { showManualInput = false },
+            title = { Text("Enter Pairing Code") },
             text = {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    qrBitmap?.let { bitmap ->
-                        Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = "QR Code",
-                            modifier = Modifier
-                                .size(250.dp)
-                                .padding(16.dp)
-                        )
-                    }
+                Column {
                     Text(
-                        text = "Scan this code on your computer",
+                        "Enter the pairing code shown on your computer screen:",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "Or enter code manually:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                    Text(
-                        text = pairingToken,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(4.dp)
+                    OutlinedTextField(
+                        value = manualCode,
+                        onValueChange = { manualCode = it },
+                        label = { Text("Pairing Code") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showPairingDialog = false }) {
-                    Text("Done")
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            try {
+                                isLoading = true
+                                syncService.pairWithToken(manualCode)
+                                pairedDevices = syncService.getPairedDevices()
+                                showManualInput = false
+                                manualCode = ""
+                                showSuccessDialog = true
+                                isLoading = false
+                            } catch (e: Exception) {
+                                errorMessage = e.message ?: "Failed to pair device"
+                                showManualInput = false
+                                isLoading = false
+                            }
+                        }
+                    },
+                    enabled = manualCode.isNotBlank() && !isLoading
+                ) {
+                    Text("Pair")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showManualInput = false
+                    manualCode = ""
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Success Dialog
+    if (showSuccessDialog) {
+        AlertDialog(
+            onDismissRequest = { showSuccessDialog = false },
+            icon = {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(48.dp)
+                )
+            },
+            title = { Text("Successfully Paired!") },
+            text = { Text("Your desktop is now connected. You can send and receive messages from your computer.") },
+            confirmButton = {
+                TextButton(onClick = { showSuccessDialog = false }) {
+                    Text("Got it")
                 }
             }
         )
@@ -332,19 +585,11 @@ fun PairedDeviceItem(
     }
 }
 
-/**
- * Generate QR code bitmap from text
- */
-fun generateQRCode(text: String, size: Int = 512): Bitmap {
-    val writer = QRCodeWriter()
-    val bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, size, size)
-    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
-
-    for (x in 0 until size) {
-        for (y in 0 until size) {
-            bitmap.setPixel(x, y, if (bitMatrix[x, y]) Color.BLACK else Color.WHITE)
-        }
+// Helper function to check if OutgoingMessageService is running
+private fun isServiceRunning(context: android.content.Context): Boolean {
+    val manager = context.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+    @Suppress("DEPRECATION")
+    return manager.getRunningServices(Integer.MAX_VALUE).any {
+        it.service.className == com.phoneintegration.app.desktop.OutgoingMessageService::class.java.name
     }
-
-    return bitmap
 }

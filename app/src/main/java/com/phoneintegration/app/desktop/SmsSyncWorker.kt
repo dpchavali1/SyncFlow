@@ -111,10 +111,11 @@ class OutgoingMessageWorker(
                 .build()
 
             val workRequest = PeriodicWorkRequestBuilder<OutgoingMessageWorker>(
-                repeatInterval = 15,
+                repeatInterval = 15, // Minimum allowed by Android
                 repeatIntervalTimeUnit = TimeUnit.MINUTES
             )
                 .setConstraints(constraints)
+                .setInitialDelay(0, TimeUnit.SECONDS) // Run immediately
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
@@ -123,7 +124,18 @@ class OutgoingMessageWorker(
                 workRequest
             )
 
-            Log.d(TAG, "Outgoing message worker scheduled")
+            Log.d(TAG, "Outgoing message worker scheduled (runs every 15 min)")
+        }
+
+        /**
+         * Trigger immediate check for outgoing messages
+         */
+        fun checkNow(context: Context) {
+            val workRequest = OneTimeWorkRequestBuilder<OutgoingMessageWorker>()
+                .build()
+
+            WorkManager.getInstance(context).enqueue(workRequest)
+            Log.d(TAG, "Immediate outgoing message check triggered")
         }
 
         fun cancel(context: Context) {
@@ -139,15 +151,37 @@ class OutgoingMessageWorker(
             val syncService = DesktopSyncService(applicationContext)
             val smsRepository = SmsRepository(applicationContext)
 
-            // Listen for messages to send
-            syncService.listenForOutgoingMessages().collect { messageData ->
-                val address = messageData["address"] as? String ?: return@collect
-                val body = messageData["body"] as? String ?: return@collect
+            // Get outgoing messages from Firebase
+            val outgoingMessages = syncService.getOutgoingMessages()
 
-                Log.d(TAG, "Sending SMS to $address: $body")
+            if (outgoingMessages.isEmpty()) {
+                Log.d(TAG, "No outgoing messages to process")
+                return@withContext Result.success()
+            }
 
-                // Send SMS
-                smsRepository.sendSms(address, body)
+            Log.d(TAG, "Found ${outgoingMessages.size} outgoing messages")
+
+            // Process each message
+            outgoingMessages.forEach { (messageId, messageData) ->
+                try {
+                    val address = messageData["address"] as? String ?: return@forEach
+                    val body = messageData["body"] as? String ?: return@forEach
+
+                    Log.d(TAG, "Sending SMS to $address: $body")
+
+                    // Send SMS
+                    smsRepository.sendSms(address, body)
+
+                    // Write sent message to messages collection
+                    syncService.writeSentMessage(messageId, address, body)
+
+                    // Delete from outgoing_messages
+                    syncService.deleteOutgoingMessage(messageId)
+
+                    Log.d(TAG, "Message sent and synced successfully")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error sending message $messageId", e)
+                }
             }
 
             Result.success()

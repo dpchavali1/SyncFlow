@@ -80,11 +80,15 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.READ_CONTACTS,
         Manifest.permission.WRITE_CONTACTS,
         Manifest.permission.READ_PHONE_STATE,
-        Manifest.permission.CALL_PHONE
+        Manifest.permission.CALL_PHONE,
+        Manifest.permission.READ_CALL_LOG
     ).apply {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             add(Manifest.permission.POST_NOTIFICATIONS)
             add(Manifest.permission.READ_MEDIA_IMAGES)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            add(Manifest.permission.ANSWER_PHONE_CALLS)
         }
     }.toTypedArray()
 
@@ -111,6 +115,14 @@ class MainActivity : ComponentActivity() {
             requestAllPermissions()
 
         MobileAds.initialize(this)
+
+        // Start background workers for desktop sync
+        com.phoneintegration.app.desktop.SmsSyncWorker.schedule(this)
+
+        // Note: Call monitoring service removed - WebRTC features have been removed
+        // Note: Desktop sync service is now controlled from Desktop Integration settings
+        // Users can enable/disable it manually instead of running automatically
+        // com.phoneintegration.app.desktop.OutgoingMessageService.start(this)
 
         setContent {
             val systemInDarkTheme = isSystemInDarkTheme()
