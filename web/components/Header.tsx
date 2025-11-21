@@ -1,7 +1,7 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { Smartphone, LogOut, Settings, Menu, Phone } from 'lucide-react'
+import { Smartphone, LogOut, Settings, Menu } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 
 export default function Header() {
@@ -32,14 +32,6 @@ export default function Header() {
 
         {/* Right: Actions */}
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => router.push('/calls')}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
-            title="Calls"
-          >
-            <Phone className="w-5 h-5" />
-          </button>
-
           <button
             onClick={() => router.push('/settings')}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"

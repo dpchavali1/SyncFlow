@@ -94,6 +94,10 @@ class SmsReceiver : BroadcastReceiver() {
             LocalBroadcastManager.getInstance(context).sendBroadcast(broadcast)
 
             // Immediately sync this message to Firebase for desktop
+            // Use WorkManager for guaranteed execution even if app is in background
+            com.phoneintegration.app.desktop.SmsSyncWorker.syncNow(context)
+
+            // Also try immediate sync in coroutine (faster if app is active)
             CoroutineScope(Dispatchers.IO).launch {
                 try {
                     val smsRepository = SmsRepository(context)
@@ -103,10 +107,10 @@ class SmsReceiver : BroadcastReceiver() {
                     val recentMessages = smsRepository.getAllRecentMessages(1)
                     if (recentMessages.isNotEmpty()) {
                         syncService.syncMessage(recentMessages[0])
-                        Log.d("SMS_RECEIVER", "Message synced to Firebase for desktop")
+                        Log.d("SMS_RECEIVER", "✅ Message synced to Firebase for desktop immediately")
                     }
                 } catch (e: Exception) {
-                    Log.e("SMS_RECEIVER", "Error syncing message to Firebase", e)
+                    Log.e("SMS_RECEIVER", "❌ Error syncing message to Firebase", e)
                 }
             }
         }

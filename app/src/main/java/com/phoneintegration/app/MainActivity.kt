@@ -122,8 +122,6 @@ class MainActivity : ComponentActivity() {
         // Note: Call monitoring service removed - WebRTC features have been removed
         // Note: Desktop sync service is now controlled from Desktop Integration settings
         // Users can enable/disable it manually instead of running automatically
-        // com.phoneintegration.app.desktop.OutgoingMessageService.start(this)
-
         setContent {
             val systemInDarkTheme = isSystemInDarkTheme()
             val isDarkTheme by remember {

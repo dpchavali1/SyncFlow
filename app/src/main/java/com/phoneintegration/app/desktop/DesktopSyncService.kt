@@ -288,25 +288,26 @@ class DesktopSyncService(private val context: Context) {
     suspend fun generatePairingToken(): String {
         val userId = getCurrentUserId()
         val timestamp = System.currentTimeMillis()
-        val randomToken = (0..999999).random().toString().padStart(6, '0')
 
-        val pairingToken = "$userId:$timestamp:$randomToken"
+        // Use a simple, short token since the macOS app asks the user to paste it
+        val token = (0..999999).random().toString().padStart(6, '0')
 
-        // Store pending pairing in Firebase
+        // Store pending pairing in Firebase with enough context for the Mac to reuse this userId
         val pairingRef = database.reference
             .child("pending_pairings")
-            .child(randomToken)
+            .child(token)
 
         val pairingData = mapOf(
             "userId" to userId,
-            "token" to pairingToken,
+            "platform" to "macos",
+            "token" to token,
             "createdAt" to ServerValue.TIMESTAMP,
             "expiresAt" to timestamp + (5 * 60 * 1000) // 5 minutes
         )
 
         pairingRef.setValue(pairingData).await()
 
-        return pairingToken
+        return token
     }
 
     /**

@@ -1,21 +1,24 @@
 package com.phoneintegration.app.ui.desktop
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.journeyapps.barcodescanner.BarcodeEncoder
+import com.google.zxing.BarcodeFormat
 import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.desktop.PairedDevice
 import kotlinx.coroutines.launch
@@ -39,6 +42,10 @@ fun DesktopIntegrationScreen(
     var successMessage by remember { mutableStateOf<String?>(null) }
     var showSuccessDialog by remember { mutableStateOf(false) }
     var isBackgroundSyncEnabled by remember { mutableStateOf(false) }
+    var pairingToken by remember { mutableStateOf<String?>(null) }
+    var pairingTokenError by remember { mutableStateOf<String?>(null) }
+    var showSyncAllDialog by remember { mutableStateOf(false) }
+    var syncProgress by remember { mutableStateOf<String?>(null) }
 
     // Check if service is running
     LaunchedEffect(Unit) {
@@ -123,6 +130,29 @@ fun DesktopIntegrationScreen(
                         )
                         Spacer(modifier = Modifier.height(16.dp))
 
+                        // Pair macOS app (shows a code + QR for the Mac app to use)
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    isLoading = true
+                                    pairingTokenError = null
+                                    try {
+                                        pairingToken = syncService.generatePairingToken()
+                                        successMessage = "Pairing code generated. Enter it in the macOS app to connect."
+                                    } catch (e: Exception) {
+                                        pairingTokenError = e.message ?: "Failed to generate pairing code"
+                                    }
+                                    isLoading = false
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isLoading
+                        ) {
+                            Icon(Icons.Default.LaptopMac, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Pair macOS App")
+                        }
+
                         // Scan QR Code Button
                         Button(
                             onClick = {
@@ -166,7 +196,7 @@ fun DesktopIntegrationScreen(
                                         errorMessage = null
                                         try {
                                             val smsRepository = com.phoneintegration.app.SmsRepository(context)
-                                            val messages = smsRepository.getAllRecentMessages(50)
+                                            val messages = smsRepository.getAllRecentMessages(500)
                                             syncService.syncMessages(messages)
                                             successMessage = "Successfully synced ${messages.size} messages to desktop!"
                                         } catch (e: Exception) {
@@ -180,7 +210,20 @@ fun DesktopIntegrationScreen(
                             ) {
                                 Icon(Icons.Default.Sync, null)
                                 Spacer(Modifier.width(8.dp))
-                                Text("Sync Messages to Desktop")
+                                Text("Sync Recent Messages (500)")
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Sync ALL Messages Button
+                            OutlinedButton(
+                                onClick = { showSyncAllDialog = true },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isLoading
+                            ) {
+                                Icon(Icons.Default.CloudSync, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Sync All Messages")
                             }
 
                             Spacer(modifier = Modifier.height(8.dp))
@@ -366,6 +409,94 @@ fun DesktopIntegrationScreen(
                 }
             }
 
+            // Pairing Token (for macOS app)
+            pairingToken?.let { token ->
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Pair with macOS",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "Enter this code in the macOS SyncFlow app",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                text = token,
+                                style = MaterialTheme.typography.headlineMedium
+                            )
+                            Spacer(Modifier.height(12.dp))
+
+                            // Optional QR for the Mac app (future QR scanning support)
+                            generateQrCode(token)?.let { qr ->
+                                Image(
+                                    bitmap = qr,
+                                    contentDescription = "Pairing QR Code",
+                                    modifier = Modifier.size(200.dp)
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
+                        }
+                    }
+                }
+            }
+
+            pairingTokenError?.let { error ->
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Error,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Pairing",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                            IconButton(onClick = { pairingTokenError = null }) {
+                                Icon(Icons.Default.Close, "Dismiss")
+                            }
+                        }
+                    }
+                }
+            }
+
             // Paired Devices Section
             item {
                 Spacer(modifier = Modifier.height(16.dp))
@@ -496,6 +627,88 @@ fun DesktopIntegrationScreen(
             }
         )
     }
+
+    // Sync All Messages Confirmation Dialog
+    if (showSyncAllDialog) {
+        AlertDialog(
+            onDismissRequest = { showSyncAllDialog = false },
+            icon = {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(48.dp)
+                )
+            },
+            title = { Text("Sync All Messages?") },
+            text = {
+                Column {
+                    Text("This will sync ALL messages from your phone to your desktop.")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "⚠️ This may take a while if you have thousands of messages.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "💡 Tip: Use \"Sync Recent Messages (500)\" for faster sync.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSyncAllDialog = false
+                        scope.launch {
+                            isLoading = true
+                            successMessage = null
+                            errorMessage = null
+                            syncProgress = "Starting sync..."
+                            try {
+                                val smsRepository = com.phoneintegration.app.SmsRepository(context)
+
+                                // Get ALL messages (no limit)
+                                syncProgress = "Loading all messages from phone..."
+                                val allMessages = smsRepository.getAllRecentMessages(limit = Int.MAX_VALUE)
+
+                                syncProgress = "Syncing ${allMessages.size} messages to desktop..."
+                                syncService.syncMessages(allMessages)
+
+                                syncProgress = null
+                                successMessage = "Successfully synced ALL ${allMessages.size} messages to desktop! 🎉"
+                            } catch (e: Exception) {
+                                syncProgress = null
+                                errorMessage = "Sync failed: ${e.message}"
+                            }
+                            isLoading = false
+                        }
+                    }
+                ) {
+                    Text("Sync All")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSyncAllDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Sync Progress Dialog
+    syncProgress?.let { progress ->
+        AlertDialog(
+            onDismissRequest = { },
+            icon = {
+                CircularProgressIndicator(modifier = Modifier.size(48.dp))
+            },
+            title = { Text("Syncing Messages") },
+            text = { Text(progress) },
+            confirmButton = { }
+        )
+    }
 }
 
 @Composable
@@ -591,5 +804,14 @@ private fun isServiceRunning(context: android.content.Context): Boolean {
     @Suppress("DEPRECATION")
     return manager.getRunningServices(Integer.MAX_VALUE).any {
         it.service.className == com.phoneintegration.app.desktop.OutgoingMessageService::class.java.name
+    }
+}
+
+private fun generateQrCode(token: String): androidx.compose.ui.graphics.ImageBitmap? {
+    return try {
+        val bitmap = BarcodeEncoder().encodeBitmap(token, BarcodeFormat.QR_CODE, 600, 600)
+        bitmap.asImageBitmap()
+    } catch (_: Exception) {
+        null
     }
 }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { Send, Phone, Video, MoreVertical, MessageSquare } from 'lucide-react'
+import { Send, MoreVertical, MessageSquare } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { sendSmsFromWeb } from '@/lib/firebase'
 import { format } from 'date-fns'
@@ -87,18 +87,6 @@ export default function MessageView() {
 
           {/* Actions */}
           <div className="flex items-center gap-2">
-            <button
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
-              title="Call"
-            >
-              <Phone className="w-5 h-5" />
-            </button>
-            <button
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
-              title="Video Call"
-            >
-              <Video className="w-5 h-5" />
-            </button>
             <button
               className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
               title="More"

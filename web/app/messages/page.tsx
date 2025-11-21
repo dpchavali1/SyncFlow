@@ -7,7 +7,6 @@ import { listenToMessages, waitForAuth, signInAnon } from '@/lib/firebase'
 import ConversationList from '@/components/ConversationList'
 import MessageView from '@/components/MessageView'
 import Header from '@/components/Header'
-import IncomingCallNotification from '@/components/IncomingCallNotification'
 import AIAssistant from '@/components/AIAssistant'
 import { Brain } from 'lucide-react'
 
@@ -97,9 +96,6 @@ export default function MessagesPage() {
         {/* Message View */}
         <MessageView />
       </div>
-
-      {/* Incoming Call Notification */}
-      <IncomingCallNotification userId={userId} />
 
       {/* AI Assistant Button */}
       <button

@@ -575,5 +575,4 @@ class SmsRepository(private val context: Context) {
             if (c.moveToFirst()) c.getLong(0) else null
         }
     }
-
 }

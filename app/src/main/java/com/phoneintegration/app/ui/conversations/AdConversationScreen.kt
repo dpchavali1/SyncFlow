@@ -95,8 +95,14 @@ fun AdConversationScreen(
                 .padding(padding)
         ) {
 
+            // Derive categories dynamically from the deals
+            val dealCategories = remember(deals) {
+                listOf("All") + deals.map { it.category }.distinct().sorted()
+            }
+
             // CATEGORY FILTERS
             DealCategoryChips(
+                categories = dealCategories,
                 selected = selectedCategory,
                 onSelected = { selectedCategory = it }
             )

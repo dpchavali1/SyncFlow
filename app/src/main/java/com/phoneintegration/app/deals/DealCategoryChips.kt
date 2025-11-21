@@ -8,17 +8,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
-val DEAL_CATEGORIES = listOf(
-    "All",
-    "Tech",
-    "Home",
-    "Fitness",
-    "Accessories",
-    "Gifts"
-)
-
 @Composable
 fun DealCategoryChips(
+    categories: List<String>,
     selected: String,
     onSelected: (String) -> Unit
 ) {
@@ -28,7 +20,7 @@ fun DealCategoryChips(
             .padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        DEAL_CATEGORIES.forEach { category ->
+        categories.forEach { category ->
             FilterChip(
                 selected = selected == category,
                 onClick = { onSelected(category) },

@@ -228,13 +228,6 @@ fun ConversationDetailScreen(
             )
         },
 
-        // ⭐ FAB only for SyncFlow Deals conversation
-        floatingActionButton = {
-            if (isDealsConversation) {
-                DealsRefreshFab(viewModel)
-            }
-        },
-
         bottomBar = {
             Column(
                 Modifier
@@ -438,42 +431,3 @@ fun ConversationDetailScreen(
 }
 
 
-/* -------------------------------------------------------------
-   ⭐ Floating Action Button – SyncFlow Deals Pull FAB
-------------------------------------------------------------- */
-@Composable
-fun DealsRefreshFab(viewModel: SmsViewModel) {
-    val context = LocalContext.current
-
-    FloatingActionButton(
-        onClick = {
-            viewModel.refreshDeals { ok ->
-                Toast.makeText(
-                    context,
-                    if (ok) "Deals updated!" else "Failed to refresh",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        },
-        containerColor = MaterialTheme.colorScheme.primary,
-        contentColor = MaterialTheme.colorScheme.onPrimary,
-        shape = RoundedCornerShape(20.dp),
-        elevation = FloatingActionButtonDefaults.elevation(
-            defaultElevation = 8.dp,
-            pressedElevation = 12.dp
-        )
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp)
-        ) {
-            Icon(
-                Icons.Default.Refresh,
-                contentDescription = "Refresh Deals",
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Pull Deals")
-        }
-    }
-}
