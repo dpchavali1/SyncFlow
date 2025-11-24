@@ -6,10 +6,6 @@ const nextConfig = {
   images: {
     domains: ['firebasestorage.googleapis.com'],
   },
-  // PWA configuration
-  experimental: {
-    appDir: true,
-  },
 }
 
 module.exports = nextConfig

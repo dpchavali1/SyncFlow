@@ -3,8 +3,7 @@ import { getAuth, signInAnonymously } from 'firebase/auth'
 import { getDatabase, ref, onValue, set, push, remove, serverTimestamp } from 'firebase/database'
 import { getStorage } from 'firebase/storage'
 
-// Firebase configuration
-// TODO: Replace with your Firebase project configuration from Firebase Console
+// Firebase configuration (loaded from .env.local)
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -78,7 +77,7 @@ export const sendSmsFromWeb = async (userId: string, address: string, body: stri
 }
 
 // Pair device with token
-export const pairDeviceWithToken = async (token: string, deviceName: string) => {
+export const pairDeviceWithToken = async (token: string, deviceName: string): Promise<{ userId: string; deviceId: string }> => {
   try {
     const [userId, timestamp, randomToken] = token.split(':')
 
