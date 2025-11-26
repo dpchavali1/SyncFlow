@@ -34,3 +34,26 @@ local.properties
 # OS-specific
 .DS_Store
 Thumbs.db
+
+# ========================================
+# SECURITY: Never commit credentials!
+# ========================================
+# Firebase credentials
+**/google-services.json
+**/GoogleService-Info.plist
+**/.env
+**/.env.local
+
+# Signing keys
+**/*.keystore
+**/*.jks
+**/key.properties
+
+# macOS specific
+**/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+**/UserInterfaceState.xcuserstate
+
+# Build outputs  
+**/dist/
+**/.next/

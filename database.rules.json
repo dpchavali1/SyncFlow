@@ -1,0 +1,92 @@
+{
+  "rules": {
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        "messages": {
+          "$messageId": {
+            ".validate": "newData.hasChildren(['address', 'body', 'date', 'type'])",
+            "address": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+            },
+            "body": {
+              ".validate": "newData.isString() && newData.val().length <= 1600"
+            },
+            "date": {
+              ".validate": "newData.isNumber()"
+            },
+            "type": {
+              ".validate": "newData.isNumber() && (newData.val() == 1 || newData.val() == 2)"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+            }
+          },
+          ".indexOn": ["date", "timestamp"]
+        },
+        "devices": {
+          "$deviceId": {
+            ".validate": "newData.hasChildren(['name', 'type', 'pairedAt'])",
+            "name": {
+              ".validate": "newData.isString() && newData.val().length <= 50"
+            },
+            "type": {
+              ".validate": "newData.isString() && (newData.val() == 'android' || newData.val() == 'web' || newData.val() == 'macos' || newData.val() == 'ios')"
+            },
+            "pairedAt": {
+              ".validate": "newData.isNumber()"
+            }
+          }
+        },
+        "outgoing_messages": {
+          "$messageId": {
+            ".validate": "newData.hasChildren(['address', 'body', 'timestamp', 'status'])",
+            "address": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+            },
+            "body": {
+              ".validate": "newData.isString() && newData.val().length <= 1600"
+            },
+            "timestamp": {
+              ".validate": "newData.isNumber()"
+            },
+            "status": {
+              ".validate": "newData.isString() && (newData.val() == 'pending' || newData.val() == 'sent' || newData.val() == 'failed')"
+            }
+          },
+          ".indexOn": ["timestamp", "status"]
+        },
+        "groups": {
+          "$groupId": {
+            ".validate": "newData.hasChildren(['name', 'createdAt'])",
+            "members": {
+              "$memberId": {
+                ".validate": "newData.isBoolean()"
+              }
+            }
+          }
+        }
+      }
+    },
+    "pending_pairings": {
+      "$token": {
+        ".read": true,
+        ".write": true,
+        ".validate": "newData.hasChildren(['createdAt', 'expiresAt', 'userId']) && newData.child('expiresAt').val() > now && newData.child('expiresAt').val() - now <= 600000",
+        "userId": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "createdAt": {
+          ".validate": "newData.val() === now"
+        },
+        "expiresAt": {
+          ".validate": "newData.isNumber() && newData.val() > now"
+        },
+        "deviceName": {
+          ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 50)"
+        }
+      }
+    }
+  }
+}

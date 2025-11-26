@@ -5,8 +5,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
-import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.phoneintegration.app.utils.SecureLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -27,19 +27,24 @@ class SmsReceiver : BroadcastReceiver() {
         if (context == null || intent == null) return
 
         val action = intent.action
+        SecureLogger.d("SMS_RECEIVER", "onReceive action=$action")
 
         // Samsung sends SMS only through SMS_DELIVER, not SMS_RECEIVED
         if (action == Telephony.Sms.Intents.SMS_DELIVER_ACTION ||
             action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
 
             val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-            if (messages.isNullOrEmpty()) return
+            if (messages.isNullOrEmpty()) {
+                SecureLogger.w("SMS_RECEIVER", "No messages parsed from intent")
+                return
+            }
 
             val sender = messages[0].displayOriginatingAddress
             val fullMessage = messages.joinToString(separator = "") { it.messageBody }
             val timestamp = messages[0].timestampMillis
 
-            Log.d("SMS_RECEIVER", "Received SMS from $sender: $fullMessage")
+            // SECURITY: Never log phone numbers or message content
+            SecureLogger.d("SMS_RECEIVER", "Received SMS from sender")
 
             // Check for duplicate (Samsung sends both SMS_DELIVER and SMS_RECEIVED)
             val messageKey = "$sender:$fullMessage:$timestamp"
@@ -51,7 +56,7 @@ class SmsReceiver : BroadcastReceiver() {
 
                 // Check if we recently processed this message
                 if (recentMessages.containsKey(messageKey)) {
-                    Log.d("SMS_RECEIVER", "Duplicate SMS detected, ignoring")
+                    SecureLogger.d("SMS_RECEIVER", "Duplicate SMS detected, ignoring")
                     return
                 }
 
@@ -72,9 +77,9 @@ class SmsReceiver : BroadcastReceiver() {
                 }
 
                 context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
-                Log.d("SMS_RECEIVER", "SMS written to database")
+                SecureLogger.d("SMS_RECEIVER", "SMS written to database")
             } catch (e: Exception) {
-                Log.e("SMS_RECEIVER", "Failed to write SMS to database", e)
+                SecureLogger.e("SMS_RECEIVER", "Failed to write SMS to database", e)
             }
 
             // Get contact name
@@ -84,6 +89,7 @@ class SmsReceiver : BroadcastReceiver() {
             // Show notification
             val notificationHelper = NotificationHelper(context)
             notificationHelper.showSmsNotification(sender, fullMessage, contactName)
+            Log.d("SMS_RECEIVER", "Notification attempted for $sender")
 
             // Broadcast locally to update UI & ViewModel
             val broadcast = Intent(SMS_RECEIVED_ACTION).apply {
@@ -107,10 +113,10 @@ class SmsReceiver : BroadcastReceiver() {
                     val recentMessages = smsRepository.getAllRecentMessages(1)
                     if (recentMessages.isNotEmpty()) {
                         syncService.syncMessage(recentMessages[0])
-                        Log.d("SMS_RECEIVER", "✅ Message synced to Firebase for desktop immediately")
+                        SecureLogger.d("SMS_RECEIVER", "Message synced to Firebase for desktop")
                     }
                 } catch (e: Exception) {
-                    Log.e("SMS_RECEIVER", "❌ Error syncing message to Firebase", e)
+                    SecureLogger.e("SMS_RECEIVER", "Error syncing message to Firebase", e)
                 }
             }
         }
