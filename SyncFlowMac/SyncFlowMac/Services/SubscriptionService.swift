@@ -333,6 +333,36 @@ class SubscriptionService: ObservableObject {
             .child(userId)
             .child("usage")
 
+        // FIRST: Try to load plan from Firebase (for testing tab assignments)
+        do {
+            let snapshot = try await usageRef.getData()
+            if let usageData = snapshot.value as? [String: Any] {
+                let plan = usageData["plan"] as? String ?? ""
+                let planExpiresAt = usageData["planExpiresAt"] as? NSNumber
+                let freeTrialExpiresAt = usageData["freeTrialExpiresAt"] as? NSNumber
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+
+                // If Firebase has a valid paid plan that hasn't expired, use it
+                if ["monthly", "yearly", "lifetime"].contains(plan.lowercased()) {
+                    if plan.lowercased() == "lifetime" ||
+                       (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
+                        // Valid paid plan from Firebase, use it
+                        updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
+                        return
+                    }
+                }
+
+                // If Firebase has active free trial, use it
+                if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
+                    updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
+                    return
+                }
+            }
+        } catch {
+            print("Error loading plan from Firebase: \(error)")
+        }
+
+        // FALLBACK: Sync StoreKit subscription data to Firebase
         var updates: [String: Any] = [
             "planUpdatedAt": ServerValue.timestamp()
         ]
@@ -354,6 +384,11 @@ class SubscriptionService: ObservableObject {
         }
 
         try? await usageRef.updateChildValues(updates)
+    }
+
+    private func updateLocalPlanData(plan: String, expiresAt: Int64) {
+        let prefs = PreferencesService.shared
+        prefs.setUserPlan(plan: plan, expiresAt: expiresAt)
     }
 }
 
