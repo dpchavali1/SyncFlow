@@ -2631,6 +2631,11 @@ export const getDetailedUserList = async (): Promise<Array<{
 
       // Get usage summary
       const usage = await getUsageSummary(userId)
+      console.log(`[User ${userId}] Usage summary:`, {
+        planLabel: usage.planLabel,
+        planExpiresAt: usage.planExpiresAt,
+        isPaid: usage.isPaid
+      })
 
       // Get subscription record (persists even after user deletion)
       let subscriptionRecord: any = null
@@ -2639,9 +2644,12 @@ export const getDetailedUserList = async (): Promise<Array<{
         const subSnapshot = await get(subRef)
         if (subSnapshot.exists()) {
           subscriptionRecord = subSnapshot.val()
+          console.log(`[User ${userId}] Subscription record found:`, subscriptionRecord)
+        } else {
+          console.log(`[User ${userId}] No subscription record found`)
         }
       } catch (error) {
-        console.log(`No subscription record for ${userId}`)
+        console.log(`[User ${userId}] Error loading subscription record:`, error)
       }
 
       // Count devices
@@ -2671,19 +2679,32 @@ export const getDetailedUserList = async (): Promise<Array<{
         }
       }
 
-      // Get plan from subscription record if available, otherwise from usage
-      let plan = usage.planLabel || 'Trial'
+      // Get plan: prioritize subscription_records, fallback to usage
+      let plan = 'Trial'
       let planExpiresAt: number | null = null
       let planAssignedAt: number | null = null
-      let planAssignedBy = 'storekit'
+      let planAssignedBy = 'unknown'
       let wasPremium = false
 
-      if (subscriptionRecord) {
-        plan = subscriptionRecord.plan || plan
+      // FIRST: Check subscription_records (persists after user deletion)
+      if (subscriptionRecord && subscriptionRecord.plan) {
+        plan = subscriptionRecord.plan === 'free' ? 'Trial' :
+               subscriptionRecord.plan.charAt(0).toUpperCase() + subscriptionRecord.plan.slice(1)
         planExpiresAt = subscriptionRecord.planExpiresAt || null
         planAssignedAt = subscriptionRecord.planAssignedAt || null
         planAssignedBy = subscriptionRecord.planAssignedBy || 'system'
-        wasPremium = subscriptionRecord.wasPremium === true || subscriptionRecord.plan !== 'free'
+        wasPremium = subscriptionRecord.wasPremium === true || (subscriptionRecord.plan && subscriptionRecord.plan !== 'free')
+        console.log(`[User ${userId}] Using subscription_records plan: ${plan}`)
+      }
+      // FALLBACK: Use usage summary if no subscription record
+      else if (usage.planLabel && usage.planLabel !== 'Trial') {
+        plan = usage.planLabel
+        planExpiresAt = usage.planExpiresAt || null
+        planAssignedBy = 'storekit'
+        wasPremium = usage.isPaid
+        console.log(`[User ${userId}] Using usage plan: ${plan}`)
+      } else {
+        console.log(`[User ${userId}] Using default: Trial`)
       }
 
       users.push({
