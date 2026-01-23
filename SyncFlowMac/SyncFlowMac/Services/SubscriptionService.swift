@@ -352,6 +352,16 @@ class SubscriptionService: ObservableObject {
                        (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
                         // Valid paid plan from Firebase, use it
                         updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
+
+                        // Update subscriptionStatus to reflect the paid plan
+                        DispatchQueue.main.async {
+                            if plan.lowercased() == "lifetime" {
+                                self.subscriptionStatus = .lifetime
+                            } else {
+                                let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
+                                self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
+                            }
+                        }
                         return
                     }
                 }
@@ -359,6 +369,12 @@ class SubscriptionService: ObservableObject {
                 // If Firebase has active free trial, use it
                 if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
                     updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
+
+                    // Update subscriptionStatus to reflect active trial
+                    let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
+                    DispatchQueue.main.async {
+                        self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
+                    }
                     return
                 }
             }
