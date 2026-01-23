@@ -62,17 +62,24 @@ export default function PairingScreen() {
        if (recovered.success && recovered.syncGroupId) {
          console.log('Recovered existing sync group:', recovered.syncGroupId)
          setSyncGroupIdLocal(recovered.syncGroupId)
+         localStorage.setItem('sync_group_id', recovered.syncGroupId)
 
-         // Get group info
+         // Get group info (with a small delay to ensure Firebase has propagated)
+         await new Promise(resolve => setTimeout(resolve, 500))
          const info = await getSyncGroupInfo(recovered.syncGroupId)
+         console.log('Recovered sync group info:', info)
 
          if (info.success && info.data) {
+           console.log('Setting device count from recovery:', info.data.deviceCount, '/', info.data.deviceLimit)
            setDeviceCount(info.data.deviceCount)
            setDeviceLimit(info.data.deviceLimit)
+         } else {
+           console.warn('getSyncGroupInfo failed for recovered group:', info)
          }
 
          setSyncGroupId(recovered.syncGroupId)
          setDeviceInfo(info.data?.deviceCount || 0, info.data?.deviceLimit || 3)
+         console.log('Setting step to paired from recovery')
          setStep('paired')
 
          // Scroll to QR code when ready
@@ -85,8 +92,14 @@ export default function PairingScreen() {
 
          // Auto-redirect after 5 seconds (gives time to see QR code and scroll)
          if (redirectTimeoutRef.current) clearTimeout(redirectTimeoutRef.current)
-         redirectTimeoutRef.current = setTimeout(() => {
-           router.push('/messages')
+         redirectTimeoutRef.current = setTimeout(async () => {
+           console.log('Auto-redirect timer fired (recovery path), pushing to /messages')
+           try {
+             await router.push('/messages')
+             console.log('Successfully redirected to /messages')
+           } catch (error) {
+             console.error('Failed to redirect to /messages:', error)
+           }
          }, 5000)
          return
        }
@@ -100,16 +113,24 @@ export default function PairingScreen() {
        if (created) {
          console.log('Created new sync group:', newGroupId)
          setSyncGroupIdLocal(newGroupId)
+         localStorage.setItem('sync_group_id', newGroupId)
 
-         // Get group info
+         // Get group info (with a small delay to ensure Firebase has propagated)
+         await new Promise(resolve => setTimeout(resolve, 500))
          const info = await getSyncGroupInfo(newGroupId)
+         console.log('Sync group info retrieved:', info)
+
          if (info.success && info.data) {
+           console.log('Setting device count:', info.data.deviceCount, '/', info.data.deviceLimit)
            setDeviceCount(info.data.deviceCount)
            setDeviceLimit(info.data.deviceLimit)
+         } else {
+           console.warn('getSyncGroupInfo failed or returned no data:', info)
          }
 
          setSyncGroupId(newGroupId)
          setDeviceInfo(info.data?.deviceCount || 0, info.data?.deviceLimit || 3)
+         console.log('Setting step to paired')
          setStep('paired')
 
          // Scroll to QR code when ready
@@ -122,8 +143,14 @@ export default function PairingScreen() {
 
          // Auto-redirect after 5 seconds (gives time to see QR code and scroll)
          if (redirectTimeoutRef.current) clearTimeout(redirectTimeoutRef.current)
-         redirectTimeoutRef.current = setTimeout(() => {
-           router.push('/messages')
+         redirectTimeoutRef.current = setTimeout(async () => {
+           console.log('Auto-redirect timer fired (creation path), pushing to /messages')
+           try {
+             await router.push('/messages')
+             console.log('Successfully redirected to /messages')
+           } catch (error) {
+             console.error('Failed to redirect to /messages:', error)
+           }
          }, 5000)
        } else {
          console.error('Failed to create sync group')
