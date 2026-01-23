@@ -2611,6 +2611,10 @@ export const getDetailedUserList = async (): Promise<Array<{
   storageUsedMB: number
   lastActivity: number | null
   plan: string
+  planExpiresAt: number | null
+  planAssignedAt: number | null
+  planAssignedBy: string
+  wasPremium: boolean
   isActive: boolean
 }>> => {
   try {
@@ -2627,6 +2631,18 @@ export const getDetailedUserList = async (): Promise<Array<{
 
       // Get usage summary
       const usage = await getUsageSummary(userId)
+
+      // Get subscription record (persists even after user deletion)
+      let subscriptionRecord: any = null
+      try {
+        const subRef = ref(database, `subscription_records/${userId}/active`)
+        const subSnapshot = await get(subRef)
+        if (subSnapshot.exists()) {
+          subscriptionRecord = subSnapshot.val()
+        }
+      } catch (error) {
+        console.log(`No subscription record for ${userId}`)
+      }
 
       // Count devices
       const devicesCount = userInfo.devices ? Object.keys(userInfo.devices).length : 0
@@ -2655,13 +2671,32 @@ export const getDetailedUserList = async (): Promise<Array<{
         }
       }
 
+      // Get plan from subscription record if available, otherwise from usage
+      let plan = usage.planLabel || 'Trial'
+      let planExpiresAt: number | null = null
+      let planAssignedAt: number | null = null
+      let planAssignedBy = 'storekit'
+      let wasPremium = false
+
+      if (subscriptionRecord) {
+        plan = subscriptionRecord.plan || plan
+        planExpiresAt = subscriptionRecord.planExpiresAt || null
+        planAssignedAt = subscriptionRecord.planAssignedAt || null
+        planAssignedBy = subscriptionRecord.planAssignedBy || 'system'
+        wasPremium = subscriptionRecord.wasPremium === true || subscriptionRecord.plan !== 'free'
+      }
+
       users.push({
         userId,
         messagesCount: actualMessageCount, // Use actual count instead of estimate
         devicesCount,
         storageUsedMB: Math.round(usage.storageUsedBytes / (1024 * 1024) * 100) / 100,
         lastActivity,
-        plan: usage.planLabel || 'Trial',
+        plan,
+        planExpiresAt,
+        planAssignedAt,
+        planAssignedBy,
+        wasPremium,
         isActive
       })
     }
