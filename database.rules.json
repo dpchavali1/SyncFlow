@@ -817,6 +817,77 @@
           }
         }
       }
+    },
+    "subscription_records": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
+        ".write": "auth != null && (auth.token.admin === true)",
+        "active": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
+          ".write": "auth != null && auth.token.admin === true",
+          "plan": {
+            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime' || newData.val() == 'free'))"
+          },
+          "planExpiresAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "freeTrialExpiresAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "planAssignedAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "planAssignedBy": {
+            ".validate": "!newData.exists() || newData.isString()"
+          }
+        },
+        "wasPremium": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "firstPremiumDate": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "totalPremiumDays": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "history": {
+          "$timestamp": {
+            ".validate": "newData.hasChildren(['timestamp', 'newPlan'])",
+            "timestamp": {
+              ".validate": "newData.isNumber()"
+            },
+            "previousPlan": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "newPlan": {
+              ".validate": "newData.isString()"
+            },
+            "expiresAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "source": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "purchases": {
+          "$purchaseId": {
+            ".validate": "newData.hasChildren(['productId'])",
+            "productId": {
+              ".validate": "newData.isString()"
+            },
+            "purchaseDate": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "expirationDate": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "verified": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            }
+          }
+        }
+      }
     }
   }
 }

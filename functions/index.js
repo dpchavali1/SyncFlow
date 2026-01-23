@@ -30,6 +30,55 @@ const requireAdmin = (context) => {
     return context.auth.uid;
 };
 
+/**
+ * Helper function to update subscription records
+ * This creates a persistent record that survives user deletion
+ * Tracks both active subscription and full history
+ */
+const updateSubscriptionRecord = async (userId, plan, expiresAt, source = "system") => {
+    const now = Date.now();
+    const recordRef = admin.database().ref(`/subscription_records/${userId}`);
+    const snapshot = await recordRef.get();
+    const previousPlan = snapshot.exists() ? snapshot.child("active/plan").val() : null;
+
+    const updates = {
+        "active/plan": plan,
+        "active/planAssignedAt": now,
+        "active/planAssignedBy": source,
+    };
+
+    if (plan === "free") {
+        updates["active/freeTrialExpiresAt"] = expiresAt;
+        updates["active/planExpiresAt"] = null;
+    } else if (plan === "lifetime") {
+        updates["active/planExpiresAt"] = null;
+        updates["active/freeTrialExpiresAt"] = null;
+    } else {
+        updates["active/planExpiresAt"] = expiresAt;
+        updates["active/freeTrialExpiresAt"] = null;
+    }
+
+    // Track premium status
+    const isPremium = ["monthly", "yearly", "lifetime"].includes(plan);
+    if (isPremium) {
+        updates["wasPremium"] = true;
+        if (!snapshot.exists() || !snapshot.child("firstPremiumDate").exists()) {
+            updates["firstPremiumDate"] = now;
+        }
+    }
+
+    // Add history entry
+    updates[`history/${now}`] = {
+        timestamp: now,
+        newPlan: plan,
+        previousPlan: previousPlan || null,
+        expiresAt: expiresAt,
+        source: source,
+    };
+
+    await recordRef.update(updates);
+};
+
 exports.adminLogin = functions.https.onCall(async (data) => {
     try {
         const username = data && data.username ? String(data.username) : "";

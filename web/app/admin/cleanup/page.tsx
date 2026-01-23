@@ -704,6 +704,63 @@ export default function AdminCleanupPage() {
 
       // Update at the correct path: users/{uid}/usage/
       await update(usageRef, updateData)
+      addLog(`📝 Updated users/${testUserId}/usage/`)
+
+      // ALSO UPDATE SUBSCRIPTION RECORDS (Persistent across user deletion)
+      const subscriptionRecordRef = ref(database, `subscription_records/${testUserId}`)
+      const subscriptionRecordSnapshot = await get(subscriptionRecordRef)
+      const previousPlan = subscriptionRecordSnapshot.exists() ? subscriptionRecordSnapshot.child('active/plan').val() : null
+
+      // Update active subscription record
+      const subscriptionUpdateData: any = {
+        'active/plan': testPlan,
+        'active/planAssignedAt': now,
+        'active/planAssignedBy': 'testing_tab',
+      }
+
+      if (testPlan === 'free') {
+        subscriptionUpdateData['active/freeTrialExpiresAt'] = now + (days * 24 * 60 * 60 * 1000)
+        subscriptionUpdateData['active/planExpiresAt'] = null
+      } else if (testPlan === 'lifetime') {
+        subscriptionUpdateData['active/planExpiresAt'] = null
+        subscriptionUpdateData['active/freeTrialExpiresAt'] = null
+      } else {
+        subscriptionUpdateData['active/planExpiresAt'] = now + (days * 24 * 60 * 60 * 1000)
+        subscriptionUpdateData['active/freeTrialExpiresAt'] = null
+      }
+
+      // Track if this is a premium plan
+      const isPremium = ['monthly', 'yearly', 'lifetime'].includes(testPlan)
+      if (isPremium && !subscriptionRecordSnapshot.exists()) {
+        subscriptionUpdateData['wasPremium'] = true
+        subscriptionUpdateData['firstPremiumDate'] = now
+      } else if (isPremium && subscriptionRecordSnapshot.child('wasPremium').val() !== true) {
+        subscriptionUpdateData['wasPremium'] = true
+        if (!subscriptionRecordSnapshot.child('firstPremiumDate').exists()) {
+          subscriptionUpdateData['firstPremiumDate'] = now
+        }
+      }
+
+      // Add history entry
+      const historyEntry: any = {
+        timestamp: now,
+        newPlan: testPlan,
+        source: 'testing_tab',
+      }
+      if (previousPlan) {
+        historyEntry.previousPlan = previousPlan
+      }
+      if (updateData.planExpiresAt) {
+        historyEntry.expiresAt = updateData.planExpiresAt
+      } else if (updateData.freeTrialExpiresAt) {
+        historyEntry.expiresAt = updateData.freeTrialExpiresAt
+      }
+
+      subscriptionUpdateData[`history/${now}`] = historyEntry
+
+      // Update subscription records
+      await update(subscriptionRecordRef, subscriptionUpdateData)
+      addLog(`🔒 Updated subscription_records/${testUserId}/ (persists after user deletion)`)
 
       const expiryDate = new Date(updateData.planExpiresAt || updateData.freeTrialExpiresAt || now)
       addLog(`✅ User plan updated to ${testPlan}`)

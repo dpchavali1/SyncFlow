@@ -423,6 +423,54 @@ class SubscriptionService: ObservableObject {
             print("SubscriptionService: Error loading plan from Firebase: \(error)")
         }
 
+        // FALLBACK: Check subscription_records/{uid} (persists even after user deletion)
+        let subscriptionRecordRef = Database.database()
+            .reference()
+            .child("subscription_records")
+            .child(userId)
+
+        do {
+            let subscriptionSnapshot = try await subscriptionRecordRef.child("active").getData()
+            if let activeData = subscriptionSnapshot.value as? [String: Any] {
+                let plan = activeData["plan"] as? String ?? ""
+                let planExpiresAt = activeData["planExpiresAt"] as? NSNumber
+                let freeTrialExpiresAt = activeData["freeTrialExpiresAt"] as? NSNumber
+
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                print("SubscriptionService: Found subscription record, plan=\(plan), planExpiresAt=\(planExpiresAt?.int64Value ?? 0)")
+
+                // If subscription record has a valid paid plan that hasn't expired, use it
+                if ["monthly", "yearly", "lifetime"].contains(plan.lowercased()) {
+                    if plan.lowercased() == "lifetime" ||
+                       (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
+                        // Valid paid plan from subscription record (survives user deletion)
+                        updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
+
+                        if plan.lowercased() == "lifetime" {
+                            self.subscriptionStatus = .lifetime
+                        } else {
+                            let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
+                            self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
+                        }
+                        print("SubscriptionService: Loaded plan from subscription_records: \(plan)")
+                        return
+                    }
+                }
+
+                // If subscription record has active free trial, use it
+                if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
+                    updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
+
+                    let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
+                    self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
+                    print("SubscriptionService: Loaded free trial from subscription_records with \(trialDaysRemaining) days remaining")
+                    return
+                }
+            }
+        } catch {
+            print("SubscriptionService: No subscription_records found: \(error)")
+        }
+
         // FALLBACK: Sync StoreKit subscription data to Firebase
         let usageRef = userRef.child("usage")
         var updates: [String: Any] = [
