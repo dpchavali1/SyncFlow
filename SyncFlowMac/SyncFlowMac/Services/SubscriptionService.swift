@@ -141,12 +141,16 @@ class SubscriptionService: ObservableObject {
 
     /// Returns true if user has an active paid subscription (not trial)
     var isPremium: Bool {
+        // First check StoreKit subscription
         switch subscriptionStatus {
         case .subscribed, .lifetime:
             return true
         case .trial, .expired, .notSubscribed:
-            return false
+            break // Fall through to check Firebase plan
         }
+
+        // Fallback to Firebase plan from PreferencesService (for testing tab)
+        return PreferencesService.shared.isPaidUser()
     }
 
     // MARK: - Load Products

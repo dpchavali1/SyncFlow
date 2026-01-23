@@ -142,13 +142,10 @@ struct MainView: View {
                 }
 
                 // Subscription status banner (shown for all non-premium users)
-                switch subscriptionService.subscriptionStatus {
-                case .trial, .expired, .notSubscribed:
+                if !subscriptionService.isPremium {
                     SubscriptionStatusBanner()
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
-                default:
-                    EmptyView()
                 }
 
                 if appState.showMediaBar {
