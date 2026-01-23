@@ -668,10 +668,11 @@ export default function AdminCleanupPage() {
     addLog(`🔧 Assigning ${testPlan} plan to user ${testUserId}...`)
 
     try {
-      const userRef = ref(database, `users/${testUserId}`)
-      const userSnapshot = await get(userRef)
+      // Check user exists in usage path
+      const usageRef = ref(database, `users/${testUserId}/usage`)
+      const usageSnapshot = await get(usageRef)
 
-      if (!userSnapshot.exists()) {
+      if (!usageSnapshot.exists()) {
         addLog(`❌ User ${testUserId} not found`)
         setIsSettingPlan(false)
         return
@@ -681,18 +682,28 @@ export default function AdminCleanupPage() {
       const days = parseInt(testDaysValid) || 7
       const updateData: any = {
         plan: testPlan,
-        updatedAt: serverTimestamp(),
+        planUpdatedAt: now,
       }
 
       if (testPlan === 'free') {
+        // For free trial: set freeTrialExpiresAt
         updateData.freeTrialExpiresAt = now + (days * 24 * 60 * 60 * 1000)
-      } else if (testPlan === 'lifetime') {
+        // Clear subscription expiry
         updateData.planExpiresAt = null
+      } else if (testPlan === 'lifetime') {
+        // For lifetime: no expiry date needed
+        updateData.planExpiresAt = null
+        // Clear trial expiry
+        updateData.freeTrialExpiresAt = null
       } else {
+        // For monthly/yearly: set planExpiresAt
         updateData.planExpiresAt = now + (days * 24 * 60 * 60 * 1000)
+        // Clear trial expiry
+        updateData.freeTrialExpiresAt = null
       }
 
-      await update(userRef, updateData)
+      // Update at the correct path: users/{uid}/usage/
+      await update(usageRef, updateData)
 
       const expiryDate = new Date(updateData.planExpiresAt || updateData.freeTrialExpiresAt || now)
       addLog(`✅ User plan updated to ${testPlan}`)
