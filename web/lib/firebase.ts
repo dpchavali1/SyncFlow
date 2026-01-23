@@ -2603,6 +2603,103 @@ export const getSystemOverview = async (): Promise<{
   }
 }
 
+// Device-Based Subscription Tracking (tracks users across UID changes)
+export const trackSubscriptionByDevice = async (
+  deviceId: string,
+  userId: string,
+  plan: string,
+  planExpiresAt: number | null
+) => {
+  try {
+    const now = Date.now()
+    const accountRef = ref(database, `subscription_accounts/${deviceId}`)
+    const accountSnapshot = await get(accountRef)
+
+    // Get previous plan
+    let previousPlan = 'free'
+    if (accountSnapshot.exists()) {
+      previousPlan = accountSnapshot.child('currentPlan').val() || 'free'
+    }
+
+    // Build update object
+    const updates: any = {
+      currentUid: userId,
+      currentPlan: plan,
+      [`history/${now}`]: {
+        uid: userId,
+        plan: plan,
+        createdAt: now,
+        status: 'active'
+      }
+    }
+
+    // Track if this is a premium plan
+    const isPremium = ['monthly', 'yearly', 'lifetime'].includes(plan)
+    if (isPremium) {
+      updates.wasPremium = true
+      if (!accountSnapshot.exists() || !accountSnapshot.child('firstPremiumDate').exists()) {
+        updates.firstPremiumDate = now
+      }
+    }
+
+    await update(accountRef, updates)
+    console.log(`[Device ${deviceId}] Subscription tracked for user ${userId}, plan: ${plan}`)
+  } catch (error) {
+    console.error(`Error tracking subscription by device:`, error)
+  }
+}
+
+export const getSubscriptionByDevice = async (deviceId: string) => {
+  try {
+    const accountRef = ref(database, `subscription_accounts/${deviceId}`)
+    const snapshot = await get(accountRef)
+
+    if (!snapshot.exists()) {
+      return null
+    }
+
+    const data = snapshot.val()
+    return {
+      currentUid: data.currentUid,
+      currentPlan: data.currentPlan,
+      wasPremium: data.wasPremium || false,
+      firstPremiumDate: data.firstPremiumDate || null,
+      totalPremiumDays: data.totalPremiumDays || 0,
+      history: data.history || {}
+    }
+  } catch (error) {
+    console.error(`Error getting subscription by device:`, error)
+    return null
+  }
+}
+
+export const markAccountDeletedByDevice = async (deviceId: string, userId: string) => {
+  try {
+    const now = Date.now()
+    const accountRef = ref(database, `subscription_accounts/${deviceId}`)
+    const accountSnapshot = await get(accountRef)
+
+    if (accountSnapshot.exists()) {
+      // Find the history entry for this user and mark it as deleted
+      const history = accountSnapshot.child('history').val() || {}
+
+      for (const [timestamp, entry] of Object.entries(history)) {
+        const historyEntry = entry as any
+        if (historyEntry.uid === userId && historyEntry.status === 'active') {
+          await update(ref(database, `subscription_accounts/${deviceId}/history/${timestamp}`), {
+            deletedAt: now,
+            status: 'deleted'
+          })
+          console.log(`[Device ${deviceId}] Marked user ${userId} as deleted in subscription history`)
+          break
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Error marking account deleted by device:`, error)
+  }
+}
+
 // Admin User Management
 export const getDetailedUserList = async (): Promise<Array<{
   userId: string

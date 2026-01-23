@@ -818,6 +818,47 @@
         }
       }
     },
+    "subscription_accounts": {
+      "$deviceId": {
+        ".read": "auth != null && auth.token.admin === true",
+        ".write": "auth != null && auth.token.admin === true",
+        "currentUid": {
+          ".validate": "newData.isString()"
+        },
+        "currentPlan": {
+          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime' || newData.val() == 'free'))"
+        },
+        "wasPremium": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "firstPremiumDate": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "totalPremiumDays": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "history": {
+          "$timestamp": {
+            ".validate": "newData.hasChildren(['uid'])",
+            "uid": {
+              ".validate": "newData.isString()"
+            },
+            "plan": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "createdAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "deletedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'active' || newData.val() == 'deleted'))"
+            }
+          }
+        }
+      }
+    },
     "subscription_records": {
       "$uid": {
         ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
