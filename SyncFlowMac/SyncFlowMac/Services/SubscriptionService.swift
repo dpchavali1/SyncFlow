@@ -240,6 +240,21 @@ class SubscriptionService: ObservableObject {
     // MARK: - Update Status
 
     func updateSubscriptionStatus() async {
+        // FIRST: Check Firebase for admin-assigned plan (Testing tab)
+        // This takes priority over StoreKit for testing
+        await syncUsagePlan()
+
+        // If Firebase already set a valid paid status, don't override with StoreKit
+        if case .subscribed = subscriptionStatus {
+            print("SubscriptionService: Using Firebase-assigned paid plan")
+            return
+        }
+        if subscriptionStatus == .lifetime {
+            print("SubscriptionService: Using Firebase-assigned lifetime plan")
+            return
+        }
+
+        // FALLBACK: Check for StoreKit subscriptions
         var hasActiveSubscription = false
         var activePlan: String?
         var expirationDate: Date?
@@ -269,7 +284,7 @@ class SubscriptionService: ObservableObject {
             }
         }
 
-        // Determine status
+        // Determine status from StoreKit
         if hasLifetime {
             subscriptionStatus = .lifetime
         } else if hasActiveSubscription, let plan = activePlan {
@@ -285,7 +300,6 @@ class SubscriptionService: ObservableObject {
         }
 
         print("SubscriptionService: Status updated to \(subscriptionStatus.displayText)")
-        await syncUsagePlan()
     }
 
     // MARK: - Transaction Listener
