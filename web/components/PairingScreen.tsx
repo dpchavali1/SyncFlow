@@ -58,11 +58,11 @@ export default function PairingScreen() {
         setDeviceInfo(info.data?.deviceCount || 0, info.data?.deviceLimit || 3)
         setStep('paired')
 
-        // Auto-redirect after 2 seconds
+        // Auto-redirect after 5 seconds (gives time to see QR code and scroll)
         if (redirectTimeoutRef.current) clearTimeout(redirectTimeoutRef.current)
         redirectTimeoutRef.current = setTimeout(() => {
           router.push('/messages')
-        }, 2000)
+        }, 5000)
         return
       }
 
@@ -84,11 +84,11 @@ export default function PairingScreen() {
         setDeviceInfo(info.data?.deviceCount || 0, info.data?.deviceLimit || 3)
         setStep('paired')
 
-        // Auto-redirect after 2 seconds
+        // Auto-redirect after 5 seconds (gives time to see QR code and scroll)
         if (redirectTimeoutRef.current) clearTimeout(redirectTimeoutRef.current)
         redirectTimeoutRef.current = setTimeout(() => {
           router.push('/messages')
-        }, 2000)
+        }, 5000)
       } else {
         setStep('error')
         setErrorMessage('Failed to initialize pairing')
@@ -204,7 +204,7 @@ export default function PairingScreen() {
               </div>
 
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-4">
-                Redirecting to messages...
+                You'll be redirected to messages in 5 seconds...
               </p>
             </div>
           )}
