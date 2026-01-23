@@ -55,6 +55,7 @@ export default function PairingScreen() {
         setStep('paired')
 
         // Auto-redirect after 2 seconds
+        if (redirectTimeoutRef.current) clearTimeout(redirectTimeoutRef.current)
         redirectTimeoutRef.current = setTimeout(() => {
           router.push('/messages')
         }, 2000)
@@ -80,6 +81,7 @@ export default function PairingScreen() {
         setStep('paired')
 
         // Auto-redirect after 2 seconds
+        if (redirectTimeoutRef.current) clearTimeout(redirectTimeoutRef.current)
         redirectTimeoutRef.current = setTimeout(() => {
           router.push('/messages')
         }, 2000)
@@ -94,14 +96,23 @@ export default function PairingScreen() {
     }
   }, [router, setSyncGroupId, setDeviceInfo])
 
-  // Initialize sync on mount
+  // Call once on mount
+  const initialized = useRef(false)
   useEffect(() => {
-    initializeSync()
-  }, [initializeSync])
+    if (!initialized.current) {
+      initialized.current = true
+      initializeSync()
+    }
+    return () => {
+      if (redirectTimeoutRef.current) {
+        clearTimeout(redirectTimeoutRef.current)
+      }
+    }
+  }, [])
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
-      <div className="max-w-2xl w-full">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4 overflow-y-auto">
+      <div className="max-w-2xl w-full my-auto">
         {/* Logo and Title */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center mb-4">

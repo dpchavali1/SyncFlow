@@ -821,11 +821,15 @@
     "syncGroups": {
       "$syncGroupId": {
         ".read": "auth != null",
-        ".write": "auth != null && auth.token.admin === true",
+        ".write": "auth != null",
         "plan": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.admin === true",
           ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime'))"
         },
         "deviceLimit": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.admin === true",
           ".validate": "!newData.exists() || newData.isNumber()"
         },
         "masterDevice": {
@@ -835,19 +839,26 @@
           ".validate": "!newData.exists() || newData.isNumber()"
         },
         "planExpiresAt": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.admin === true",
           ".validate": "!newData.exists() || newData.isNumber()"
         },
         "wasPremium": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.admin === true",
           ".validate": "!newData.exists() || newData.isBoolean()"
         },
         "firstPremiumDate": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.admin === true",
           ".validate": "!newData.exists() || newData.isNumber()"
         },
         "devices": {
           ".read": "auth != null",
+          ".write": "auth != null",
           "$deviceId": {
             ".read": "auth != null",
-            ".write": "auth != null && auth.token.admin === true",
+            ".write": "auth != null",
             ".validate": "newData.hasChildren(['deviceType', 'joinedAt'])",
             "deviceType": {
               ".validate": "newData.isString() && (newData.val() == 'android' || newData.val() == 'macos' || newData.val() == 'web')"
