@@ -388,7 +388,7 @@ class SubscriptionService: ObservableObject {
 
     private func updateLocalPlanData(plan: String, expiresAt: Int64) {
         let prefs = PreferencesService.shared
-        prefs.setUserPlan(plan: plan, expiresAt: expiresAt)
+        prefs.setUserPlan(plan, expiresAt: expiresAt)
     }
 }
 
