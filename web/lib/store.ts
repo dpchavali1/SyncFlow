@@ -64,6 +64,13 @@ interface AppState {
   isAuthenticated: boolean
   setUserId: (userId: string | null) => void
 
+  // Sync Group
+  syncGroupId: string | null
+  setSyncGroupId: (id: string | null) => void
+  deviceCount: number
+  deviceLimit: number
+  setDeviceInfo: (count: number, limit: number) => void
+
   // Messages
   messages: Message[]
   setMessages: (messages: Message[]) => void
@@ -101,6 +108,13 @@ export const useAppStore = create<AppState>((set) => ({
   userId: null,
   isAuthenticated: false,
   setUserId: (userId) => set({ userId, isAuthenticated: !!userId }),
+
+  // Sync Group
+  syncGroupId: null,
+  setSyncGroupId: (id) => set({ syncGroupId: id }),
+  deviceCount: 0,
+  deviceLimit: 3,
+  setDeviceInfo: (count, limit) => set({ deviceCount: count, deviceLimit: limit }),
 
   // Messages
   messages: [],

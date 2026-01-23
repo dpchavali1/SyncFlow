@@ -2,21 +2,26 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { Smartphone, Monitor, CheckCircle, AlertCircle, RefreshCw, XCircle, Clock } from 'lucide-react'
+import { Smartphone, Monitor, CheckCircle, AlertCircle, RefreshCw, XCircle } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useAppStore } from '@/lib/store'
-import { initiatePairing, listenForPairingApproval, PairingSession, PairingStatus } from '@/lib/firebase'
+import {
+  getSyncGroupId,
+  createSyncGroup,
+  recoverSyncGroup,
+  getSyncGroupInfo,
+  getWebDeviceId,
+} from '@/lib/firebase'
 
 export default function PairingScreen() {
   const router = useRouter()
-  const { setUserId } = useAppStore()
-  const [step, setStep] = useState<'loading' | 'qr' | 'success' | 'rejected' | 'error'>('loading')
+  const { setSyncGroupId, setDeviceInfo } = useAppStore()
+  const [step, setStep] = useState<'loading' | 'paired' | 'error'>('loading')
   const [errorMessage, setErrorMessage] = useState('')
-  const [pairingSession, setPairingSession] = useState<PairingSession | null>(null)
-  const [timeRemaining, setTimeRemaining] = useState(0)
+  const [syncGroupId, setSyncGroupIdLocal] = useState<string>('')
+  const [deviceCount, setDeviceCount] = useState(0)
+  const [deviceLimit, setDeviceLimit] = useState(3)
   const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const unsubscribeRef = useRef<(() => void) | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Cleanup function
   useEffect(() => {
@@ -24,131 +29,75 @@ export default function PairingScreen() {
       if (redirectTimeoutRef.current) {
         clearTimeout(redirectTimeoutRef.current)
       }
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current()
-      }
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-      }
     }
   }, [])
 
-  // Start pairing session
-  const startPairing = useCallback(async () => {
-    // Cleanup previous listeners
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current()
-      unsubscribeRef.current = null
-    }
-    if (timerRef.current) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-
+  // Initialize sync group
+  const initializeSync = useCallback(async () => {
     setStep('loading')
     setErrorMessage('')
 
     try {
-      const session = await initiatePairing()
-      setPairingSession(session)
-      setStep('qr')
+      // Try to recover existing sync group first
+      const recovered = await recoverSyncGroup('web')
+      if (recovered.success && recovered.syncGroupId) {
+        setSyncGroupIdLocal(recovered.syncGroupId)
 
-      // Calculate initial time remaining
-      const remaining = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
-      setTimeRemaining(remaining)
-
-      // Start countdown timer
-      timerRef.current = setInterval(() => {
-        setTimeRemaining((prev) => {
-          if (prev <= 1) {
-            if (timerRef.current) {
-              clearInterval(timerRef.current)
-            }
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
-
-      // Listen for approval/rejection
-      unsubscribeRef.current = listenForPairingApproval(session.token, (status: PairingStatus) => {
-        if (status.status === 'approved' && status.pairedUid) {
-          // Success! Store credentials and redirect
-          localStorage.setItem('syncflow_user_id', status.pairedUid)
-          if (status.deviceId) {
-            localStorage.setItem('syncflow_device_id', status.deviceId)
-          }
-          setUserId(status.pairedUid)
-          setStep('success')
-
-          // Cleanup listeners
-          if (unsubscribeRef.current) {
-            unsubscribeRef.current()
-            unsubscribeRef.current = null
-          }
-          if (timerRef.current) {
-            clearInterval(timerRef.current)
-            timerRef.current = null
-          }
-
-          // Redirect after brief delay
-          redirectTimeoutRef.current = setTimeout(() => {
-            router.push('/messages')
-          }, 2000)
-        } else if (status.status === 'rejected') {
-          setStep('rejected')
-          if (unsubscribeRef.current) {
-            unsubscribeRef.current()
-            unsubscribeRef.current = null
-          }
-          if (timerRef.current) {
-            clearInterval(timerRef.current)
-            timerRef.current = null
-          }
-        } else if (status.status === 'expired') {
-          // Token expired, show error
-          setStep('error')
-          setErrorMessage('Pairing session expired. Please try again.')
-          if (unsubscribeRef.current) {
-            unsubscribeRef.current()
-            unsubscribeRef.current = null
-          }
-          if (timerRef.current) {
-            clearInterval(timerRef.current)
-            timerRef.current = null
-          }
+        // Get group info
+        const info = await getSyncGroupInfo(recovered.syncGroupId)
+        if (info.success && info.data) {
+          setDeviceCount(info.data.deviceCount)
+          setDeviceLimit(info.data.deviceLimit)
         }
-      })
-    } catch (error: any) {
-      console.error('Failed to start pairing:', error)
-      setStep('error')
-      setErrorMessage(error.message || 'Failed to start pairing session')
-    }
-  }, [router, setUserId])
 
-  // Start pairing on mount
-  useEffect(() => {
-    startPairing()
-  }, [startPairing])
+        setSyncGroupId(recovered.syncGroupId)
+        setDeviceInfo(info.data?.deviceCount || 0, info.data?.deviceLimit || 3)
+        setStep('paired')
 
-  // Handle timer expiration
-  useEffect(() => {
-    if (timeRemaining === 0 && step === 'qr') {
-      setStep('error')
-      setErrorMessage('Pairing session expired. Please try again.')
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current()
-        unsubscribeRef.current = null
+        // Auto-redirect after 2 seconds
+        redirectTimeoutRef.current = setTimeout(() => {
+          router.push('/messages')
+        }, 2000)
+        return
       }
-    }
-  }, [timeRemaining, step])
 
-  // Format time remaining
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
+      // No existing group, create new one
+      const newGroupId = getSyncGroupId()
+      const created = await createSyncGroup(newGroupId, 'web')
+
+      if (created) {
+        setSyncGroupIdLocal(newGroupId)
+
+        // Get group info
+        const info = await getSyncGroupInfo(newGroupId)
+        if (info.success && info.data) {
+          setDeviceCount(info.data.deviceCount)
+          setDeviceLimit(info.data.deviceLimit)
+        }
+
+        setSyncGroupId(newGroupId)
+        setDeviceInfo(info.data?.deviceCount || 0, info.data?.deviceLimit || 3)
+        setStep('paired')
+
+        // Auto-redirect after 2 seconds
+        redirectTimeoutRef.current = setTimeout(() => {
+          router.push('/messages')
+        }, 2000)
+      } else {
+        setStep('error')
+        setErrorMessage('Failed to initialize pairing')
+      }
+    } catch (error: any) {
+      console.error('Failed to initialize sync:', error)
+      setStep('error')
+      setErrorMessage(error.message || 'Failed to initialize pairing')
+    }
+  }, [router, setSyncGroupId, setDeviceInfo])
+
+  // Initialize sync on mount
+  useEffect(() => {
+    initializeSync()
+  }, [initializeSync])
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
@@ -170,110 +119,78 @@ export default function PairingScreen() {
             <div className="text-center py-12">
               <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-                Generating QR Code...
+                Initializing Pairing...
               </h2>
               <p className="text-gray-600 dark:text-gray-400">
-                Please wait while we prepare the pairing session
+                Please wait while we set up your sync group
               </p>
             </div>
           )}
 
-          {step === 'qr' && pairingSession && (
+          {step === 'paired' && (
             <div className="text-center">
-              <Monitor className="w-16 h-16 text-blue-600 mx-auto mb-4" />
+              <CheckCircle className="w-16 h-16 text-green-600 mx-auto mb-4" />
               <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
-                Scan to Pair
+                Sync Group Ready
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Scan this QR code with your SyncFlow Android app
+                Share this QR code to add more devices
               </p>
 
               {/* QR Code */}
-              <div className="bg-white p-6 rounded-xl inline-block mb-6 shadow-inner">
-                <QRCodeSVG
-                  value={pairingSession.qrPayload}
-                  size={220}
-                  level="M"
-                  includeMargin={false}
-                />
+              {syncGroupId && (
+                <div className="bg-white p-6 rounded-xl inline-block mb-6 shadow-inner border border-gray-200">
+                  <QRCodeSVG
+                    value={syncGroupId}
+                    size={220}
+                    level="M"
+                    includeMargin={false}
+                  />
+                </div>
+              )}
+
+              {/* Device Info */}
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 mb-6">
+                <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
+                  <span className="font-semibold">{deviceCount}/{deviceLimit}</span> devices connected
+                </p>
+                {deviceCount >= deviceLimit && (
+                  <p className="text-xs text-yellow-600 dark:text-yellow-400">
+                    You've reached your device limit. Upgrade to Pro for unlimited devices.
+                  </p>
+                )}
               </div>
 
-              {/* Timer */}
-              <div className="flex items-center justify-center gap-2 mb-6">
-                <Clock className={`w-5 h-5 ${timeRemaining <= 60 ? 'text-orange-500' : 'text-gray-400'}`} />
-                <span className={`font-mono text-lg ${timeRemaining <= 60 ? 'text-orange-500 font-semibold' : 'text-gray-600 dark:text-gray-400'}`}>
-                  {formatTime(timeRemaining)}
-                </span>
+              {/* Sync Group ID */}
+              <div className="bg-gray-100 dark:bg-gray-700 p-3 rounded-lg text-left mb-4">
+                <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Sync Group ID:</p>
+                <code className="text-xs font-mono text-gray-900 dark:text-white break-all">{syncGroupId}</code>
               </div>
 
               {/* Instructions */}
               <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 text-left">
                 <h3 className="font-semibold text-gray-900 dark:text-white mb-2">
-                  Instructions:
+                  To add another device:
                 </h3>
                 <ol className="text-gray-700 dark:text-gray-300 space-y-1 text-sm">
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">1.</span>
-                    <span>Open SyncFlow app on your Android phone</span>
+                    <span>Open SyncFlow on another device</span>
                   </li>
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">2.</span>
-                    <span>Go to Settings → Desktop Integration</span>
+                    <span>Scan this QR code</span>
                   </li>
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">3.</span>
-                    <span>Tap "Scan Desktop QR Code"</span>
-                  </li>
-                  <li className="flex items-start">
-                    <span className="font-semibold mr-2">4.</span>
-                    <span>Point your camera at this QR code</span>
-                  </li>
-                  <li className="flex items-start">
-                    <span className="font-semibold mr-2">5.</span>
-                    <span>Approve the pairing request on your phone</span>
+                    <span>Your devices will sync automatically</span>
                   </li>
                 </ol>
               </div>
 
-              {/* Refresh button */}
-              <button
-                onClick={startPairing}
-                className="mt-6 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium flex items-center justify-center mx-auto"
-              >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                Generate New QR Code
-              </button>
-            </div>
-          )}
-
-          {step === 'success' && (
-            <div className="text-center py-12">
-              <CheckCircle className="w-20 h-20 text-green-500 mx-auto mb-4" />
-              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
-                Successfully Paired!
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400">
-                Redirecting to your messages...
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-4">
+                Redirecting to messages...
               </p>
-            </div>
-          )}
-
-          {step === 'rejected' && (
-            <div className="text-center py-12">
-              <XCircle className="w-20 h-20 text-orange-500 mx-auto mb-4" />
-              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
-                Pairing Declined
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                The pairing request was declined on your phone.
-              </p>
-              <button
-                onClick={startPairing}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center mx-auto"
-              >
-                <RefreshCw className="w-5 h-5 mr-2" />
-                Try Again
-              </button>
             </div>
           )}
 
@@ -281,11 +198,11 @@ export default function PairingScreen() {
             <div className="text-center py-12">
               <AlertCircle className="w-20 h-20 text-red-500 mx-auto mb-4" />
               <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
-                Pairing Failed
+                Initialization Failed
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">{errorMessage}</p>
               <button
-                onClick={startPairing}
+                onClick={initializeSync}
                 className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center mx-auto"
               >
                 <RefreshCw className="w-5 h-5 mr-2" />
