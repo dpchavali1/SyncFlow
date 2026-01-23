@@ -1,0 +1,22 @@
+[
+  {
+    "subscriptionId": 1,
+    "slotIndex": 0,
+    "displayName": "Personal",
+    "carrierName": "T-Mobile",
+    "phoneNumber": "+1234567890",
+    "iccId": "89011234567890123456",
+    "isEmbedded": false,
+    "isActive": true
+  },
+  {
+    "subscriptionId": 2,
+    "slotIndex": 1,
+    "displayName": "Work",
+    "carrierName": "Verizon",
+    "phoneNumber": "+0987654321",
+    "iccId": "89019876543210987654",
+    "isEmbedded": true,
+    "isActive": true
+  }
+]

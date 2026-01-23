@@ -1,7 +1,7 @@
 package com.phoneintegration.app.ui.conversations
 
-import android.content.Intent
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,6 +18,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -43,13 +44,16 @@ fun NewMessageComposeScreen(
     onBack: () -> Unit,
     onMessageSent: () -> Unit,
     groupName: String? = null,  // Optional group name
-    groupId: Long? = null  // Optional group ID for linking to MMS threads
+    groupId: Long? = null,  // Optional group ID for linking to MMS threads
+    initialMessage: String? = null,
+    initialAttachmentUris: List<Uri> = emptyList()
 ) {
     val context = LocalContext.current
     val groupRepository = remember { GroupRepository(context) }
-    var messageText by remember { mutableStateOf(TextFieldValue("")) }
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var messageText by remember { mutableStateOf(TextFieldValue(initialMessage.orEmpty())) }
+    var selectedAttachmentUri by remember { mutableStateOf(initialAttachmentUris.firstOrNull()) }
     var isSending by remember { mutableStateOf(false) }
+    val hasMultipleInitialAttachments = initialAttachmentUris.size > 1
 
     val isGroupMessage = contacts.size > 1
 
@@ -57,7 +61,27 @@ fun NewMessageComposeScreen(
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        selectedImageUri = uri
+        selectedAttachmentUri = uri
+    }
+
+    LaunchedEffect(initialMessage) {
+        if (!initialMessage.isNullOrBlank()) {
+            messageText = TextFieldValue(initialMessage)
+        }
+    }
+
+    LaunchedEffect(initialAttachmentUris) {
+        if (initialAttachmentUris.isNotEmpty()) {
+            selectedAttachmentUri = initialAttachmentUris.first()
+        }
+    }
+
+    val attachmentMimeType = remember(selectedAttachmentUri) {
+        selectedAttachmentUri?.let { context.contentResolver.getType(it) }
+    }
+    val isImageAttachment = attachmentMimeType?.startsWith("image/") == true
+    val attachmentName = remember(selectedAttachmentUri) {
+        selectedAttachmentUri?.let { getDisplayName(context, it) }
     }
 
     Scaffold(
@@ -171,7 +195,7 @@ fun NewMessageComposeScreen(
             Spacer(modifier = Modifier.weight(1f))
 
             // Image attachment preview
-            if (selectedImageUri != null) {
+            if (selectedAttachmentUri != null) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -179,15 +203,35 @@ fun NewMessageComposeScreen(
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Box {
-                        AsyncImage(
-                            model = selectedImageUri,
-                            contentDescription = "Selected image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(200.dp)
-                        )
+                        if (isImageAttachment) {
+                            AsyncImage(
+                                model = selectedAttachmentUri,
+                                contentDescription = "Selected image",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(200.dp)
+                            )
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.InsertDriveFile,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    text = attachmentName ?: "Attachment",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                            }
+                        }
                         IconButton(
-                            onClick = { selectedImageUri = null },
+                            onClick = { selectedAttachmentUri = null },
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(8.dp)
@@ -199,6 +243,15 @@ fun NewMessageComposeScreen(
                             )
                         }
                     }
+                }
+
+                if (hasMultipleInitialAttachments) {
+                    Text(
+                        text = "Multiple items shared. Only the first attachment will be sent.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
                 }
             }
 
@@ -236,7 +289,7 @@ fun NewMessageComposeScreen(
                     // Send button
                     IconButton(
                         onClick = {
-                            if (messageText.text.isNotBlank() || selectedImageUri != null) {
+                            if (messageText.text.isNotBlank() || selectedAttachmentUri != null) {
                                 isSending = true
 
                                 if (isGroupMessage) {
@@ -245,13 +298,13 @@ fun NewMessageComposeScreen(
                                     Log.d("NewMessageCompose", "Group ID: $groupId")
                                     Log.d("NewMessageCompose", "Recipients: ${contacts.map { it.phoneNumber }}")
                                     Log.d("NewMessageCompose", "Message: ${messageText.text}")
-                                    Log.d("NewMessageCompose", "Has attachment: ${selectedImageUri != null}")
+                                    Log.d("NewMessageCompose", "Has attachment: ${selectedAttachmentUri != null}")
 
                                     sendGroupMessage(
                                         context = context,
                                         contacts = contacts,
                                         message = messageText.text,
-                                        imageUri = selectedImageUri,
+                                        imageUri = selectedAttachmentUri,
                                         onSuccess = { threadId ->
                                             Log.d("NewMessageCompose", "=== GROUP MESSAGE SEND SUCCESS ===")
                                             Log.d("NewMessageCompose", "Received thread ID: $threadId")
@@ -316,21 +369,15 @@ fun NewMessageComposeScreen(
                                 } else {
                                     // Send single message
                                     val recipient = contacts.first()
-                                    if (selectedImageUri != null) {
+                                    if (selectedAttachmentUri != null) {
                                         // Send MMS
-                                        val success = MmsHelper.sendMms(
-                                            context,
+                                        viewModel.sendMms(
                                             recipient.phoneNumber,
-                                            selectedImageUri!!,
+                                            selectedAttachmentUri!!,
                                             messageText.text.ifBlank { null }
                                         )
-                                        if (success) {
-                                            Toast.makeText(context, "MMS sent", Toast.LENGTH_SHORT).show()
-                                            onMessageSent()
-                                        } else {
-                                            Toast.makeText(context, "MMS failed", Toast.LENGTH_SHORT).show()
-                                            isSending = false
-                                        }
+                                        Toast.makeText(context, "MMS sending...", Toast.LENGTH_SHORT).show()
+                                        onMessageSent()
                                     } else {
                                         // Send SMS
                                         viewModel.sendSms(recipient.phoneNumber, messageText.text) { success ->
@@ -346,7 +393,7 @@ fun NewMessageComposeScreen(
                                 }
                             }
                         },
-                        enabled = !isSending && (messageText.text.isNotBlank() || selectedImageUri != null)
+                        enabled = !isSending && (messageText.text.isNotBlank() || selectedAttachmentUri != null)
                     ) {
                         if (isSending) {
                             CircularProgressIndicator(
@@ -414,4 +461,15 @@ fun sendGroupMessage(
         Log.e("sendGroupMessage", "Exception during group send", e)
         onError(e.message ?: "Unknown error")
     }
+}
+
+private fun getDisplayName(context: android.content.Context, uri: Uri): String? {
+    val resolver = context.contentResolver
+    val cursor = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+    cursor?.use {
+        if (it.moveToFirst()) {
+            return it.getString(it.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+        }
+    }
+    return uri.lastPathSegment
 }

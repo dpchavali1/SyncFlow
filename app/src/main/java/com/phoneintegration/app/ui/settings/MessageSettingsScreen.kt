@@ -74,6 +74,20 @@ fun MessageSettingsScreen(
                 onCheckedChange = { prefsManager.setGroupByDate(it) }
             )
             
+            // Gesture Settings
+            Text(
+                "Gestures",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            SwitchCard(
+                title = "Enable swipe gestures",
+                subtitle = "Swipe a conversation to archive or pin it",
+                checked = prefsManager.swipeGesturesEnabled.value,
+                onCheckedChange = { prefsManager.setSwipeGesturesEnabled(it) }
+            )
+            
             Divider(modifier = Modifier.padding(vertical = 8.dp))
             
             // Auto-Delete

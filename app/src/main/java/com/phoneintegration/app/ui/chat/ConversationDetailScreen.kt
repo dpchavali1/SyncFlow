@@ -1,13 +1,19 @@
 package com.phoneintegration.app.ui.chat
 
+import android.Manifest
 import android.content.Intent
-import android.graphics.Bitmap
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.widget.Toast
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
@@ -24,8 +30,16 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Info
+import com.phoneintegration.app.webrtc.SyncFlowCallManager
+import com.phoneintegration.app.SyncFlowCallService
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,19 +52,31 @@ import coil.compose.AsyncImage
 import com.phoneintegration.app.R
 import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.SmsViewModel
+import com.phoneintegration.app.continuity.ContinuityService
+import com.phoneintegration.app.data.DraftRepository
+import com.phoneintegration.app.data.ScheduledMessageRepository
+import com.phoneintegration.app.realtime.TypingIndicatorManager
+import com.phoneintegration.app.PhoneNumberUtils
 import kotlinx.coroutines.launch
 import java.io.File
-import java.io.FileOutputStream
+import com.phoneintegration.app.data.database.AppDatabase
+import com.phoneintegration.app.data.database.BlockedContact
+import com.phoneintegration.app.data.database.SpamMessage
+import com.phoneintegration.app.utils.SpamFilter
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Report
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationDetailScreen(
+    threadId: Long,  // Thread ID for loading messages
     address: String,
     contactName: String,
     viewModel: SmsViewModel,
     onBack: () -> Unit,
-    threadId: Long? = null,  // Optional thread ID for direct loading (used for groups)
     groupMembers: List<String>? = null,  // Optional list of group member names
     groupId: Long? = null,  // Optional group ID for deletion
     onDeleteGroup: ((Long) -> Unit)? = null  // Callback for group deletion
@@ -60,13 +86,119 @@ fun ConversationDetailScreen(
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
     val hasMore by viewModel.hasMore.collectAsState()
     val smart by viewModel.smartReplies.collectAsState()
+    val reactions by viewModel.messageReactions.collectAsState()
+    // Temporarily provide empty map for read receipts
+    val readReceipts by remember { mutableStateOf<Map<String, Any>>(emptyMap()) }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    var showContactInfo by remember { mutableStateOf(false) }
+
+    // Block and spam state
+    val database = remember { AppDatabase.getInstance(context) }
+    var isBlocked by remember { mutableStateOf(false) }
+    var showBlockConfirmDialog by remember { mutableStateOf(false) }
+    var showReportSpamDialog by remember { mutableStateOf(false) }
+    val relatedAddresses by viewModel.relatedAddresses.collectAsState()
+    val preferredSendAddress by viewModel.preferredSendAddress.collectAsState()
+    val effectiveSendAddress = preferredSendAddress ?: address
+    val displayRelatedAddresses = if (relatedAddresses.isNotEmpty()) relatedAddresses else listOf(address)
+
+    var replyToMessage by remember { mutableStateOf<SmsMessage?>(null) }
+
+    // Check if contact is blocked
+    LaunchedEffect(address) {
+        isBlocked = database.blockedContactDao().isBlocked(address)
+        replyToMessage = null
+    }
+
+    // Draft and Scheduled message repositories
+    val draftRepository = remember { DraftRepository(context) }
+    val scheduledRepository = remember { ScheduledMessageRepository(context) }
+    val typingManager = remember { TypingIndicatorManager(context) }
+    val continuityService = remember { ContinuityService(context.applicationContext) }
+
+    // Load draft on first load
+    var draftLoaded by remember { mutableStateOf(false) }
+
+    // SyncFlow video call manager for user-to-user calls (use the service's manager)
+    val callManager = remember { SyncFlowCallService.getCallManager() }
+
+    // Permission launcher for video call
+    val videoCallPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val cameraGranted = permissions[Manifest.permission.CAMERA] == true
+        val micGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
+
+        if (cameraGranted && micGranted) {
+            // Permissions granted, start the video call
+            // Start the call service first
+            SyncFlowCallService.startService(context)
+
+            scope.launch {
+                // Wait a moment for service to initialize
+                kotlinx.coroutines.delay(500)
+
+                val manager = SyncFlowCallService.getCallManager()
+                if (manager == null) {
+                    Toast.makeText(context, "Call service not ready. Please try again.", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val result = manager.startCallToUser(
+                    recipientPhoneNumber = effectiveSendAddress,
+                    recipientName = contactName,
+                    isVideo = true
+                )
+                result.onSuccess {
+                    Toast.makeText(context, "Calling $contactName...", Toast.LENGTH_SHORT).show()
+                }
+                result.onFailure { e ->
+                    Toast.makeText(context, e.message ?: "Failed to start call", Toast.LENGTH_LONG).show()
+                }
+            }
+        } else {
+            Toast.makeText(context, "Camera and microphone permissions are required for video calls", Toast.LENGTH_LONG).show()
+        }
+    }
 
     var input by remember { mutableStateOf("") }
     var selectedMessage by remember { mutableStateOf<SmsMessage?>(null) }
     var showActions by remember { mutableStateOf(false) }
+    var showForwardDialog by remember { mutableStateOf(false) }
+    var showMediaGallery by remember { mutableStateOf(false) }
+    var searchText by remember { mutableStateOf("") }
+    var showSearch by remember { mutableStateOf(false) }
+
+    // Starred messages
+    val starredMessageIds by viewModel.starredMessageIds.collectAsState()
+    val conversations by viewModel.conversations.collectAsState()
+
+    // Load starred message IDs when entering the screen
+    LaunchedEffect(Unit) {
+        viewModel.loadStarredMessageIds()
+    }
+
+    // Filter messages based on search
+    val filteredMessages = remember(messages, searchText) {
+        if (searchText.isBlank()) {
+            messages
+        } else {
+            messages.filter { it.body.contains(searchText, ignoreCase = true) }
+        }
+    }
+
+    // Mark thread as read when conversation is opened
+    LaunchedEffect(threadId) {
+        if (threadId > 0) {
+            viewModel.markThreadRead(threadId)
+        }
+    }
+
+    // Mark messages as read for Firebase sync
+    LaunchedEffect(messages, effectiveSendAddress) {
+        viewModel.markConversationMessagesRead(effectiveSendAddress, messages)
+    }
 
     // FAB only for SyncFlow Deals fake conversation
     val isDealsConversation = address == "syncflow_ads"
@@ -74,6 +206,10 @@ fun ConversationDetailScreen(
     // Attachment state
     var showAttachmentSheet by remember { mutableStateOf(false) }
     var selectedAttachmentUri by remember { mutableStateOf<Uri?>(null) }
+    var mmsMessageText by remember { mutableStateOf("") }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
+    val replyPreview = replyToMessage?.let { buildReplyPreview(it) }
 
     // 🚀 Gallery picker
     val galleryPicker = rememberLauncherForActivityResult(
@@ -87,26 +223,84 @@ fun ConversationDetailScreen(
 
     // 🚀 Camera capture
     val cameraCapture = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap: Bitmap? ->
-        if (bitmap != null) {
-            val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
-            FileOutputStream(file).use { stream ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success) {
+            pendingCameraUri?.let { uri ->
+                selectedAttachmentUri = uri
+                showAttachmentSheet = false
             }
-            selectedAttachmentUri = Uri.fromFile(file)
-            showAttachmentSheet = false
+        } else {
+            pendingCameraUri = null
+        }
+    }
+
+    val startCameraCapture = {
+        val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.provider",
+            file
+        )
+        pendingCameraUri = uri
+        cameraCapture.launch(uri)
+    }
+
+    LaunchedEffect(selectedAttachmentUri) {
+        if (selectedAttachmentUri != null) {
+            mmsMessageText = input
+        } else {
+            mmsMessageText = ""
+        }
+    }
+
+    // Camera permission launcher
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            startCameraCapture()
+        } else {
+            Toast.makeText(context, "Camera permission is required to take photos", Toast.LENGTH_SHORT).show()
         }
     }
 
     // First time load
-    LaunchedEffect(address, threadId) {
-        if (threadId != null) {
-            // Load by thread ID directly (for groups)
-            viewModel.loadConversationByThreadId(threadId, contactName)
-        } else {
-            // Load by address (for regular conversations)
-            viewModel.loadConversation(address)
+    LaunchedEffect(threadId) {
+        // Always load by thread ID
+        viewModel.loadConversationByThreadId(threadId, contactName)
+    }
+
+    // Load draft on first load
+    LaunchedEffect(address) {
+        if (!draftLoaded && address.isNotBlank() && address != "syncflow_ads") {
+            val draft = draftRepository.getDraft(address)
+            if (draft != null && draft.body.isNotBlank()) {
+                input = draft.body
+            }
+            draftLoaded = true
+            continuityService.updateConversationState(address, contactName, threadId, input)
+        }
+    }
+
+    // Auto-save draft when input changes (with debouncing in repository)
+    LaunchedEffect(input) {
+        if (draftLoaded && address.isNotBlank() && address != "syncflow_ads") {
+            draftRepository.saveDraftDebounced(address, input, null, contactName)
+            // Update typing indicator
+            if (input.isNotBlank()) {
+                typingManager.startTyping(address)
+            } else {
+                typingManager.stopTyping(address)
+            }
+            continuityService.updateConversationState(address, contactName, threadId, input)
+        }
+    }
+
+    // Stop typing when leaving screen
+    DisposableEffect(address) {
+        onDispose {
+            typingManager.stopTyping(address)
         }
     }
 
@@ -117,25 +311,22 @@ fun ConversationDetailScreen(
         }
     }
 
+    // Mark thread read locally so the conversation list stops showing unread badges
+    LaunchedEffect(threadId, messages.size) {
+        if (messages.isNotEmpty()) {
+            viewModel.markThreadRead(threadId)
+        }
+    }
+
     // Listen for incoming SMS/MMS broadcasts to refresh this conversation
-    DisposableEffect(address, threadId) {
+    DisposableEffect(threadId) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 val receivedAddress = intent?.getStringExtra(SmsReceiver.EXTRA_ADDRESS)
                 Log.d("ConversationDetailScreen", "SMS/MMS received from $receivedAddress - current address: $address")
 
-                // Reload conversation
-                // For MMS, we don't have address info, so always reload
-                // For SMS, check if it matches current conversation
-                if (intent?.action == "com.phoneintegration.app.MMS_RECEIVED" ||
-                    receivedAddress == address) {
-
-                    if (threadId != null) {
-                        viewModel.loadConversationByThreadId(threadId, contactName)
-                    } else {
-                        viewModel.loadConversation(address)
-                    }
-                }
+                // Reload conversation by thread ID
+                viewModel.loadConversationByThreadId(threadId, contactName)
             }
         }
 
@@ -207,12 +398,103 @@ fun ConversationDetailScreen(
                         }
                     }
 
-                    // Don't show call button for SyncFlow Deals conversation or groups
+                    // Media gallery button
+                    IconButton(onClick = { showMediaGallery = true }) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoLibrary,
+                            contentDescription = "Media Gallery"
+                        )
+                    }
+
+                    // Search button
+                    IconButton(onClick = { showSearch = !showSearch }) {
+                        Icon(
+                            imageVector = if (showSearch) Icons.Default.Close else Icons.Default.Search,
+                            contentDescription = if (showSearch) "Close search" else "Search"
+                        )
+                    }
+
+                    IconButton(onClick = { showContactInfo = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Contact info"
+                        )
+                    }
+
+                    // Don't show call buttons for SyncFlow Deals conversation or groups
                     if (!isDealsConversation && groupMembers.isNullOrEmpty()) {
+                        // SyncFlow Video Call button (user-to-user)
+                        IconButton(
+                            onClick = {
+                                // Check if permissions are already granted
+                                val cameraPermission = ContextCompat.checkSelfPermission(
+                                    context, Manifest.permission.CAMERA
+                                )
+                                val micPermission = ContextCompat.checkSelfPermission(
+                                    context, Manifest.permission.RECORD_AUDIO
+                                )
+
+                                Log.d("VideoCall", "Video call button tapped for $address")
+                                if (cameraPermission == PackageManager.PERMISSION_GRANTED &&
+                                    micPermission == PackageManager.PERMISSION_GRANTED) {
+                                    // Permissions already granted, start call
+                                    Log.d("VideoCall", "Permissions granted, starting call to $effectiveSendAddress")
+
+                                    // Start the call service first
+                                    SyncFlowCallService.startService(context)
+
+                                    scope.launch {
+                                        // Wait a moment for service to initialize
+                                        kotlinx.coroutines.delay(500)
+
+                                        try {
+                                            val manager = SyncFlowCallService.getCallManager()
+                                            if (manager == null) {
+                                                Toast.makeText(context, "Call service not ready. Please try again.", Toast.LENGTH_LONG).show()
+                                                return@launch
+                                            }
+                                            val result = manager.startCallToUser(
+                                                recipientPhoneNumber = effectiveSendAddress,
+                                                recipientName = contactName,
+                                                isVideo = true
+                                            )
+                                            result.onSuccess {
+                                                Log.d("VideoCall", "Call started successfully")
+                                                Toast.makeText(context, "Calling $contactName...", Toast.LENGTH_SHORT).show()
+                                            }
+                                            result.onFailure { e ->
+                                                Log.e("VideoCall", "Call failed: ${e.message}", e)
+                                                Toast.makeText(context, e.message ?: "Failed to start call", Toast.LENGTH_LONG).show()
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("VideoCall", "Exception starting call", e)
+                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                } else {
+                                    Log.d("VideoCall", "Requesting permissions")
+                                    // Request permissions
+                                    videoCallPermissionLauncher.launch(
+                                        arrayOf(
+                                            Manifest.permission.CAMERA,
+                                            Manifest.permission.RECORD_AUDIO
+                                        )
+                                    )
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Videocam,
+                                contentDescription = "Video Call",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        // Regular phone call button
                         IconButton(
                             onClick = {
                                 val intent = Intent(Intent.ACTION_CALL).apply {
-                                    data = Uri.parse("tel:$address")
+                                data = Uri.parse("tel:$effectiveSendAddress")
                                 }
                                 context.startActivity(intent)
                             }
@@ -229,100 +511,90 @@ fun ConversationDetailScreen(
         },
 
         bottomBar = {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surface)
-            ) {
-                // Smart Replies Row
-                if (smart.isNotEmpty()) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(6.dp)
-                    ) {
-                        smart.forEach { suggestion ->
-                            AssistChip(
-                                onClick = { input = suggestion },
-                                label = { Text(suggestion) },
-                                modifier = Modifier.padding(end = 6.dp)
-                            )
+            EnhancedMessageInput(
+                value = input,
+                onValueChange = { input = it },
+                onSend = { message ->
+                    // Clear draft on send
+                    scope.launch {
+                        draftRepository.deleteDraft(address)
+                    }
+                    val replyPrefix = replyToMessage?.let { buildReplyPrefix(it) }
+                    val composedMessage = mergeReplyPrefix(replyPrefix, message)
+                    viewModel.sendSms(effectiveSendAddress, composedMessage) { ok ->
+                        if (!ok) {
+                            Toast.makeText(context, "Failed to send", Toast.LENGTH_SHORT).show()
+                        } else {
+                            replyToMessage = null
                         }
                     }
-                }
-
-                // Input Row
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = input,
-                        onValueChange = { input = it },
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Write message…") },
-                        maxLines = 5,
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                            imeAction = ImeAction.Send
-                        ),
-                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                            onSend = {
-                                if (input.isNotBlank()) {
-                                    val messageToSend = input
-                                    input = "" // Clear immediately to prevent spam
-                                    viewModel.sendSms(address, messageToSend) { ok ->
-                                        if (!ok) {
-                                            Toast.makeText(context, "Failed to send", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
-                                }
-                            }
+                },
+                onSchedule = { message, scheduledTime ->
+                    scope.launch {
+                        val replyPrefix = replyToMessage?.let { buildReplyPrefix(it) }
+                        val composedMessage = mergeReplyPrefix(replyPrefix, message)
+                        scheduledRepository.scheduleMessage(
+                            address = effectiveSendAddress,
+                            body = composedMessage,
+                            scheduledTime = scheduledTime,
+                            contactName = contactName
                         )
-                    )
-
-                    // 📎 ATTACH BUTTON
-                    IconButton(onClick = { showAttachmentSheet = true }) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_attach),
-                            contentDescription = "Attach"
-                        )
+                        // Clear draft after scheduling
+                        draftRepository.deleteDraft(address)
+                        replyToMessage = null
+                        Toast.makeText(context, "Message scheduled", Toast.LENGTH_SHORT).show()
                     }
-
-                    // Send button
-                    IconButton(onClick = {
-                        if (input.isNotBlank()) {
-                            val messageToSend = input
-                            input = "" // Clear immediately to prevent spam
-                            viewModel.sendSms(address, messageToSend) { ok ->
-                                if (!ok) {
-                                    Toast.makeText(context, "Failed to send", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        }
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
-                    }
-                }
-            }
+                },
+                onAttach = { showAttachmentSheet = true },
+                smartReplies = smart,
+                replyPreview = replyPreview,
+                onClearReply = { replyToMessage = null }
+            )
         }
     ) { padding ->
 
-        LazyColumn(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize(),
-            reverseLayout = true,
-            state = listState
-        ) {
-            itemsIndexed(messages) { index, sms ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            // Search bar
+            if (showSearch) {
+                OutlinedTextField(
+                    value = searchText,
+                    onValueChange = { searchText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    placeholder = { Text("Search in conversation...") },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                    },
+                    trailingIcon = {
+                        if (searchText.isNotEmpty()) {
+                            IconButton(onClick = { searchText = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear")
+                            }
+                        }
+                    },
+                    singleLine = true
+                )
+            }
 
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                reverseLayout = true,
+                state = listState
+            ) {
+                itemsIndexed(filteredMessages) { index, sms ->
+                // Temporarily disabled read receipts functionality
+                val readReceipt = null // readReceipts[viewModel.getMessageKey(sms)] as? ReadReceipt
                 MessageBubble(
                     sms = sms,
+                    reaction = reactions[sms.id],
+                    readReceipt = readReceipt,
                     onLongPress = {
                         selectedMessage = sms
                         showActions = true
+                    },
+                    onQuickReact = {
+                        viewModel.toggleQuickReaction(sms.id)
                     },
                     onRetryMms = { failedSms ->
                         viewModel.retryMms(failedSms)
@@ -347,6 +619,260 @@ fun ConversationDetailScreen(
                 }
             }
         }
+        }
+    }
+
+    // Contact Info & Actions Bottom Sheet
+    if (showContactInfo) {
+        ModalBottomSheet(
+            onDismissRequest = { showContactInfo = false }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = contactName,
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                Text(
+                    text = address,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
+
+                if (displayRelatedAddresses.size > 1 && groupMembers.isNullOrEmpty()) {
+                    val selectedSend = preferredSendAddress ?: address
+                    Text(
+                        text = "Send using",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    displayRelatedAddresses.forEach { number ->
+                        val isSelected = number == selectedSend
+                        ListItem(
+                            headlineContent = {
+                                Text(PhoneNumberUtils.formatForDisplay(number))
+                            },
+                            supportingContent = {
+                                if (PhoneNumberUtils.formatForDisplay(number) != number) {
+                                    Text(number)
+                                }
+                            },
+                            trailingContent = {
+                                if (isSelected) {
+                                    Icon(Icons.Default.CheckCircle, null)
+                                }
+                            },
+                            modifier = Modifier.clickable {
+                                viewModel.setPreferredSendAddress(number)
+                                Toast.makeText(context, "Using $number", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+
+                    HorizontalDivider()
+                }
+
+                if (!groupMembers.isNullOrEmpty()) {
+                    Text(
+                        text = "Members: ${groupMembers.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+                }
+
+                HorizontalDivider()
+
+                // Copy Number
+                ListItem(
+                    headlineContent = { Text("Copy Number") },
+                    leadingContent = { Icon(Icons.Filled.ContentCopy, null) },
+                    modifier = Modifier.clickable {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Phone number", effectiveSendAddress))
+                        Toast.makeText(context, "Number copied", Toast.LENGTH_SHORT).show()
+                        showContactInfo = false
+                    }
+                )
+
+                HorizontalDivider()
+
+                // Block/Unblock Contact
+                ListItem(
+                    headlineContent = {
+                        Text(if (isBlocked) "Unblock Contact" else "Block Contact")
+                    },
+                    supportingContent = {
+                        Text(
+                            if (isBlocked) "Allow messages from this contact"
+                            else "Stop receiving messages from this contact"
+                        )
+                    },
+                    leadingContent = {
+                        Icon(
+                            if (isBlocked) Icons.Default.CheckCircle else Icons.Default.Block,
+                            null,
+                            tint = if (isBlocked) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.error
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        showContactInfo = false
+                        showBlockConfirmDialog = true
+                    }
+                )
+
+                // Report as Spam
+                ListItem(
+                    headlineContent = { Text("Report as Spam") },
+                    supportingContent = { Text("Move this conversation to spam folder") },
+                    leadingContent = {
+                        Icon(
+                            Icons.Default.Report,
+                            null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        showContactInfo = false
+                        showReportSpamDialog = true
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
+            }
+        }
+    }
+
+    // Block Confirmation Dialog
+    if (showBlockConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showBlockConfirmDialog = false },
+            title = { Text(if (isBlocked) "Unblock Contact" else "Block Contact") },
+            text = {
+                Text(
+                    if (isBlocked)
+                        "You will start receiving messages from $contactName again."
+                    else
+                        "You will no longer receive messages from $contactName. They won't be notified that you've blocked them."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            if (isBlocked) {
+                                database.blockedContactDao().unblock(address)
+                                Toast.makeText(context, "$contactName unblocked", Toast.LENGTH_SHORT).show()
+                            } else {
+                                database.blockedContactDao().block(
+                                    BlockedContact(
+                                        phoneNumber = address,
+                                        displayName = contactName,
+                                        blockSms = true,
+                                        blockCalls = true
+                                    )
+                                )
+                                Toast.makeText(context, "$contactName blocked", Toast.LENGTH_SHORT).show()
+                            }
+                            isBlocked = !isBlocked
+                        }
+                        showBlockConfirmDialog = false
+                    }
+                ) {
+                    Text(
+                        if (isBlocked) "Unblock" else "Block",
+                        color = if (isBlocked) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBlockConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Report Spam Dialog
+    if (showReportSpamDialog) {
+        AlertDialog(
+            onDismissRequest = { showReportSpamDialog = false },
+            title = { Text("Report as Spam") },
+            text = {
+                Text("This conversation will be moved to the spam folder. You can also block this contact to stop receiving future messages.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            val syncService = com.phoneintegration.app.desktop.DesktopSyncService(context.applicationContext)
+                            // Move all messages from this conversation to spam
+                            messages.forEach { msg ->
+                                val spamMessage = SpamMessage(
+                                    messageId = msg.id,
+                                    address = msg.address,
+                                    body = msg.body,
+                                    date = msg.date,
+                                    contactName = contactName,
+                                    spamConfidence = 1.0f,
+                                    isUserMarked = true
+                                )
+                                database.spamMessageDao().insert(spamMessage)
+                                syncService.syncSpamMessage(spamMessage)
+                            }
+                            Toast.makeText(context, "Conversation moved to spam", Toast.LENGTH_SHORT).show()
+                        }
+                        showReportSpamDialog = false
+                        onBack()
+                    }
+                ) {
+                    Text("Report Spam", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            val syncService = com.phoneintegration.app.desktop.DesktopSyncService(context.applicationContext)
+                            // Report spam AND block
+                            messages.forEach { msg ->
+                                val spamMessage = SpamMessage(
+                                    messageId = msg.id,
+                                    address = msg.address,
+                                    body = msg.body,
+                                    date = msg.date,
+                                    contactName = contactName,
+                                    spamConfidence = 1.0f,
+                                    isUserMarked = true
+                                )
+                                database.spamMessageDao().insert(spamMessage)
+                                syncService.syncSpamMessage(spamMessage)
+                            }
+                            database.blockedContactDao().block(
+                                BlockedContact(
+                                    phoneNumber = address,
+                                    displayName = contactName,
+                                    blockSms = true,
+                                    blockCalls = true,
+                                    reason = "Reported as spam"
+                                )
+                            )
+                            Toast.makeText(context, "Reported as spam and blocked", Toast.LENGTH_SHORT).show()
+                        }
+                        showReportSpamDialog = false
+                        onBack()
+                    }
+                ) {
+                    Text("Report & Block", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        )
     }
 
     // 📎 Bottom sheet for attachment options
@@ -366,7 +892,20 @@ fun ConversationDetailScreen(
                 Spacer(Modifier.height(8.dp))
 
                 Button(
-                    onClick = { cameraCapture.launch(null) },
+                    onClick = {
+                        // Check camera permission before launching
+                        when {
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.CAMERA
+                            ) == PackageManager.PERMISSION_GRANTED -> {
+                                startCameraCapture()
+                            }
+                            else -> {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Capture Photo")
@@ -391,13 +930,25 @@ fun ConversationDetailScreen(
                             .clip(RoundedCornerShape(16.dp))
                     )
                     Spacer(Modifier.height(12.dp))
-                    Text("Send this image as MMS?")
+                    OutlinedTextField(
+                        value = mmsMessageText,
+                        onValueChange = { mmsMessageText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Message (optional)") },
+                        maxLines = 3
+                    )
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    viewModel.sendMms(address, selectedAttachmentUri!!)
+                    val replyPrefix = replyToMessage?.let { buildReplyPrefix(it) }
+                    val composedMessage = mergeReplyPrefix(replyPrefix, mmsMessageText).ifBlank { null }
+                    Log.d("ConversationDetailScreen", "[LocalSend] Sending MMS to $effectiveSendAddress with attachment: $selectedAttachmentUri, message: ${composedMessage?.length ?: 0} chars")
+                    viewModel.sendMms(effectiveSendAddress, selectedAttachmentUri!!, composedMessage)
                     selectedAttachmentUri = null
+                    mmsMessageText = ""
+                    input = ""
+                    replyToMessage = null
                 }) {
                     Text("Send")
                 }
@@ -415,6 +966,22 @@ fun ConversationDetailScreen(
         selectedMessage?.let { msg ->
             MessageActionsSheet(
                 message = msg,
+                currentReaction = reactions[msg.id],
+                isStarred = starredMessageIds.contains(msg.id),
+                onSetReaction = { reaction ->
+                    viewModel.setMessageReaction(msg.id, reaction)
+                },
+                onReply = {
+                    replyToMessage = msg
+                },
+                onForward = {
+                    showForwardDialog = true
+                },
+                onStar = {
+                    viewModel.toggleStar(msg)
+                    val action = if (starredMessageIds.contains(msg.id)) "unstarred" else "starred"
+                    Toast.makeText(context, "Message $action", Toast.LENGTH_SHORT).show()
+                },
                 onDismiss = { showActions = false },
                 onDelete = {
                     viewModel.deleteMessage(msg.id) { ok ->
@@ -428,6 +995,97 @@ fun ConversationDetailScreen(
             )
         }
     }
+
+    // Forward message dialog
+    if (showForwardDialog) {
+        selectedMessage?.let { msg ->
+            ForwardMessageDialog(
+                message = msg,
+                conversations = conversations,
+                onForward = { targetAddress, messageBody ->
+                    viewModel.forwardMessage(targetAddress, messageBody) { success ->
+                        if (!success) {
+                            Toast.makeText(context, "Failed to forward message", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+                onDismiss = {
+                    showForwardDialog = false
+                    showActions = false
+                }
+            )
+        }
+    }
+
+    // Media gallery screen
+    if (showMediaGallery) {
+        Dialog(
+            onDismissRequest = { showMediaGallery = false },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false
+            )
+        ) {
+            MediaGalleryScreen(
+                contactName = contactName,
+                messages = messages,
+                onBack = { showMediaGallery = false }
+            )
+        }
+    }
 }
 
+private fun buildReplyPreview(message: SmsMessage): ReplyPreview {
+    return ReplyPreview(
+        sender = replySenderName(message),
+        snippet = buildReplySnippet(message)
+    )
+}
 
+private fun buildReplyPrefix(message: SmsMessage): String {
+    val sender = replySenderName(message)
+    val snippet = buildReplySnippet(message)
+    return "> $sender: $snippet"
+}
+
+private fun mergeReplyPrefix(prefix: String?, body: String): String {
+    if (prefix.isNullOrBlank()) {
+        return body
+    }
+
+    val trimmedBody = body.trim()
+    return if (trimmedBody.isBlank()) {
+        prefix
+    } else {
+        "$prefix\n$trimmedBody"
+    }
+}
+
+private fun replySenderName(message: SmsMessage): String {
+    return if (message.type == 2) {
+        "You"
+    } else {
+        message.contactName ?: message.address
+    }
+}
+
+private fun buildReplySnippet(message: SmsMessage): String {
+    val body = message.body.trim().replace(Regex("\\s+"), " ")
+    if (body.isNotBlank()) {
+        return body.take(80)
+    }
+
+    val attachment = message.mmsAttachments.firstOrNull()
+    if (attachment != null) {
+        return when {
+            attachment.isImage() -> "Photo"
+            attachment.isVideo() -> "Video"
+            attachment.isAudio() -> "Audio"
+            attachment.isVCard() -> "Contact"
+            else -> "Attachment"
+        }
+    }
+
+    return "Message"
+}

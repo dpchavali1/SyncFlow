@@ -1,0 +1,83 @@
+name: Update Amazon Deals
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+  push:
+    # Run when scraper script is updated
+    paths:
+      - 'syncflow_deals_scraper_improved.py'
+
+jobs:
+  update-deals:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # Use a personal access token for pushing back to main
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install feedparser requests beautifulsoup4 lxml
+
+    - name: Run deal scraper
+      run: python syncflow_deals_scraper_improved.py
+
+    - name: Check for changes
+      id: verify-changed-files
+      run: |
+        if [ -f deals.json ]; then
+          echo "deals_file_exists=true" >> $GITHUB_OUTPUT
+          # Check if deals.json has changed
+          if git diff --quiet deals.json; then
+            echo "deals_changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "deals_changed=true" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "deals_file_exists=false" >> $GITHUB_OUTPUT
+          echo "deals_changed=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Commit and push changes
+      if: steps.verify-changed-files.outputs.deals_changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add deals.json
+        git commit -m "🤖 Update deals.json with latest Amazon deals
+
+        - $(jq '.deals | length' deals.json) deals found
+        - Categories: $(jq '.deals | map(.category) | unique | join(", ")' deals.json)
+        - Last updated: $(date -u '+%Y-%m-%d %H:%M UTC')" || echo "No changes to commit"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create summary comment
+      if: steps.verify-changed-files.outputs.deals_changed == 'true'
+      run: |
+        DEAL_COUNT=$(jq '.deals | length' deals.json)
+        CATEGORIES=$(jq '.deals | map(.category) | unique | join(", ")' deals.json)
+        TOP_DEALS=$(jq '.deals[:3] | map(.title) | join(" • ")' deals.json)
+
+        echo "## 🎉 Deals Updated!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**$DEAL_COUNT deals found** across categories: $CATEGORIES" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔥 Top Deals:" >> $GITHUB_STEP_SUMMARY
+        echo "$TOP_DEALS" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "*Last updated: $(date -u '+%Y-%m-%d %H:%M UTC')*" >> $GITHUB_STEP_SUMMARY

@@ -32,7 +32,8 @@ fun SettingsScreen(
     onNavigateToMessages: () -> Unit,
     onNavigateToTemplates: () -> Unit,
     onNavigateToBackup: () -> Unit,
-    onNavigateToDesktop: () -> Unit = {}
+    onNavigateToDesktop: () -> Unit = {},
+    onNavigateToUsage: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
@@ -100,7 +101,21 @@ fun SettingsScreen(
             }
 
             // -------------------------
-            // Rest of your settings list
+            // Desktop Integration (at the top for visibility)
+            // -------------------------
+            SettingsSection("Desktop Integration")
+
+            SettingsItem(
+                icon = Icons.Filled.Computer,
+                title = "Desktop Sync",
+                subtitle = "Use SyncFlow on MacBook or PC",
+                onClick = onNavigateToDesktop
+            )
+
+            Divider(Modifier.padding(vertical = 8.dp))
+
+            // -------------------------
+            // App Settings
             // -------------------------
             SettingsSection("App Settings")
 
@@ -133,6 +148,13 @@ fun SettingsScreen(
                 onClick = onNavigateToPrivacy
             )
 
+            SettingsItem(
+                icon = Icons.Filled.DataUsage,
+                title = "Usage & Limits",
+                subtitle = "View plan and current usage",
+                onClick = onNavigateToUsage
+            )
+
             Divider(Modifier.padding(vertical = 8.dp))
 
             SettingsSection("Messages")
@@ -163,17 +185,6 @@ fun SettingsScreen(
                 title = "Blocked Numbers",
                 subtitle = "Manage blocked numbers",
                 onClick = { /* TODO */ }
-            )
-
-            Divider(Modifier.padding(vertical = 8.dp))
-
-            SettingsSection("Desktop Integration")
-
-            SettingsItem(
-                icon = Icons.Filled.Computer,
-                title = "Desktop Sync",
-                subtitle = "Use SyncFlow on MacBook or PC",
-                onClick = onNavigateToDesktop
             )
 
             Divider(Modifier.padding(vertical = 8.dp))

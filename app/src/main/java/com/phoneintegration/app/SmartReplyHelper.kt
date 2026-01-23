@@ -2,6 +2,8 @@ package com.phoneintegration.app
 
 import com.google.mlkit.nl.smartreply.SmartReply
 import com.google.mlkit.nl.smartreply.TextMessage
+import com.phoneintegration.app.ai.AIService
+import kotlinx.coroutines.runBlocking
 
 class SmartReplyHelper {
 

@@ -13,13 +13,14 @@ class SendDealNotificationWorker(
 
     private val repo = DealsRepository(ctx)
     private val dropEngine = PriceDropEngine(ctx)
+    private val prefs = ctx.getSharedPreferences("deal_notifications", Context.MODE_PRIVATE)
 
     override suspend fun doWork(): Result {
         val deals = repo.getDeals()
 
         if (deals.isEmpty()) return Result.success()
 
-        // price drop check
+        // Check for price drops first (highest priority)
         val drop = dropEngine.checkForPriceDrop(deals)
         if (drop != null) {
             DealNotificationManager.showPriceDropNotification(
@@ -29,12 +30,11 @@ class SendDealNotificationWorker(
             return Result.success()
         }
 
-        // pick a random top deal for regular notification
-        val pick = deals.random()
-
+        // Select a random deal (simple approach)
+        val deal = deals.random()
         DealNotificationManager.showDealNotification(
             context = applicationContext,
-            deal = pick
+            deal = deal
         )
 
         return Result.success()

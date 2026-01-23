@@ -40,29 +40,27 @@ object DealNotificationScheduler {
         val isHoliday = HolidayCalendar.isHoliday(date)
 
         if (isWeekend) {
-            scheduleOneFixed(context, date.atTime(11, 0))
-            scheduleOneFixed(context, date.atTime(17, 0))
+            // Weekend: 4 notifications throughout day
+            scheduleOneFixed(context, date.atTime(10, 0))  // Morning deals
+            scheduleOneFixed(context, date.atTime(13, 0))  // Lunch deals
+            scheduleOneFixed(context, date.atTime(16, 0))  // Afternoon deals
+            scheduleOneFixed(context, date.atTime(19, 0))  // Evening deals
             return
         }
 
         if (isHoliday) {
-            scheduleOneFixed(context, date.atTime(10, 30))
-            scheduleOneFixed(context, date.atTime(18, 0))
+            // Holiday: 3 notifications
+            scheduleOneFixed(context, date.atTime(10, 30)) // Morning
+            scheduleOneFixed(context, date.atTime(14, 0))  // Afternoon
+            scheduleOneFixed(context, date.atTime(18, 0))  // Evening
             return
         }
 
-        // Weekday → two windows
-        scheduleRandomInsideWindow(
-            context,
-            start = date.atTime(12, 0),
-            end = date.atTime(14, 0)
-        )
-
-        scheduleRandomInsideWindow(
-            context,
-            start = date.atTime(16, 0),
-            end = date.atTime(19, 0)
-        )
+        // Weekday: 4 notifications throughout the day
+        scheduleRandomInsideWindow(context, date.atTime(9, 0), date.atTime(11, 0))    // Morning coffee time
+        scheduleRandomInsideWindow(context, date.atTime(12, 0), date.atTime(14, 0))   // Lunch break
+        scheduleRandomInsideWindow(context, date.atTime(15, 0), date.atTime(17, 0))   // Afternoon break
+        scheduleRandomInsideWindow(context, date.atTime(18, 0), date.atTime(20, 0))   // Evening relaxation
     }
 
     private fun scheduleOneFixed(context: Context, time: LocalDateTime) {

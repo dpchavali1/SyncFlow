@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
+import com.phoneintegration.app.utils.InputValidation
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -29,6 +30,8 @@ fun SendSmsScreen(
     val context = LocalContext.current
     var address by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
+    var addressError by remember { mutableStateOf<String?>(null) }
+    var bodyError by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         topBar = {
@@ -52,27 +55,48 @@ fun SendSmsScreen(
 
             OutlinedTextField(
                 value = address,
-                onValueChange = { address = it },
+                onValueChange = {
+                    address = it
+                    if (addressError != null) addressError = null
+                },
                 label = { Text("Phone Number") },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                isError = addressError != null,
+                supportingText = addressError?.let { { Text(it) } },
+                keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone)
             )
 
             Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = body,
-                onValueChange = { body = it },
+                onValueChange = {
+                    body = it
+                    if (bodyError != null) bodyError = null
+                },
                 label = { Text("Message") },
                 modifier = Modifier.fillMaxWidth(),
-                maxLines = 5
+                maxLines = 5,
+                isError = bodyError != null,
+                supportingText = bodyError?.let { { Text(it) } }
             )
 
             Spacer(modifier = Modifier.height(20.dp))
 
             Button(
                 onClick = {
-                    if (address.isNotBlank() && body.isNotBlank()) {
-                        viewModel.sendSms(address, body) { success ->
+                    // Validate inputs
+                    val phoneValidation = InputValidation.validatePhoneNumber(address)
+                    val messageValidation = InputValidation.validateMessage(body)
+
+                    addressError = phoneValidation.errorMessage
+                    bodyError = messageValidation.errorMessage
+
+                    if (phoneValidation.isValid && messageValidation.isValid) {
+                        viewModel.sendSms(
+                            phoneValidation.sanitizedValue ?: address,
+                            messageValidation.sanitizedValue ?: body
+                        ) { success ->
                             if (success) {
                                 Toast.makeText(context, "Message sent", Toast.LENGTH_SHORT).show()
                                 onBack()

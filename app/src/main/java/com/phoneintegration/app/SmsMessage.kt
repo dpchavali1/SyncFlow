@@ -48,7 +48,9 @@ data class SmsMessage(
     var otpInfo: OtpInfo? = null,
     val isMms: Boolean = false,
     val mmsAttachments: List<MmsAttachment> = emptyList(),
-    val mmsSubject: String? = null
+    val mmsSubject: String? = null,
+    val subId: Int? = null,  // Subscription ID (SIM card identifier)
+    var isE2ee: Boolean = false
 ) {
     fun getFormattedTime(): String {
         val sdf = java.text.SimpleDateFormat("MMM dd, hh:mm a", java.util.Locale.getDefault())

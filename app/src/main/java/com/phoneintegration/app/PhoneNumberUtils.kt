@@ -24,6 +24,45 @@ object PhoneNumberUtils {
     }
 
     /**
+     * Normalizes a phone number for conversation grouping.
+     * Uses last 10 digits to merge numbers with country code differences.
+     * Keeps alphanumeric sender IDs (like "JM-HDFCEL-S") as-is.
+     */
+    fun normalizeForConversation(address: String): String {
+        if (address.isBlank()) return address
+
+        // Handle email-like addresses
+        if (address.contains("@")) {
+            return address.lowercase(Locale.getDefault())
+        }
+
+        // Check if this is an alphanumeric sender ID (like "JM-HDFCEL-S", "AD-AMAZON", etc.)
+        // These typically have letters and are used by businesses for SMS
+        val hasLetters = address.any { it.isLetter() }
+
+        // If address has ANY letters, it's an alphanumeric sender ID
+        // Keep it exactly as-is (uppercase for case-insensitive matching)
+        // Only merge conversations if the sender ID is EXACTLY the same
+        if (hasLetters) {
+            return address.uppercase(Locale.getDefault())
+        }
+
+        val digitsOnly = address.replace(Regex("[^0-9]"), "")
+
+        // Short codes (typically 5-6 digits) - keep as-is
+        if (address.length <= 6 && digitsOnly.length == address.length) {
+            return digitsOnly
+        }
+
+        // Regular phone numbers - normalize by taking last 10 digits
+        return if (digitsOnly.length >= 10) {
+            digitsOnly.takeLast(10)
+        } else {
+            digitsOnly
+        }
+    }
+
+    /**
      * Alias for normalizePhoneNumber (for compatibility)
      * This fixes the crash where code was calling normalizeNumber instead of normalizePhoneNumber
      */

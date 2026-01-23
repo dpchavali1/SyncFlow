@@ -1,0 +1,29 @@
+# Podfile for SyncFlowMac
+# WebRTC framework for call audio routing and Firebase
+
+source 'https://cdn.cocoapods.org/'
+source 'https://github.com/webrtc-sdk/Specs.git'
+
+platform :macos, '14.0'
+
+target 'SyncFlowMac' do
+  use_frameworks!
+
+  # WebRTC for macOS (cross‑platform xcframework)
+  pod 'WebRTC-SDK'
+
+  # Firebase via CocoaPods (SPM has issues with Xcode 26 beta)
+  pod 'FirebaseCore', '~> 11.0'
+  pod 'FirebaseAuth', '~> 11.0'
+  pod 'FirebaseDatabase', '~> 11.0'
+  pod 'FirebaseStorage', '~> 11.0'
+  pod 'FirebaseFunctions', '~> 11.0'
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '14.0'
+    end
+  end
+end

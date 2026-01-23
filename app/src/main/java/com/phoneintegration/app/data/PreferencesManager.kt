@@ -4,10 +4,21 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
+import org.json.JSONObject
 
 class PreferencesManager(context: Context) {
-    private val prefs: SharedPreferences = 
+    private val prefs: SharedPreferences =
         context.getSharedPreferences("syncflow_prefs", Context.MODE_PRIVATE)
+
+    companion object {
+        private const val PREFS_NAME = "syncflow_prefs"
+        private const val PREFERRED_SEND_PREFIX = "preferred_send_address_"
+
+        fun isDesktopCallSyncEnabled(context: Context): Boolean {
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean("desktop_call_sync", false)
+        }
+    }
 
     // Theme Settings
     var isDarkMode = mutableStateOf(prefs.getBoolean("dark_mode", false))
@@ -38,7 +49,12 @@ class PreferencesManager(context: Context) {
     
     var groupMessagesByDate = mutableStateOf(prefs.getBoolean("group_by_date", true))
         private set
+
+
     
+    var swipeGesturesEnabled = mutableStateOf(prefs.getBoolean("swipe_gestures_enabled", true))
+        private set
+
     var autoDeleteOld = mutableStateOf(prefs.getBoolean("auto_delete_old", false))
         private set
     
@@ -48,12 +64,92 @@ class PreferencesManager(context: Context) {
     // Privacy Settings
     var requireFingerprint = mutableStateOf(prefs.getBoolean("require_fingerprint", false))
         private set
-    
+
     var hideMessagePreview = mutableStateOf(prefs.getBoolean("hide_message_preview", false))
         private set
-    
+
     var incognitoMode = mutableStateOf(prefs.getBoolean("incognito_mode", false))
         private set
+
+    // E2EE Settings
+    var e2eeEnabled = mutableStateOf(prefs.getBoolean("e2ee_enabled", false))
+        private set
+
+    // Desktop Sync Settings
+    var desktopCallSyncEnabled = mutableStateOf(prefs.getBoolean("desktop_call_sync", false))
+        private set
+
+    var backgroundSyncEnabled = mutableStateOf(prefs.getBoolean("background_sync_enabled", false))
+        private set
+
+    var notificationMirrorEnabled = mutableStateOf(prefs.getBoolean("notification_mirror_enabled", false))
+        private set
+
+    // Subscription/Plan Settings
+    var userPlan = mutableStateOf(prefs.getString("user_plan", null) ?: "free")
+        private set
+
+    var planExpiresAt = mutableStateOf(prefs.getLong("plan_expires_at", 0L))
+        private set
+
+    // Free tier trial expiry (7 days from first use)
+    var freeTrialExpiresAt = mutableStateOf(prefs.getLong("free_trial_expires_at", 0L))
+        private set
+
+    // Helper to check if user is on paid plan
+    fun isPaidUser(): Boolean {
+        val plan = userPlan.value.lowercase()
+        val isPaid = plan in listOf("monthly", "yearly", "lifetime")
+        val now = System.currentTimeMillis()
+
+        // Check expiration
+        if (isPaid && planExpiresAt.value > 0 && planExpiresAt.value < now) {
+            return false // Plan expired, treat as free
+        }
+        return isPaid
+    }
+
+    // Check if free trial is still active (7 days)
+    fun isFreeTrial(): Boolean {
+        if (isPaidUser()) return false
+
+        val now = System.currentTimeMillis()
+
+        // Initialize trial on first use
+        if (freeTrialExpiresAt.value == 0L) {
+            val trialExpiry = now + (7 * 24 * 60 * 60 * 1000) // 7 days from now
+            setFreeTrialExpiry(trialExpiry)
+            return true
+        }
+
+        return freeTrialExpiresAt.value > now
+    }
+
+    // Get remaining trial days
+    fun getTrialDaysRemaining(): Int {
+        if (isPaidUser()) return 0
+        val now = System.currentTimeMillis()
+        val remaining = (freeTrialExpiresAt.value - now) / (24 * 60 * 60 * 1000)
+        return maxOf(0, remaining.toInt())
+    }
+
+    // Helper for SMS-only restriction
+    fun isSmsOnlyUser(): Boolean = !isPaidUser()
+
+    init {
+        // Debug logging for settings initialization
+        android.util.Log.d("PreferencesManager", "Initialized with background_sync_enabled: ${backgroundSyncEnabled.value}, notification_mirror_enabled: ${notificationMirrorEnabled.value}")
+
+        // If settings appear to be reset (both false when they shouldn't be), try to restore from backup
+        val allSettingsFalse = !backgroundSyncEnabled.value && !notificationMirrorEnabled.value && !desktopCallSyncEnabled.value
+        if (allSettingsFalse) {
+            // Try to restore from backup
+            val restored = restoreFromAutoBackup()
+            if (restored) {
+                android.util.Log.w("PreferencesManager", "Detected settings reset, restored from backup")
+            }
+        }
+    }
 
     // Appearance Settings
     var bubbleStyle = mutableStateOf(prefs.getString("bubble_style", "rounded") ?: "rounded")
@@ -71,6 +167,9 @@ class PreferencesManager(context: Context) {
     
     var addSignature = mutableStateOf(prefs.getBoolean("add_signature", false))
         private set
+
+    // Message Reactions (local-only)
+    private val reactionsKey = "message_reactions"
 
     // Quick Reply Templates
     fun getQuickReplyTemplates(): List<String> {
@@ -132,6 +231,11 @@ class PreferencesManager(context: Context) {
         prefs.edit().putBoolean("group_by_date", enabled).apply()
     }
 
+    fun setSwipeGesturesEnabled(enabled: Boolean) {
+        swipeGesturesEnabled.value = enabled
+        prefs.edit().putBoolean("swipe_gestures_enabled", enabled).apply()
+    }
+
     fun setAutoDeleteOld(enabled: Boolean) {
         autoDeleteOld.value = enabled
         prefs.edit().putBoolean("auto_delete_old", enabled).apply()
@@ -157,6 +261,47 @@ class PreferencesManager(context: Context) {
         prefs.edit().putBoolean("incognito_mode", enabled).apply()
     }
 
+    fun setE2eeEnabled(enabled: Boolean) {
+        e2eeEnabled.value = enabled
+        prefs.edit().putBoolean("e2ee_enabled", enabled).apply()
+    }
+
+    fun setDesktopCallSyncEnabled(enabled: Boolean) {
+        desktopCallSyncEnabled.value = enabled
+        prefs.edit().putBoolean("desktop_call_sync", enabled).apply()
+        autoBackupSyncSettings()
+    }
+
+    fun setBackgroundSyncEnabled(enabled: Boolean) {
+        backgroundSyncEnabled.value = enabled
+        prefs.edit().putBoolean("background_sync_enabled", enabled).apply()
+        android.util.Log.d("PreferencesManager", "Background sync enabled set to: $enabled")
+        autoBackupSyncSettings()
+    }
+
+    fun setNotificationMirrorEnabled(enabled: Boolean) {
+        notificationMirrorEnabled.value = enabled
+        prefs.edit().putBoolean("notification_mirror_enabled", enabled).apply()
+        android.util.Log.d("PreferencesManager", "Notification mirror enabled set to: $enabled")
+        autoBackupSyncSettings()
+    }
+
+    fun setUserPlan(plan: String, expiresAt: Long = 0) {
+        userPlan.value = plan
+        planExpiresAt.value = expiresAt
+        prefs.edit()
+            .putString("user_plan", plan)
+            .putLong("plan_expires_at", expiresAt)
+            .apply()
+        android.util.Log.d("PreferencesManager", "User plan set to: $plan, expires: $expiresAt")
+    }
+
+    fun setFreeTrialExpiry(expiryTime: Long) {
+        freeTrialExpiresAt.value = expiryTime
+        prefs.edit().putLong("free_trial_expires_at", expiryTime).apply()
+        android.util.Log.d("PreferencesManager", "Free trial expires at: $expiryTime")
+    }
+
     fun setBubbleStyle(style: String) {
         bubbleStyle.value = style
         prefs.edit().putString("bubble_style", style).apply()
@@ -180,5 +325,125 @@ class PreferencesManager(context: Context) {
     fun setAddSignature(enabled: Boolean) {
         addSignature.value = enabled
         prefs.edit().putBoolean("add_signature", enabled).apply()
+    }
+
+    fun getPreferredSendAddress(conversationKey: String): String? {
+        if (conversationKey.isBlank()) return null
+        return prefs.getString("$PREFERRED_SEND_PREFIX$conversationKey", null)
+    }
+
+    fun setPreferredSendAddress(conversationKey: String, address: String?) {
+        if (conversationKey.isBlank()) return
+        val editor = prefs.edit()
+        if (address.isNullOrBlank()) {
+            editor.remove("$PREFERRED_SEND_PREFIX$conversationKey")
+        } else {
+            editor.putString("$PREFERRED_SEND_PREFIX$conversationKey", address)
+        }
+        editor.apply()
+    }
+
+    fun getMessageReaction(messageId: Long): String? {
+        val reactions = loadReactions()
+        return reactions[messageId.toString()]
+    }
+
+    fun setMessageReaction(messageId: Long, reaction: String) {
+        val reactions = loadReactions().toMutableMap()
+        reactions[messageId.toString()] = reaction
+        saveReactions(reactions)
+    }
+
+    fun clearMessageReaction(messageId: Long) {
+        val reactions = loadReactions().toMutableMap()
+        reactions.remove(messageId.toString())
+        saveReactions(reactions)
+    }
+
+    private fun loadReactions(): Map<String, String> {
+        val raw = prefs.getString(reactionsKey, "") ?: ""
+        if (raw.isBlank()) return emptyMap()
+        return raw.split("|")
+            .mapNotNull { entry ->
+                val parts = entry.split("=", limit = 2)
+                if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
+                    parts[0] to parts[1]
+                } else null
+            }
+            .toMap()
+    }
+
+    private fun saveReactions(reactions: Map<String, String>) {
+        val raw = reactions.entries.joinToString("|") { "${it.key}=${it.value}" }
+        prefs.edit().putString(reactionsKey, raw).apply()
+    }
+
+    // Backup and restore functionality for critical settings
+    fun exportSyncSettings(): Map<String, Any> {
+        return mapOf(
+            "background_sync_enabled" to backgroundSyncEnabled.value,
+            "notification_mirror_enabled" to notificationMirrorEnabled.value,
+            "desktop_call_sync" to desktopCallSyncEnabled.value,
+            "exported_at" to System.currentTimeMillis()
+        )
+    }
+
+    fun importSyncSettings(settings: Map<String, Any>): Boolean {
+        return try {
+            val backgroundSync = settings["background_sync_enabled"] as? Boolean ?: false
+            val notificationMirror = settings["notification_mirror_enabled"] as? Boolean ?: false
+            val desktopCallSync = settings["desktop_call_sync"] as? Boolean ?: false
+
+            // Apply settings
+            setBackgroundSyncEnabled(backgroundSync)
+            setNotificationMirrorEnabled(notificationMirror)
+            setDesktopCallSyncEnabled(desktopCallSync)
+
+            android.util.Log.d("PreferencesManager", "Imported sync settings - Background: $backgroundSync, Notification: $notificationMirror, Call: $desktopCallSync")
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("PreferencesManager", "Failed to import sync settings", e)
+            false
+        }
+    }
+
+    // Auto-backup sync settings to prevent loss
+    fun autoBackupSyncSettings() {
+        try {
+            val settings = exportSyncSettings()
+            val jsonObject = JSONObject()
+            settings.forEach { (key, value) ->
+                jsonObject.put(key, value)
+            }
+            val settingsJson = jsonObject.toString()
+            prefs.edit().putString("sync_settings_backup", settingsJson).apply()
+            android.util.Log.d("PreferencesManager", "Auto-backed up sync settings: $settingsJson")
+        } catch (e: Exception) {
+            android.util.Log.e("PreferencesManager", "Failed to auto-backup sync settings", e)
+        }
+    }
+
+    fun restoreFromAutoBackup(): Boolean {
+        return try {
+            val backupJson = prefs.getString("sync_settings_backup", null)
+            if (backupJson != null) {
+                val jsonObject = JSONObject(backupJson)
+                val settings = mutableMapOf<String, Any>()
+                jsonObject.keys().forEach { key ->
+                    settings[key] = jsonObject.get(key)
+                }
+                val result = importSyncSettings(settings)
+                if (result) {
+                    android.util.Log.d("PreferencesManager", "Restored sync settings from auto-backup")
+                }
+                result
+            } else {
+                android.util.Log.d("PreferencesManager", "No auto-backup found")
+                false
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("PreferencesManager", "Failed to restore from auto-backup", e)
+            false
+        }
     }
 }

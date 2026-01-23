@@ -20,7 +20,9 @@ fun PrivacySettingsScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    
+
+    // AI Features are now handled server-side with Vertex AI
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -92,7 +94,36 @@ fun PrivacySettingsScreen(
             )
             
             Divider(modifier = Modifier.padding(vertical = 8.dp))
-            
+
+            Text(
+                "AI Features",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "Smart AI Assistant",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Intelligent message suggestions, conversation summaries, and pattern analysis - all processed locally on your device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "✓ 100% Free - No API keys or subscriptions\n✓ Completely private - works offline\n✓ Advanced pattern recognition\n✓ Smart reply suggestions\n✓ Intelligent summaries",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Divider(modifier = Modifier.padding(vertical = 8.dp))
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -114,8 +145,10 @@ fun PrivacySettingsScreen(
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
                 }
-            }
-        }
+    }
+
+
+}
     }
 }
 

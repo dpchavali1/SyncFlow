@@ -6,16 +6,30 @@
 //
 
 import SwiftUI
-import AVFoundation
+import Combine
+import CoreImage.CIFilterBuiltins
+import FirebaseDatabase
 
 struct PairingView: View {
     @EnvironmentObject var appState: AppState
 
-    @State private var pairingCode = ""
-    @State private var deviceName = "MacBook"
-    @State private var isProcessing = false
+    @State private var pairingSession: PairingSession?
+    @State private var isLoading = true
     @State private var errorMessage: String?
-    @State private var showCamera = false
+    @State private var pairingStatus: PairingStatusState = .generating
+    @State private var timeRemaining: TimeInterval = 0
+    @State private var listenerHandle: DatabaseHandle?
+
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    enum PairingStatusState {
+        case generating
+        case waitingForScan
+        case success
+        case rejected
+        case expired
+        case error(String)
+    }
 
     var body: some View {
         VStack(spacing: 30) {
@@ -29,7 +43,7 @@ struct PairingView: View {
                     .font(.largeTitle)
                     .fontWeight(.bold)
 
-                Text("Connect your Android phone to access SMS messages on your Mac")
+                Text("Scan this QR code with your Android phone to connect")
                     .font(.body)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -39,100 +53,166 @@ struct PairingView: View {
             Divider()
                 .padding(.horizontal, 100)
 
-            // Pairing options
-            VStack(spacing: 20) {
-                // Device name
-                HStack {
-                    Text("Device Name:")
-                        .frame(width: 120, alignment: .trailing)
-                    TextField("Enter device name", text: $deviceName)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 300)
+            // Content based on state
+            switch pairingStatus {
+            case .generating:
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Generating QR Code...")
+                        .foregroundColor(.secondary)
+                }
+                .padding(40)
+
+            case .waitingForScan:
+                if let session = pairingSession {
+                    VStack(spacing: 20) {
+                        // QR Code
+                        qrCodeImage(for: session.qrPayload)
+                            .interpolation(.none)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 220, height: 220)
+                            .background(Color.white)
+                            .cornerRadius(10)
+                            .shadow(radius: 5)
+
+                        // Timer
+                        HStack(spacing: 8) {
+                            Image(systemName: "clock")
+                                .foregroundColor(timeRemaining <= 60 ? .orange : .secondary)
+                            Text(formatTime(timeRemaining))
+                                .font(.system(.title3, design: .monospaced))
+                                .foregroundColor(timeRemaining <= 60 ? .orange : .primary)
+                        }
+
+                        // Refresh button
+                        Button {
+                            Task { await startPairing() }
+                        } label: {
+                            Label("Generate New QR Code", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.blue)
+                    }
                 }
 
-                // Pairing code
-                HStack {
-                    Text("Pairing Code:")
-                        .frame(width: 120, alignment: .trailing)
-                    TextField("Paste code from Android app", text: $pairingCode)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 300)
+            case .success:
+                VStack(spacing: 20) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 80))
+                        .foregroundColor(.green)
 
-                    Button("Pair") {
-                        Task {
-                            await pairWithCode()
-                        }
+                    Text("Successfully Paired!")
+                        .font(.title)
+                        .fontWeight(.semibold)
+
+                    Text("Redirecting to messages...")
+                        .foregroundColor(.secondary)
+                }
+
+            case .rejected:
+                VStack(spacing: 20) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 80))
+                        .foregroundColor(.orange)
+
+                    Text("Pairing Declined")
+                        .font(.title)
+                        .fontWeight(.semibold)
+
+                    Text("The pairing request was declined on your phone.")
+                        .foregroundColor(.secondary)
+
+                    Button {
+                        Task { await startPairing() }
+                    } label: {
+                        Label("Try Again", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(pairingCode.isEmpty || isProcessing)
                 }
 
-                // OR separator
-                HStack {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.3))
-                        .frame(height: 1)
-                    Text("OR")
+            case .expired:
+                VStack(spacing: 20) {
+                    Image(systemName: "clock.badge.exclamationmark")
+                        .font(.system(size: 80))
+                        .foregroundColor(.red)
+
+                    Text("Session Expired")
+                        .font(.title)
+                        .fontWeight(.semibold)
+
+                    Text("The pairing session has expired. Please try again.")
                         .foregroundColor(.secondary)
-                        .padding(.horizontal)
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.3))
-                        .frame(height: 1)
-                }
-                .frame(width: 400)
-                .padding(.vertical, 10)
 
-                // Camera scanning (coming soon)
-                Button {
-                    showCamera = true
-                } label: {
-                    Label("Scan QR Code", systemImage: "qrcode.viewfinder")
-                }
-                .buttonStyle(.bordered)
-            }
-
-            // Instructions
-            VStack(alignment: .leading, spacing: 10) {
-                Text("How to pair:")
-                    .font(.headline)
-
-                HStack(alignment: .top) {
-                    Text("1.")
-                    Text("Open SyncFlow app on your Android phone")
+                    Button {
+                        Task { await startPairing() }
+                    } label: {
+                        Label("Generate New QR Code", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
 
-                HStack(alignment: .top) {
-                    Text("2.")
-                    Text("Go to Settings → Desktop Integration")
-                }
+            case .error(let message):
+                VStack(spacing: 20) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 80))
+                        .foregroundColor(.red)
 
-                HStack(alignment: .top) {
-                    Text("3.")
-                    Text("Tap \"Pair New Device\" to generate a QR code")
-                }
+                    Text("Pairing Failed")
+                        .font(.title)
+                        .fontWeight(.semibold)
 
-                HStack(alignment: .top) {
-                    Text("4.")
-                    Text("Scan the QR code or copy and paste the pairing code above")
+                    Text(message)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+
+                    Button {
+                        Task { await startPairing() }
+                    } label: {
+                        Label("Try Again", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
             }
-            .font(.body)
-            .foregroundColor(.secondary)
-            .padding()
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(10)
-            .frame(width: 500)
 
-            // Error message
-            if let error = errorMessage {
-                Text(error)
-                    .foregroundColor(.red)
-                    .font(.caption)
-            }
+            // Instructions (only show when waiting for scan)
+            if case .waitingForScan = pairingStatus {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("How to pair:")
+                        .font(.headline)
 
-            // Processing indicator
-            if isProcessing {
-                ProgressView("Pairing...")
+                    HStack(alignment: .top) {
+                        Text("1.")
+                        Text("Open SyncFlow app on your Android phone")
+                    }
+
+                    HStack(alignment: .top) {
+                        Text("2.")
+                        Text("Go to Settings → Desktop Integration")
+                    }
+
+                    HStack(alignment: .top) {
+                        Text("3.")
+                        Text("Tap \"Scan Desktop QR Code\"")
+                    }
+
+                    HStack(alignment: .top) {
+                        Text("4.")
+                        Text("Point your camera at this QR code")
+                    }
+
+                    HStack(alignment: .top) {
+                        Text("5.")
+                        Text("Approve the pairing request on your phone")
+                    }
+                }
+                .font(.body)
+                .foregroundColor(.secondary)
+                .padding()
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(10)
+                .frame(width: 500)
             }
 
             Spacer()
@@ -140,68 +220,129 @@ struct PairingView: View {
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $showCamera) {
-            QRScannerView { code in
-                pairingCode = code
-                showCamera = false
-                Task {
-                    await pairWithCode()
-                }
+        .task {
+            await startPairing()
+        }
+        .onDisappear {
+            cleanupListener()
+        }
+        .onReceive(timer) { _ in
+            updateTimer()
+        }
+    }
+
+    // MARK: - QR Code Generation
+
+    private func qrCodeImage(for string: String) -> Image {
+        let context = CIContext()
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(string.utf8)
+        filter.correctionLevel = "M"
+
+        if let outputImage = filter.outputImage {
+            let scale = 10.0
+            let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+
+            if let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) {
+                return Image(nsImage: NSImage(cgImage: cgImage, size: NSSize(width: 220, height: 220)))
             }
+        }
+
+        return Image(systemName: "qrcode")
+    }
+
+    // MARK: - Timer
+
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
+
+    private func updateTimer() {
+        guard let session = pairingSession else { return }
+
+        timeRemaining = session.timeRemaining
+
+        if timeRemaining <= 0 && pairingStatus == .waitingForScan {
+            cleanupListener()
+            pairingStatus = .expired
         }
     }
 
     // MARK: - Pairing Logic
 
-    private func pairWithCode() async {
-        guard !pairingCode.isEmpty else { return }
-
-        isProcessing = true
+    private func startPairing() async {
+        cleanupListener()
+        pairingStatus = .generating
+        pairingSession = nil
         errorMessage = nil
 
         do {
-            let userId = try await FirebaseService.shared.pairWithToken(
-                pairingCode,
-                deviceName: deviceName
-            )
-
+            let session = try await FirebaseService.shared.initiatePairing()
             await MainActor.run {
-                appState.setPaired(userId: userId)
-                isProcessing = false
+                pairingSession = session
+                timeRemaining = session.timeRemaining
+                pairingStatus = .waitingForScan
+
+                // Start listening for approval
+                listenerHandle = FirebaseService.shared.listenForPairingApproval(token: session.token) { status in
+                    handlePairingStatus(status)
+                }
             }
         } catch {
             await MainActor.run {
-                errorMessage = error.localizedDescription
-                isProcessing = false
+                pairingStatus = .error(error.localizedDescription)
             }
+        }
+    }
+
+    private func handlePairingStatus(_ status: PairingStatus) {
+        switch status {
+        case .pending:
+            // Still waiting
+            break
+
+        case .approved(let pairedUid, _):
+            cleanupListener()
+            pairingStatus = .success
+
+            // Redirect after brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                appState.setPaired(userId: pairedUid)
+            }
+
+        case .rejected:
+            cleanupListener()
+            pairingStatus = .rejected
+
+        case .expired:
+            cleanupListener()
+            pairingStatus = .expired
+        }
+    }
+
+    private func cleanupListener() {
+        if let handle = listenerHandle, let session = pairingSession {
+            FirebaseService.shared.removePairingApprovalListener(token: session.token, handle: handle)
+            listenerHandle = nil
         }
     }
 }
 
-// MARK: - QR Scanner View (Coming Soon)
-
-struct QRScannerView: View {
-    let onCodeScanned: (String) -> Void
-    @Environment(\.dismiss) var dismiss
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("QR Scanner")
-                .font(.title)
-
-            Text("Camera-based QR scanning coming soon!")
-                .foregroundColor(.secondary)
-
-            Text("For now, please copy and paste the pairing code manually.")
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding()
-
-            Button("Close") {
-                dismiss()
-            }
+extension PairingView.PairingStatusState: Equatable {
+    static func == (lhs: PairingView.PairingStatusState, rhs: PairingView.PairingStatusState) -> Bool {
+        switch (lhs, rhs) {
+        case (.generating, .generating),
+             (.waitingForScan, .waitingForScan),
+             (.success, .success),
+             (.rejected, .rejected),
+             (.expired, .expired):
+            return true
+        case (.error(let a), .error(let b)):
+            return a == b
+        default:
+            return false
         }
-        .padding(40)
-        .frame(width: 400, height: 300)
     }
 }

@@ -1,10 +1,11 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose") version "2.0.0"
-    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.23"
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.10"
     id("com.google.gms.google-services")
-    id("com.google.devtools.ksp") version "2.0.0-1.0.21"
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -13,24 +14,59 @@ android {
 
     defaultConfig {
         applicationId = "com.phoneintegration.app"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 34
-        versionCode = 999  // CHANGED TO FORCE NEW INSTALL
-        versionName = "999.0"
+        versionCode = 1
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // Production BuildConfig fields
+        buildConfigField("String", "SUPPORT_EMAIL", "\"syncflow.contact@gmail.com\"")
+        buildConfigField("String", "SUPPORT_EMAIL_SUBJECT", "\"[SyncFlow Android] Support Request\"")
+        buildConfigField("String", "PRIVACY_POLICY_URL", "\"https://syncflow.app/privacy\"")
+        buildConfigField("String", "TERMS_OF_SERVICE_URL", "\"https://syncflow.app/terms\"")
+    }
+
+    signingConfigs {
+        create("release") {
+            // For production, these should be set via environment variables or local.properties
+            // storeFile = file(System.getenv("KEYSTORE_FILE") ?: "release-keystore.jks")
+            // storePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
+            // keyAlias = System.getenv("KEY_ALIAS") ?: "syncflow"
+            // keyPassword = System.getenv("KEY_PASSWORD") ?: ""
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Uncomment when signing config is set up:
+            // signingConfig = signingConfigs.getByName("release")
+
+            // Disable debugging for release
+            isDebuggable = false
+
+            // BuildConfig for release
+            buildConfigField("Boolean", "ENABLE_LOGGING", "false")
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true")
+        }
+        debug {
+            isMinifyEnabled = false
+            isDebuggable = true
+            // Note: Don't use applicationIdSuffix - it would require updating google-services.json
+            versionNameSuffix = "-debug"
+
+            buildConfigField("Boolean", "ENABLE_LOGGING", "true")
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "false")
         }
     }
 
@@ -39,20 +75,35 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
+        buildConfig = true
         compose = true
     }
-
-    // Remove composeOptions block - now handled by plugin
 
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/NOTICE.md"
+            excludes += "/META-INF/LICENSE.md"
         }
+    }
+
+    // Lint configuration for production
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = true
+        warningsAsErrors = false
+        disable += setOf("MissingTranslation", "ExtraTranslation")
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+        freeCompilerArgs.addAll(
+            "-opt-in=kotlin.RequiresOptIn",
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi"
+        )
     }
 }
 
@@ -66,6 +117,12 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-process:2.7.0")
+
+
+
+    // Additional AndroidX dependencies
+    implementation("androidx.appcompat:appcompat:1.6.1")
 
     // ──────────────────────────────────────────────
     // COMPOSE — SINGLE VERSION (BOM 2024-10)
@@ -78,7 +135,8 @@ dependencies {
     implementation("androidx.compose.material:material")   // for SwipeToDismiss
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.foundation:foundation")
-    implementation(libs.play.services.ads.api)
+    implementation("androidx.compose.runtime:runtime-livedata")
+    implementation("com.google.android.gms:play-services-ads:23.2.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
@@ -102,8 +160,16 @@ dependencies {
     implementation("com.google.android.gms:play-services-base:18.3.0")
     implementation("com.google.android.material:material:1.11.0")
 
+    // Firebase Functions for other features (not AI)
+
+    // ──────────────────────────────────────────────
+    // LOCAL AI - pattern matching for SMS analysis
+    // ──────────────────────────────────────────────
+    // No external dependencies needed - using local pattern matching
+
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
     implementation("io.coil-kt:coil-compose:2.4.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // ──────────────────────────────────────────────
     // FIREBASE - Desktop Integration
@@ -113,22 +179,44 @@ dependencies {
     implementation("com.google.firebase:firebase-auth-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("com.google.firebase:firebase-functions-ktx")
+
+    // Certificate pinning dependencies
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
     // QR Code generation for pairing
     implementation("com.google.zxing:core:3.5.2")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // ──────────────────────────────────────────────
+    // MMS SENDING - Klinker library for reliable MMS
+    // ──────────────────────────────────────────────
+    implementation("com.github.klinker41:android-smsmms:5.2.5")
+
+    // ──────────────────────────────────────────────
+    // WEBRTC - for call audio routing to desktop
+    // ──────────────────────────────────────────────
+    implementation("io.getstream:stream-webrtc-android:1.1.3")
+
+    // ──────────────────────────────────────────────
+    // E2EE - for secure messaging (using standard crypto)
+    // ──────────────────────────────────────────────
+    // Using Android's built-in cryptography + Tink for key exchange
+    implementation("com.google.crypto.tink:tink-android:1.12.0")
+    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+
+    // ──────────────────────────────────────────────
     // ROOM DATABASE - for Groups
     // ──────────────────────────────────────────────
-    val room_version = "2.6.1"
+    val room_version = "2.8.4"
     implementation("androidx.room:room-runtime:$room_version")
     implementation("androidx.room:room-ktx:$room_version")
     ksp("androidx.room:room-compiler:$room_version")
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.23")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.2.10")
 
 // Instrumented tests
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

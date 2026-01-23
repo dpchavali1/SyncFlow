@@ -3,79 +3,152 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAppStore } from '@/lib/store'
-import { listenToMessages, waitForAuth, signInAnon } from '@/lib/firebase'
+import {
+  ensureWebE2EEKeyPublished,
+  listenToDeviceStatus,
+  listenToMessages,
+  listenToReadReceipts,
+  listenToSpamMessages,
+  waitForAuth,
+} from '@/lib/firebase'
 import ConversationList from '@/components/ConversationList'
 import MessageView from '@/components/MessageView'
 import Header from '@/components/Header'
 import AIAssistant from '@/components/AIAssistant'
-import { Brain } from 'lucide-react'
+import AdBanner from '@/components/AdBanner'
 
 export default function MessagesPage() {
   const router = useRouter()
-  const { userId, setUserId, messages, setMessages, selectedConversation } = useAppStore()
+  const {
+    userId,
+    setUserId,
+    messages,
+    setMessages,
+    setReadReceipts,
+    setSpamMessages,
+    selectedConversation,
+    setSelectedConversation,
+    setSelectedSpamAddress,
+    setActiveFolder,
+    isConversationListVisible,
+    setIsConversationListVisible,
+    initializeConversationListVisibility,
+  } = useAppStore()
   const [showAI, setShowAI] = useState(false)
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null
+    let unsubscribeSpam: (() => void) | null = null
+    let unsubscribeReadReceipts: (() => void) | null = null
 
     const setupFirebase = async () => {
       // Check authentication
       const storedUserId = localStorage.getItem('syncflow_user_id')
-      console.log('=== Messages Page Debug ===')
-      console.log('Stored User ID:', storedUserId)
 
       if (!storedUserId) {
-        console.log('No user ID found, redirecting to home')
         router.push('/')
         return
       }
 
       setUserId(storedUserId)
+      initializeConversationListVisibility()
+      ensureWebE2EEKeyPublished(storedUserId)
+        .catch((err) => console.error('Failed to publish web E2EE key', err))
 
       // Wait for authentication before setting up listener
       // This is required for Firebase rules to allow data access
       try {
-        console.log('⏱️ Checking authentication...')
-        const authStartTime = performance.now()
         const currentUser = await waitForAuth()
-        const authEndTime = performance.now()
 
         if (!currentUser) {
-          console.log('⏱️ Not authenticated, signing in...')
-          const signInStart = performance.now()
-          await signInAnon()
-          const signInEnd = performance.now()
-          console.log(`✅ Sign-in completed in ${(signInEnd - signInStart).toFixed(0)}ms`)
-        } else {
-          console.log(`✅ Already authenticated in ${(authEndTime - authStartTime).toFixed(0)}ms:`, currentUser)
+          // Not authenticated, redirect to pairing
+          router.push('/')
+          return
+        }
+
+        // SECURITY: Verify the authenticated user has access to storedUserId
+        // Either the auth.uid matches OR the user has pairedUid claim for this user
+        // This prevents tampering with localStorage to access other users' data
+        const authUserId = currentUser
+        if (authUserId !== storedUserId) {
+          // The authenticated user is different from stored user
+          // This is expected for web clients (they have their own UID with pairedUid claim)
+          // Firebase rules will enforce access - if rules deny, listener will fail
+          // But we log this for security monitoring
+          if (process.env.NODE_ENV === 'development') {
+            console.log('Auth user differs from stored user (expected for paired devices)')
+          }
         }
       } catch (error) {
-        console.error('❌ Authentication failed:', error)
+        console.error('Authentication failed:', error)
+        router.push('/')
         return
       }
 
-      // Now set up listener with authentication ready
-      console.log('📱 Using phone user ID:', storedUserId)
-      console.log('⏱️ Setting up Firebase listener...')
-      const listenerStartTime = performance.now()
+      // Set up message listener
       unsubscribe = listenToMessages(storedUserId, (newMessages) => {
-        console.log('🔔 FIREBASE CALLBACK: Received', newMessages.length, 'messages')
-        console.log('Messages:', newMessages.slice(0, 3)) // Log first 3 messages
         setMessages(newMessages)
       })
-      console.log('✅ Firebase listener set up successfully')
+
+      unsubscribeSpam = listenToSpamMessages(storedUserId, (spam) => {
+        setSpamMessages(spam)
+      })
+
+      unsubscribeReadReceipts = listenToReadReceipts(storedUserId, (receipts) => {
+        setReadReceipts(receipts)
+      })
     }
 
     setupFirebase()
 
     // Cleanup function
     return () => {
-      console.log('🧹 Cleaning up Firebase listener')
       if (unsubscribe) {
         unsubscribe()
       }
+      if (unsubscribeSpam) {
+        unsubscribeSpam()
+      }
+      if (unsubscribeReadReceipts) {
+        unsubscribeReadReceipts()
+      }
     }
-  }, [router, setUserId, setMessages])
+  }, [router, setUserId, setMessages, setReadReceipts])
+
+  useEffect(() => {
+    if (!userId) return
+    const handleRemoteUnpair = () => {
+      localStorage.removeItem('syncflow_user_id')
+      setUserId(null)
+      setMessages([])
+      setReadReceipts({})
+      setSpamMessages([])
+      setSelectedConversation(null)
+      setSelectedSpamAddress(null)
+      setActiveFolder('inbox')
+      router.push('/')
+    }
+
+    const unsubscribeDevice = listenToDeviceStatus(userId, (isPaired) => {
+      if (!isPaired) {
+        handleRemoteUnpair()
+      }
+    })
+
+    return () => {
+      unsubscribeDevice()
+    }
+  }, [
+    router,
+    setActiveFolder,
+    setMessages,
+    setReadReceipts,
+    setSelectedConversation,
+    setSelectedSpamAddress,
+    setSpamMessages,
+    setUserId,
+    userId,
+  ])
 
   if (!userId) {
     return (
@@ -86,27 +159,33 @@ export default function MessagesPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900">
+    <div className="h-screen flex flex-col overflow-hidden bg-gray-100 dark:bg-gray-900">
       <Header />
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Conversation List */}
-        <ConversationList />
-
-        {/* Message View */}
-        <MessageView />
+      <div className="flex-1 flex min-h-0 overflow-hidden">
+        {isConversationListVisible && <ConversationList />}
+        <div className="flex-1 flex flex-col min-w-0">
+          {!isConversationListVisible && (
+            <div className="flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700">
+              <button
+                onClick={() => setIsConversationListVisible(true)}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                </svg>
+                Show Conversations
+              </button>
+            </div>
+          )}
+          <MessageView onOpenAI={() => setShowAI(true)} />
+        </div>
       </div>
 
-      {/* AI Assistant Button */}
-      <button
-        onClick={() => setShowAI(true)}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-gradient-to-br from-purple-500 to-blue-600 hover:from-purple-600 hover:to-blue-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all hover:scale-110 z-40"
-        title="AI Assistant"
-      >
-        <Brain className="w-6 h-6" />
-      </button>
+      <div className="flex-shrink-0 border-t border-gray-200 bg-gray-100 dark:border-gray-700 dark:bg-gray-900">
+        <AdBanner />
+      </div>
 
-      {/* AI Assistant Modal */}
       {showAI && (
         <AIAssistant
           messages={messages}

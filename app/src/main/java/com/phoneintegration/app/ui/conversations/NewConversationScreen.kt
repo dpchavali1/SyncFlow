@@ -27,6 +27,7 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.phoneintegration.app.utils.InputValidation
 
 data class ContactInfo(
     val name: String,
@@ -39,7 +40,8 @@ data class ContactInfo(
 fun NewConversationScreen(
     onBack: () -> Unit,
     onContactsSelected: (List<ContactInfo>) -> Unit,
-    onCreateGroup: (List<ContactInfo>) -> Unit = {}
+    onCreateGroup: (List<ContactInfo>) -> Unit = {},
+    initialNumber: String? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -48,7 +50,14 @@ fun NewConversationScreen(
     var isLoading by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf(TextFieldValue("")) }
     var selectedContacts by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var manualNumber by remember { mutableStateOf(TextFieldValue("")) }
+    var manualNumber by remember { mutableStateOf(TextFieldValue(initialNumber ?: "")) }
+    var phoneError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(initialNumber) {
+        if (!initialNumber.isNullOrBlank()) {
+            manualNumber = TextFieldValue(initialNumber)
+        }
+    }
 
     // Load contacts on screen open
     LaunchedEffect(Unit) {
@@ -161,35 +170,64 @@ fun NewConversationScreen(
 
             // Manual number entry section
             if (searchQuery.text.matches(Regex("^[0-9+() -]+$")) && searchQuery.text.isNotBlank()) {
+                val phoneValidation = InputValidation.validatePhoneNumber(searchQuery.text)
+
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .clickable {
-                            manualNumber = searchQuery
-                            searchQuery = TextFieldValue("")
+                        .clickable(enabled = phoneValidation.isValid) {
+                            if (phoneValidation.isValid) {
+                                manualNumber = TextFieldValue(phoneValidation.sanitizedValue ?: searchQuery.text)
+                                searchQuery = TextFieldValue("")
+                                phoneError = null
+                            } else {
+                                phoneError = phoneValidation.errorMessage
+                            }
                         },
                     colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                        containerColor = if (phoneValidation.isValid)
+                            MaterialTheme.colorScheme.primaryContainer
+                        else
+                            MaterialTheme.colorScheme.errorContainer
                     )
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(16.dp)
                     ) {
-                        Icon(
-                            Icons.Default.Person,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "Use number: ${searchQuery.text}",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Person,
+                                contentDescription = null,
+                                tint = if (phoneValidation.isValid)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Use number: ${searchQuery.text}",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = if (phoneValidation.isValid)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.error
+                            )
+                        }
+
+                        if (!phoneValidation.isValid && phoneValidation.errorMessage != null) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = phoneValidation.errorMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
             }

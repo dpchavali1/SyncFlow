@@ -18,6 +18,12 @@ import com.phoneintegration.app.ui.splash.SplashScreen
 import com.phoneintegration.app.ui.conversations.AdConversationScreen
 import com.phoneintegration.app.ui.desktop.DesktopIntegrationScreen
 import com.phoneintegration.app.ui.ai.AIAssistantScreen
+import com.phoneintegration.app.ui.scheduled.ScheduledMessagesScreen
+import com.phoneintegration.app.ui.archive.ArchivedConversationsScreen
+import com.phoneintegration.app.ui.downloads.SyncFlowDownloadsScreen
+import com.phoneintegration.app.ui.conversations.SpamFolderScreen
+import com.phoneintegration.app.ui.conversations.BlockedContactsScreen
+import com.phoneintegration.app.share.SharePayload
 import com.phoneintegration.app.data.GroupRepository
 import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.SmsRepository
@@ -29,12 +35,18 @@ import kotlinx.coroutines.withContext
 import android.widget.Toast
 import androidx.compose.runtime.rememberCoroutineScope
 import android.util.Log
+import java.net.URLEncoder
+import java.net.URLDecoder
 
 
 @Composable
 fun MainNavigation(
     viewModel: SmsViewModel,
-    preferencesManager: PreferencesManager
+    preferencesManager: PreferencesManager,
+    pendingShare: SharePayload?,
+    onShareHandled: () -> Unit,
+    pendingConversation: com.phoneintegration.app.MainActivity.ConversationLaunch?,
+    onConversationHandled: () -> Unit
 ) {
     val navController = rememberNavController()
     val context = LocalContext.current
@@ -43,6 +55,30 @@ fun MainNavigation(
 
     var showSplash by remember { mutableStateOf(true) }
     var selectedContacts by remember { mutableStateOf<List<ContactInfo>>(emptyList()) }
+    var activeShare by remember { mutableStateOf<SharePayload?>(null) }
+
+    LaunchedEffect(pendingShare, showSplash) {
+        if (!showSplash && pendingShare != null) {
+            activeShare = pendingShare
+            selectedContacts = emptyList()
+            navController.navigate("newConversation") {
+                launchSingleTop = true
+            }
+            onShareHandled()
+        }
+    }
+
+    LaunchedEffect(pendingConversation, showSplash) {
+        if (!showSplash && pendingConversation != null) {
+            val encodedAddress = URLEncoder.encode(pendingConversation.address, "UTF-8")
+            val encodedName = URLEncoder.encode(pendingConversation.name, "UTF-8")
+            val threadId = pendingConversation.threadId
+            navController.navigate("chat/$threadId/$encodedAddress/$encodedName") {
+                launchSingleTop = true
+            }
+            onConversationHandled()
+        }
+    }
 
     if (showSplash) {
         SplashScreen(onSplashComplete = { showSplash = false })
@@ -55,10 +91,11 @@ fun MainNavigation(
 
                 ConversationListScreen(
                     viewModel = viewModel,
+                    prefsManager = preferencesManager,
                     onOpen = { address: String, name: String ->
-                        // Find the conversation to check if it's a group
+                        // Find the conversation to get threadId
                         val conversation = conversations.find {
-                            it.address == address && it.contactName == name
+                            it.address == address
                         }
 
                         when {
@@ -70,9 +107,17 @@ fun MainNavigation(
                                 // Open saved group chat
                                 navController.navigate("groupChat/${conversation.groupId}")
                             }
+                            conversation != null -> {
+                                // Open chat using threadId (URL encode address and name for safe navigation)
+                                val encodedAddress = URLEncoder.encode(address, "UTF-8")
+                                val encodedName = URLEncoder.encode(name, "UTF-8")
+                                navController.navigate("chat/${conversation.threadId}/$encodedAddress/$encodedName")
+                            }
                             else -> {
-                                // Open normal SMS chat
-                                navController.navigate("chat/$address/$name")
+                                // Fallback: Open normal SMS chat (URL encode address and name)
+                                val encodedAddress = URLEncoder.encode(address, "UTF-8")
+                                val encodedName = URLEncoder.encode(name, "UTF-8")
+                                navController.navigate("chat/0/$encodedAddress/$encodedName")
                             }
                         }
                     },
@@ -87,15 +132,36 @@ fun MainNavigation(
                     },
                     onOpenAI = {
                         navController.navigate("ai")
+                    },
+                    onOpenScheduled = {
+                        navController.navigate("scheduled")
+                    },
+                    onOpenArchived = {
+                        navController.navigate("archived")
+                    },
+                    onOpenDownloads = {
+                        navController.navigate("downloads")
+                    },
+                    onOpenSpam = {
+                        navController.navigate("spam")
+                    },
+                    onOpenBlocked = {
+                        navController.navigate("blocked")
                     }
                 )
             }
 
-            composable("chat/{address}/{name}") { backStackEntry ->
-                val address = backStackEntry.arguments?.getString("address") ?: ""
-                val name = backStackEntry.arguments?.getString("name") ?: address
+            composable("chat/{threadId}/{address}/{name}") { backStackEntry ->
+                val threadIdStr = backStackEntry.arguments?.getString("threadId") ?: "0"
+                val threadId = threadIdStr.toLongOrNull() ?: 0L
+                // URL decode the address and name to handle special characters
+                val rawAddress = backStackEntry.arguments?.getString("address") ?: ""
+                val rawName = backStackEntry.arguments?.getString("name") ?: rawAddress
+                val address = try { URLDecoder.decode(rawAddress, "UTF-8") } catch (e: Exception) { rawAddress }
+                val name = try { URLDecoder.decode(rawName, "UTF-8") } catch (e: Exception) { rawName }
 
                 ConversationDetailScreen(
+                    threadId = threadId,
                     address = address,
                     contactName = name,
                     viewModel = viewModel,
@@ -141,7 +207,8 @@ fun MainNavigation(
                     onNavigateToMessages = { navController.navigate("settings/messages") },
                     onNavigateToTemplates = { navController.navigate("settings/templates") },
                     onNavigateToBackup = { navController.navigate("settings/backup") },
-                    onNavigateToDesktop = { navController.navigate("settings/desktop") }
+                    onNavigateToDesktop = { navController.navigate("settings/desktop") },
+                    onNavigateToUsage = { navController.navigate("settings/usage") }
                 )
             }
             
@@ -199,6 +266,55 @@ fun MainNavigation(
                 )
             }
 
+            composable("settings/usage") {
+                UsageSettingsScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // Scheduled Messages Screen
+            composable("scheduled") {
+                ScheduledMessagesScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // Archived Conversations Screen
+            composable("archived") {
+                val conversations by viewModel.conversations.collectAsState()
+
+                ArchivedConversationsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenConversation = { conversation ->
+                        // Navigate to the conversation (URL encode address and name)
+                        val encodedAddress = URLEncoder.encode(conversation.address, "UTF-8")
+                        val encodedName = URLEncoder.encode(conversation.contactName ?: conversation.address, "UTF-8")
+                        navController.navigate("chat/${conversation.threadId}/$encodedAddress/$encodedName")
+                    }
+                )
+            }
+
+            // SyncFlow Downloads Screen
+            composable("downloads") {
+                SyncFlowDownloadsScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // Spam Folder Screen
+            composable("spam") {
+                SpamFolderScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // Blocked Contacts Screen
+            composable("blocked") {
+                BlockedContactsScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
             // Ads Conversation Screen
             composable("ads") {
                 AdConversationScreen(
@@ -209,7 +325,14 @@ fun MainNavigation(
             // New Conversation - Contact Picker
             composable("newConversation") {
                 NewConversationScreen(
-                    onBack = { navController.popBackStack() },
+                    initialNumber = activeShare?.recipient,
+                    onBack = {
+                        if (activeShare != null) {
+                            activeShare = null
+                            onShareHandled()
+                        }
+                        navController.popBackStack()
+                    },
                     onContactsSelected = { contacts ->
                         selectedContacts = contacts
                         navController.navigate("newMessageCompose")
@@ -262,11 +385,23 @@ fun MainNavigation(
                     NewMessageComposeScreen(
                         contacts = selectedContacts,
                         viewModel = viewModel,
-                        onBack = { navController.popBackStack() },
+                        onBack = {
+                            if (activeShare != null) {
+                                activeShare = null
+                                onShareHandled()
+                            }
+                            navController.popBackStack()
+                        },
                         onMessageSent = {
                             // Go back to conversation list
+                            if (activeShare != null) {
+                                activeShare = null
+                                onShareHandled()
+                            }
                             navController.popBackStack("list", inclusive = false)
-                        }
+                        },
+                        initialMessage = activeShare?.text,
+                        initialAttachmentUris = activeShare?.uris ?: emptyList()
                     )
                 }
             }
@@ -335,6 +470,10 @@ fun MainNavigation(
                             contacts = contacts,
                             viewModel = viewModel,
                             onBack = {
+                                if (activeShare != null) {
+                                    activeShare = null
+                                    onShareHandled()
+                                }
                                 navController.popBackStack("list", inclusive = false)
                             },
                             onMessageSent = {
@@ -342,10 +481,16 @@ fun MainNavigation(
                                 scope.launch(Dispatchers.IO) {
                                     groupRepository.updateLastMessage(groupId)
                                 }
+                                if (activeShare != null) {
+                                    activeShare = null
+                                    onShareHandled()
+                                }
                                 navController.popBackStack("list", inclusive = false)
                             },
                             groupName = group.group.name,
-                            groupId = groupId
+                            groupId = groupId,
+                            initialMessage = activeShare?.text,
+                            initialAttachmentUris = activeShare?.uris ?: emptyList()
                         )
                     }
                 }

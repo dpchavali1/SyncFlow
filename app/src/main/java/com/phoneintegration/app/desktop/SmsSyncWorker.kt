@@ -1,11 +1,17 @@
 package com.phoneintegration.app.desktop
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
+import androidx.core.content.FileProvider
 import androidx.work.*
+import com.google.firebase.storage.FirebaseStorage
+import com.phoneintegration.app.MmsHelper
 import com.phoneintegration.app.SmsRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -21,15 +27,16 @@ class SmsSyncWorker(
         const val WORK_NAME = "sms_sync_work"
 
         /**
-         * Schedule periodic SMS sync
+         * Schedule adaptive SMS sync (triggered by IntelligentSyncManager)
          */
         fun schedule(context: Context) {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
 
+            // Use longer intervals since IntelligentSyncManager handles real-time updates
             val syncRequest = PeriodicWorkRequestBuilder<SmsSyncWorker>(
-                repeatInterval = 15, // Sync every 15 minutes
+                repeatInterval = 60, // Sync every hour as backup (IntelligentSyncManager handles frequent updates)
                 repeatIntervalTimeUnit = TimeUnit.MINUTES
             )
                 .setConstraints(constraints)
@@ -46,7 +53,7 @@ class SmsSyncWorker(
                 syncRequest
             )
 
-            Log.d(TAG, "SMS sync worker scheduled")
+            Log.d(TAG, "Adaptive SMS sync worker scheduled (backup to IntelligentSyncManager)")
         }
 
         /**
@@ -58,14 +65,14 @@ class SmsSyncWorker(
         }
 
         /**
-         * Trigger immediate sync
+         * Trigger immediate sync (called by IntelligentSyncManager)
          */
         fun syncNow(context: Context) {
             val syncRequest = OneTimeWorkRequestBuilder<SmsSyncWorker>()
                 .build()
 
             WorkManager.getInstance(context).enqueue(syncRequest)
-            Log.d(TAG, "Immediate SMS sync triggered")
+            Log.d(TAG, "Immediate SMS sync triggered by IntelligentSyncManager")
         }
     }
 
@@ -110,8 +117,10 @@ class OutgoingMessageWorker(
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
 
+            // IntelligentSyncManager handles real-time outgoing messages via listeners
+            // This worker serves as backup and for bulk operations
             val workRequest = PeriodicWorkRequestBuilder<OutgoingMessageWorker>(
-                repeatInterval = 15, // Minimum allowed by Android
+                repeatInterval = 30, // Less frequent since IntelligentSyncManager handles real-time
                 repeatIntervalTimeUnit = TimeUnit.MINUTES
             )
                 .setConstraints(constraints)
@@ -124,7 +133,7 @@ class OutgoingMessageWorker(
                 workRequest
             )
 
-            Log.d(TAG, "Outgoing message worker scheduled (runs every 15 min)")
+            Log.d(TAG, "Adaptive outgoing message worker scheduled (backup to IntelligentSyncManager)")
         }
 
         /**
@@ -165,15 +174,33 @@ class OutgoingMessageWorker(
             outgoingMessages.forEach { (messageId, messageData) ->
                 try {
                     val address = messageData["address"] as? String ?: return@forEach
-                    val body = messageData["body"] as? String ?: return@forEach
+                    val body = messageData["body"] as? String ?: ""
+                    val isMms = messageData["isMms"] as? Boolean ?: false
+                    @Suppress("UNCHECKED_CAST")
+                    val attachments = messageData["attachments"] as? List<Map<String, Any?>>
 
-                    Log.d(TAG, "Sending SMS to $address: $body")
+                    val sendSuccess = if (isMms && !attachments.isNullOrEmpty()) {
+                        Log.d(TAG, "Sending MMS to $address (attachments=${attachments.size})")
+                        sendMmsWithAttachments(address, body, attachments)
+                    } else if (body.isNotBlank()) {
+                        Log.d(TAG, "Sending SMS to $address: $body")
+                        smsRepository.sendSms(address, body)
+                    } else {
+                        Log.w(TAG, "Empty outgoing message (no body, no attachments)")
+                        false
+                    }
 
-                    // Send SMS
-                    smsRepository.sendSms(address, body)
+                    if (!sendSuccess) {
+                        Log.e(TAG, "Failed to send message $messageId to $address")
+                        return@forEach
+                    }
 
                     // Write sent message to messages collection
-                    syncService.writeSentMessage(messageId, address, body)
+                    if (isMms && !attachments.isNullOrEmpty()) {
+                        syncService.writeSentMmsMessage(messageId, address, body, attachments)
+                    } else {
+                        syncService.writeSentMessage(messageId, address, body)
+                    }
 
                     // Delete from outgoing_messages
                     syncService.deleteOutgoingMessage(messageId)
@@ -188,6 +215,79 @@ class OutgoingMessageWorker(
         } catch (e: Exception) {
             Log.e(TAG, "Error processing outgoing messages", e)
             Result.retry()
+        }
+    }
+
+    private suspend fun sendMmsWithAttachments(
+        address: String,
+        body: String,
+        attachments: List<Map<String, Any?>>
+    ): Boolean {
+        return try {
+            val attachment = attachments.firstOrNull() ?: return false
+
+            val url = attachment["url"] as? String
+            val inlineData = attachment["inlineData"] as? String
+            val fileName = attachment["fileName"] as? String ?: "attachment"
+            val contentType = attachment["contentType"] as? String ?: "application/octet-stream"
+
+            Log.d(TAG, "Processing MMS attachment: $fileName ($contentType)")
+
+            val attachmentData: ByteArray? = when {
+                !inlineData.isNullOrEmpty() -> {
+                    Log.d(TAG, "Using inline data for attachment")
+                    Base64.decode(inlineData, Base64.DEFAULT)
+                }
+                !url.isNullOrEmpty() -> {
+                    Log.d(TAG, "Downloading attachment from: ${url.take(50)}...")
+                    downloadAttachment(url)
+                }
+                else -> null
+            }
+
+            if (attachmentData == null) {
+                Log.e(TAG, "Failed to get attachment data")
+                return false
+            }
+
+            Log.d(TAG, "Attachment data size: ${attachmentData.size} bytes")
+
+            val cacheDir = File(applicationContext.cacheDir, "mms_outgoing")
+            cacheDir.mkdirs()
+            val cacheFile = File(cacheDir, fileName)
+            cacheFile.writeBytes(attachmentData)
+
+            val contentUri = FileProvider.getUriForFile(
+                applicationContext,
+                "${applicationContext.packageName}.provider",
+                cacheFile
+            )
+
+            val success = MmsHelper.sendMms(applicationContext, address, contentUri, body.ifEmpty { null })
+
+            cacheFile.delete()
+
+            if (success) {
+                Log.d(TAG, "MMS sent successfully to $address")
+            } else {
+                Log.e(TAG, "MMS send failed to $address")
+            }
+
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending MMS with attachments", e)
+            false
+        }
+    }
+
+    private suspend fun downloadAttachment(url: String): ByteArray? {
+        return try {
+            val storageRef = FirebaseStorage.getInstance().getReferenceFromUrl(url)
+            val maxSize = 25L * 1024 * 1024
+            storageRef.getBytes(maxSize).await()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error downloading attachment", e)
+            null
         }
     }
 }

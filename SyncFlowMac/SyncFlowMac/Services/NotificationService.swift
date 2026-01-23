@@ -49,7 +49,14 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             options: [.customDismissAction]
         )
 
-        center.setNotificationCategories([category])
+        let callCategory = UNNotificationCategory(
+            identifier: "CALL_CATEGORY",
+            actions: [],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([category, callCategory])
     }
 
     // MARK: - Show Notification
@@ -63,12 +70,22 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = contactName ?? address
         content.body = body
-        content.sound = .default
         content.categoryIdentifier = "MESSAGE_CATEGORY"
         content.userInfo = [
             "address": address,
             "messageId": messageId
         ]
+
+        // Use custom sound for contact if set
+        let soundService = NotificationSoundService.shared
+        let sound = soundService.getSound(for: address)
+
+        // Try to use custom sound, fallback to default
+        if let soundURL = getSoundURL(for: sound.systemSound) {
+            content.sound = UNNotificationSound(named: UNNotificationSoundName(rawValue: soundURL.lastPathComponent))
+        } else {
+            content.sound = .default
+        }
 
         let request = UNNotificationRequest(
             identifier: messageId,
@@ -82,16 +99,60 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             }
         }
 
-        // Update badge count
-        updateBadgeCount()
+        // Also play sound manually for better compatibility
+        soundService.playSound(for: address)
+    }
+
+    func showIncomingCallNotification(
+        callerName: String,
+        isVideo: Bool,
+        callId: String
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = isVideo ? "Incoming Video Call" : "Incoming Call"
+        content.body = "\(callerName) is calling"
+        content.categoryIdentifier = "CALL_CATEGORY"
+        content.sound = .default
+        if #available(macOS 12.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+        content.userInfo = [
+            "type": "call",
+            "callId": callId
+        ]
+
+        let request = UNNotificationRequest(
+            identifier: "call_\(callId)",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("❌ Error showing call notification: \(error)")
+            }
+        }
+    }
+
+    func clearCallNotification(callId: String) {
+        UNUserNotificationCenter.current()
+            .removeDeliveredNotifications(withIdentifiers: ["call_\(callId)"])
+    }
+
+    private func getSoundURL(for soundName: String) -> URL? {
+        let systemSounds = URL(fileURLWithPath: "/System/Library/Sounds")
+        let extensions = ["aiff", "wav", "mp3", "caf"]
+
+        for ext in extensions {
+            let soundURL = systemSounds.appendingPathComponent("\(soundName).\(ext)")
+            if FileManager.default.fileExists(atPath: soundURL.path) {
+                return soundURL
+            }
+        }
+        return nil
     }
 
     // MARK: - Badge Management
-
-    func updateBadgeCount() {
-        // Badge shows total unread count
-        // This will be called from MessageStore
-    }
 
     func setBadgeCount(_ count: Int) {
         DispatchQueue.main.async {
@@ -124,6 +185,12 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             // Handle quick reply
             if let address = userInfo["address"] as? String {
                 await handleQuickReply(to: address, body: textResponse.userText)
+            }
+        } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+                  let type = userInfo["type"] as? String,
+                  type == "call" {
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
             }
         } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
             // User tapped notification - bring app to foreground and select conversation
@@ -163,5 +230,4 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 extension Notification.Name {
     static let quickReply = Notification.Name("quickReply")
     static let selectConversation = Notification.Name("selectConversation")
-    static let newMessageReceived = Notification.Name("newMessageReceived")
 }

@@ -15,7 +15,9 @@ import com.phoneintegration.app.deals.model.Deal
 import com.phoneintegration.app.deals.DealsRepository
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 
@@ -28,17 +30,38 @@ fun AdConversationScreen(
     val repo = remember { DealsRepository(context) }
 
     var deals by remember { mutableStateOf<List<Deal>>(emptyList()) }
+    var filteredDeals by remember { mutableStateOf<List<Deal>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var selectedCategory by remember { mutableStateOf("All") }
+    var searchQuery by remember { mutableStateOf("") }
+    var showSearch by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
     // Load initial deals
     LaunchedEffect(Unit) {
-        deals = repo.getDeals().sortedByDescending { it.timestamp }
+        deals = repo.getDeals() // Get deals
+        filteredDeals = deals
         loading = false
+    }
+
+    // Update filtered deals when category or search changes
+    LaunchedEffect(selectedCategory, searchQuery, deals) {
+        filteredDeals = when {
+            searchQuery.isNotEmpty() -> {
+                // Use search functionality
+                scope.launch {
+                    filteredDeals = repo.searchDeals(searchQuery)
+                }
+                deals // Temporary fallback while searching
+            }
+            selectedCategory != "All" -> {
+                deals.filter { it.category.equals(selectedCategory, ignoreCase = true) }
+            }
+            else -> deals
+        }
     }
 
     Scaffold(
@@ -48,6 +71,44 @@ fun AdConversationScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, "Back")
+                    }
+                },
+                actions = {
+                    // Search button
+                    IconButton(onClick = { showSearch = !showSearch }) {
+                        Icon(
+                            if (showSearch) Icons.Default.Close else Icons.Default.Search,
+                            contentDescription = if (showSearch) "Close search" else "Search deals"
+                        )
+                    }
+
+                    // Refresh button
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                refreshing = true
+                                val result = repo.refreshDeals()
+                                deals = repo.getDeals()
+                                filteredDeals = deals
+                                refreshing = false
+
+                                if (result) {
+                                    snackbarHostState.showSnackbar("✅ Deals updated!")
+                                } else {
+                                    snackbarHostState.showSnackbar("❌ Failed to refresh")
+                                }
+                            }
+                        },
+                        enabled = !refreshing
+                    ) {
+                        if (refreshing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh Deals")
+                        }
                     }
                 }
             )
@@ -60,11 +121,11 @@ fun AdConversationScreen(
                     scope.launch {
                         refreshing = true
 
-                        // 🔥 FIX: use refreshFromCloud()
-                        val result = repo.refreshFromCloud()
+                        // Refresh deals
+                        val result = repo.refreshDeals()
 
                         deals = repo.getDeals()
-                            .sortedByDescending { it.timestamp }
+                        filteredDeals = deals
 
                         refreshing = false
 
@@ -95,21 +156,50 @@ fun AdConversationScreen(
                 .padding(padding)
         ) {
 
+            // Search bar (expandable)
+            if (showSearch) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search deals...") },
+                    leadingIcon = { Icon(Icons.Default.Search, "Search") },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, "Clear search")
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    singleLine = true
+                )
+            }
+
             // Derive categories dynamically from the deals
             val dealCategories = remember(deals) {
                 listOf("All") + deals.map { it.category }.distinct().sorted()
             }
 
-            // CATEGORY FILTERS
             DealCategoryChips(
                 categories = dealCategories,
                 selected = selectedCategory,
-                onSelected = { selectedCategory = it }
+                onSelected = {
+                    selectedCategory = it
+                    if (showSearch) searchQuery = "" // Clear search when changing categories
+                }
             )
 
-            val filtered = deals
-                .filter { selectedCategory == "All" || it.category == selectedCategory }
-                .sortedByDescending { it.timestamp }
+            // Show deal count and refresh info
+            if (!loading && filteredDeals.isNotEmpty()) {
+                Text(
+                    "${filteredDeals.size} deals available • Last updated: ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+            }
 
             if (loading) {
                 LazyColumn {
@@ -119,8 +209,8 @@ fun AdConversationScreen(
                 }
             } else {
                 LazyColumn {
-                    items(filtered.size) { index ->
-                        val deal = filtered[index]
+                    items(filteredDeals.size) { index ->
+                        val deal = filteredDeals[index]
 
                         DealCard(
                             deal = deal,

@@ -1,14 +1,98 @@
 {
   "rules": {
     "users": {
+      ".read": "auth != null && auth.token.admin === true",
+      ".write": "auth != null && auth.token.admin === true",
       "$uid": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+        ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid || auth.token.admin === true || auth.uid == 'durgaprasad.chavali@gmail.com')",
+        ".write": "auth != null && auth.uid == $uid",
+        "messages": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$messageId": {
+            ".validate": "newData.hasChildren(['address', 'body', 'date', 'type'])"
+          }
+        },
+        "read_receipts": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$messageId": {
+            ".validate": "newData.hasChildren(['readAt', 'readBy'])",
+            "messageId": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "readAt": {
+              ".validate": "newData.isNumber()"
+            },
+            "readBy": {
+              ".validate": "newData.isString()"
+            },
+            "readDeviceName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "conversationAddress": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        }
+        ,
+        "message_reactions": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)"
+        }
       }
     },
     "pending_pairings": {
-      ".read": true,
-      ".write": true
+      ".read": false,
+      ".write": false,
+      "$token": {
+        ".read": "auth != null && data.child('requesterUid').val() == auth.uid",
+        ".write": false
+      }
+    },
+    "pairing_tokens": {
+      ".read": false,
+      ".write": false
+    },
+    "e2ee_keys": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+        ".write": "auth != null && auth.uid == $uid",
+        "publicKey": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "algorithm": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "version": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "platform": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "timestamp": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "$deviceId": {
+          ".validate": "newData.hasChildren(['publicKeyX963'])",
+          ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+          "publicKeyX963": {
+            ".validate": "newData.isString() && newData.val().length > 0"
+          },
+          "format": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "keyVersion": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "platform": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
+        }
+      }
     }
   }
 }

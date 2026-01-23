@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.phoneintegration.app.utils.InputValidation
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -27,6 +28,7 @@ fun CreateGroupNameScreen(
     onCreateGroup: (String) -> Unit
 ) {
     var groupName by remember { mutableStateOf(TextFieldValue("")) }
+    var nameError by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
         topBar = {
@@ -39,7 +41,14 @@ fun CreateGroupNameScreen(
                 },
                 actions = {
                     if (groupName.text.isNotBlank()) {
-                        IconButton(onClick = { onCreateGroup(groupName.text) }) {
+                        IconButton(onClick = {
+                            val validation = InputValidation.validateGroupName(groupName.text)
+                            if (validation.isValid) {
+                                onCreateGroup(validation.sanitizedValue ?: groupName.text)
+                            } else {
+                                nameError = validation.errorMessage
+                            }
+                        }) {
                             Icon(Icons.Default.Check, "Create")
                         }
                     }
@@ -75,11 +84,16 @@ fun CreateGroupNameScreen(
             // Group name input
             OutlinedTextField(
                 value = groupName,
-                onValueChange = { groupName = it },
+                onValueChange = {
+                    groupName = it
+                    if (nameError != null) nameError = null
+                },
                 label = { Text("Group Name") },
                 placeholder = { Text("Enter group name...") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                isError = nameError != null,
+                supportingText = nameError?.let { { Text(it) } }
             )
 
             Spacer(modifier = Modifier.height(24.dp))

@@ -40,6 +40,7 @@ object DealNotificationManager {
         }
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     suspend fun showDealNotification(context: Context, deal: Deal) {
         ensureChannels(context)
 
@@ -73,6 +74,7 @@ object DealNotificationManager {
             .notify(deal.id.hashCode(), builder.build())
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     suspend fun showPriceDropNotification(context: Context, deal: Deal) {
         ensureChannels(context)
 

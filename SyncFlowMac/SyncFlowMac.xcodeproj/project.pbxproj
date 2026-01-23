@@ -7,14 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		8CA32FCF2ED65FD7002587DA /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA32FCE2ED65FD7002587DA /* FirebaseAuth */; };
-		8CA32FD12ED65FE2002587DA /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA32FD02ED65FE2002587DA /* FirebaseCore */; };
-		8CA32FD32ED65FEA002587DA /* FirebaseDatabase in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA32FD22ED65FEA002587DA /* FirebaseDatabase */; };
-		8CA32FD52ED65FF2002587DA /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA32FD42ED65FF2002587DA /* FirebaseStorage */; };
+		2991E65B13F3FC42169BBD53 /* Pods_SyncFlowMac.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D2D07720B3AF8F9D14647EAE /* Pods_SyncFlowMac.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		8C6B81232ED6585400307672 /* SyncFlowMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SyncFlowMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B6AD6E480EDD3E45DE7B10AE /* Pods-SyncFlowMac.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SyncFlowMac.release.xcconfig"; path = "Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac.release.xcconfig"; sourceTree = "<group>"; };
+		D2D07720B3AF8F9D14647EAE /* Pods_SyncFlowMac.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SyncFlowMac.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		FDA649B75C45B7BA4204F0F5 /* Pods-SyncFlowMac.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SyncFlowMac.debug.xcconfig"; path = "Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,22 +30,29 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				8CA32FD32ED65FEA002587DA /* FirebaseDatabase in Frameworks */,
-				8CA32FD52ED65FF2002587DA /* FirebaseStorage in Frameworks */,
-				8CA32FD12ED65FE2002587DA /* FirebaseCore in Frameworks */,
-				8CA32FCF2ED65FD7002587DA /* FirebaseAuth in Frameworks */,
+				2991E65B13F3FC42169BBD53 /* Pods_SyncFlowMac.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		143183A501851AA34D3EEB3A /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				FDA649B75C45B7BA4204F0F5 /* Pods-SyncFlowMac.debug.xcconfig */,
+				B6AD6E480EDD3E45DE7B10AE /* Pods-SyncFlowMac.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		8C6B811A2ED6585400307672 = {
 			isa = PBXGroup;
 			children = (
 				8C6B81252ED6585400307672 /* SyncFlowMac */,
-				8CA32FCD2ED65FD7002587DA /* Frameworks */,
 				8C6B81242ED6585400307672 /* Products */,
+				143183A501851AA34D3EEB3A /* Pods */,
+				B368B1FF3BA9AE640ADB4CB7 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -57,9 +64,10 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		8CA32FCD2ED65FD7002587DA /* Frameworks */ = {
+		B368B1FF3BA9AE640ADB4CB7 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				D2D07720B3AF8F9D14647EAE /* Pods_SyncFlowMac.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -71,9 +79,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 8C6B812E2ED6585600307672 /* Build configuration list for PBXNativeTarget "SyncFlowMac" */;
 			buildPhases = (
+				B078FA5302ADECCF892EBFDF /* [CP] Check Pods Manifest.lock */,
 				8C6B811F2ED6585400307672 /* Sources */,
 				8C6B81202ED6585400307672 /* Frameworks */,
 				8C6B81212ED6585400307672 /* Resources */,
+				B412E3C3581BF2F47F419606 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -83,12 +93,6 @@
 				8C6B81252ED6585400307672 /* SyncFlowMac */,
 			);
 			name = SyncFlowMac;
-			packageProductDependencies = (
-				8CA32FCE2ED65FD7002587DA /* FirebaseAuth */,
-				8CA32FD02ED65FE2002587DA /* FirebaseCore */,
-				8CA32FD22ED65FEA002587DA /* FirebaseDatabase */,
-				8CA32FD42ED65FF2002587DA /* FirebaseStorage */,
-			);
 			productName = SyncFlowMac;
 			productReference = 8C6B81232ED6585400307672 /* SyncFlowMac.app */;
 			productType = "com.apple.product-type.application";
@@ -117,9 +121,6 @@
 			);
 			mainGroup = 8C6B811A2ED6585400307672;
 			minimizedProjectReferenceProxies = 1;
-			packageReferences = (
-				8C6B81542ED65CFE00307672 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
-			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8C6B81242ED6585400307672 /* Products */;
 			projectDirPath = "";
@@ -139,6 +140,52 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		B078FA5302ADECCF892EBFDF /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-SyncFlowMac-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		B412E3C3581BF2F47F419606 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		8C6B811F2ED6585400307672 /* Sources */ = {
@@ -188,7 +235,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -204,7 +251,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.1;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -251,7 +298,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -261,7 +308,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.1;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -271,6 +318,7 @@
 		};
 		8C6B812F2ED6585600307672 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = FDA649B75C45B7BA4204F0F5 /* Pods-SyncFlowMac.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -284,12 +332,14 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_NSCameraUsageDescription = "SyncFlow needs camera access to scan QR codes for pairing.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SyncFlow needs microphone access to route call audio through your MacBook.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.syncflow.mac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -305,6 +355,7 @@
 		};
 		8C6B81302ED6585600307672 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = B6AD6E480EDD3E45DE7B10AE /* Pods-SyncFlowMac.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -318,12 +369,14 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_NSCameraUsageDescription = "SyncFlow needs camera access to scan QR codes for pairing.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SyncFlow needs microphone access to route call audio through your MacBook.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.syncflow.mac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -359,40 +412,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		8C6B81542ED65CFE00307672 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 12.6.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		8CA32FCE2ED65FD7002587DA /* FirebaseAuth */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8C6B81542ED65CFE00307672 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseAuth;
-		};
-		8CA32FD02ED65FE2002587DA /* FirebaseCore */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8C6B81542ED65CFE00307672 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseCore;
-		};
-		8CA32FD22ED65FEA002587DA /* FirebaseDatabase */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8C6B81542ED65CFE00307672 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseDatabase;
-		};
-		8CA32FD42ED65FF2002587DA /* FirebaseStorage */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8C6B81542ED65CFE00307672 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseStorage;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8C6B811B2ED6585400307672 /* Project object */;
 }

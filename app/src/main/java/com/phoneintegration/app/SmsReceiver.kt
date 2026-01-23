@@ -5,8 +5,12 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
+import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.phoneintegration.app.data.database.SyncFlowDatabase
+import com.phoneintegration.app.data.database.SpamMessage
 import com.phoneintegration.app.utils.SecureLogger
+import com.phoneintegration.app.utils.SpamFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -86,10 +90,80 @@ class SmsReceiver : BroadcastReceiver() {
             val contactHelper = ContactHelper(context)
             val contactName = contactHelper.getContactName(sender)
 
-            // Show notification
-            val notificationHelper = NotificationHelper(context)
-            notificationHelper.showSmsNotification(sender, fullMessage, contactName)
-            Log.d("SMS_RECEIVER", "Notification attempted for $sender")
+            // Check if contact is blocked or conversation is muted before showing notification
+            CoroutineScope(Dispatchers.IO).launch {
+                var threadId: Long? = null
+                try {
+                    val database = SyncFlowDatabase.getInstance(context)
+
+                    // Check if sender is blocked
+                    val blockedDao = database.blockedContactDao()
+                    val normalizedSender = sender.replace(Regex("[^0-9+]"), "")
+                    val isBlocked = blockedDao.isBlocked(normalizedSender)
+
+                    if (isBlocked) {
+                        SecureLogger.d("SMS_RECEIVER", "Sender is blocked, skipping notification")
+                        return@launch
+                    }
+
+                    // Check for spam
+                    val isFromContact = contactName != null && contactName != sender
+                    val spamResult = SpamFilter.checkMessage(fullMessage, sender, isFromContact)
+
+                    if (spamResult.isSpam) {
+                        SecureLogger.d("SMS_RECEIVER", "Message detected as spam (confidence: ${spamResult.confidence})")
+
+                        // Get message ID from content provider (most recent message)
+                        val smsRepository = SmsRepository(context)
+                        val recentMessages = smsRepository.getAllRecentMessages(1)
+                        val messageId = recentMessages.firstOrNull()?.id ?: timestamp
+
+                        // Store in spam database
+                        val spamMessage = SpamMessage(
+                            messageId = messageId,
+                            address = sender,
+                            body = fullMessage,
+                            date = timestamp,
+                            contactName = contactName,
+                            spamConfidence = spamResult.confidence,
+                            spamReasons = spamResult.reasons.joinToString(", "),
+                            isUserMarked = false
+                        )
+                        database.spamMessageDao().insert(spamMessage)
+                        com.phoneintegration.app.desktop.DesktopSyncService(context)
+                            .syncSpamMessage(spamMessage)
+
+                        // Show spam notification
+                        val notificationHelper = NotificationHelper(context)
+                        notificationHelper.showSpamNotification(sender, fullMessage, contactName)
+                        return@launch
+                    }
+
+                    // Check if conversation is muted
+                    val smsRepository = SmsRepository(context)
+                    threadId = smsRepository.getThreadIdForAddress(sender)
+
+                    if (threadId != null) {
+                        val mutedDao = database.mutedConversationDao()
+                        val isMuted = mutedDao.isMuted(threadId)
+
+                        if (isMuted) {
+                            SecureLogger.d("SMS_RECEIVER", "Conversation is muted, skipping notification")
+                            return@launch
+                        }
+                    }
+
+                    // Show notification only if not blocked, not spam, and not muted
+                    val notificationHelper = NotificationHelper(context)
+                    notificationHelper.showSmsNotification(sender, fullMessage, contactName, threadId = threadId)
+                    Log.d("SMS_RECEIVER", "Notification shown for message")
+                } catch (e: Exception) {
+                    // Fallback: show notification if checks fail
+                    SecureLogger.e("SMS_RECEIVER", "Error checking blocked/mute status", e)
+                    val notificationHelper = NotificationHelper(context)
+                    notificationHelper.showSmsNotification(sender, fullMessage, contactName, threadId = threadId)
+                }
+            }
 
             // Broadcast locally to update UI & ViewModel
             val broadcast = Intent(SMS_RECEIVED_ACTION).apply {

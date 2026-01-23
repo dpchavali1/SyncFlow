@@ -1,88 +1,153 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { QrCode, Smartphone, Monitor, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
-import { useAppStore } from '@/lib/store'
+import { Smartphone, Monitor, CheckCircle, AlertCircle, RefreshCw, XCircle, Clock } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { generatePairingToken, listenForPairingCompletion, signInAnon, waitForAuth } from '@/lib/firebase'
+import { useAppStore } from '@/lib/store'
+import { initiatePairing, listenForPairingApproval, PairingSession, PairingStatus } from '@/lib/firebase'
 
 export default function PairingScreen() {
   const router = useRouter()
   const { setUserId } = useAppStore()
-  const [step, setStep] = useState<'intro' | 'showing-qr' | 'pairing' | 'success' | 'error'>('intro')
+  const [step, setStep] = useState<'loading' | 'qr' | 'success' | 'rejected' | 'error'>('loading')
   const [errorMessage, setErrorMessage] = useState('')
-  const [pairingToken, setPairingToken] = useState('')
-  const [deviceName, setDeviceName] = useState('')
+  const [pairingSession, setPairingSession] = useState<PairingSession | null>(null)
+  const [timeRemaining, setTimeRemaining] = useState(0)
+  const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const unsubscribeRef = useRef<(() => void) | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Initialize Firebase authentication on mount
+  // Cleanup function
   useEffect(() => {
-    const initAuth = async () => {
-      console.log('🔥 Pre-authenticating Firebase in background...')
-      const currentUser = await waitForAuth()
-      if (!currentUser) {
-        try {
-          await signInAnon()
-          console.log('✅ Background authentication complete')
-        } catch (error) {
-          console.error('❌ Background authentication failed:', error)
-        }
-      } else {
-        console.log('✅ Already authenticated:', currentUser)
+    return () => {
+      if (redirectTimeoutRef.current) {
+        clearTimeout(redirectTimeoutRef.current)
+      }
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current()
+      }
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
       }
     }
-    initAuth()
   }, [])
 
-  const handleGenerateQR = async () => {
+  // Start pairing session
+  const startPairing = useCallback(async () => {
+    // Cleanup previous listeners
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current()
+      unsubscribeRef.current = null
+    }
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+
+    setStep('loading')
+    setErrorMessage('')
+
     try {
-      console.log('⏱️ Starting QR generation...')
-      setStep('showing-qr')
+      const session = await initiatePairing()
+      setPairingSession(session)
+      setStep('qr')
 
-      // Wait for auth and sign in if needed
-      const currentUser = await waitForAuth()
-      if (!currentUser) {
-        console.log('⏱️ Not authenticated, signing in to Firebase...')
-        await signInAnon()
-        console.log('✅ Firebase sign-in complete')
-      } else {
-        console.log('✅ Already authenticated as:', currentUser)
-      }
+      // Calculate initial time remaining
+      const remaining = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
+      setTimeRemaining(remaining)
 
-      console.log('⏱️ Generating pairing token...')
-      const token = await generatePairingToken()
-      console.log('✅ Token generated:', token)
-      setPairingToken(token)
+      // Start countdown timer
+      timerRef.current = setInterval(() => {
+        setTimeRemaining((prev) => {
+          if (prev <= 1) {
+            if (timerRef.current) {
+              clearInterval(timerRef.current)
+            }
+            return 0
+          }
+          return prev - 1
+        })
+      }, 1000)
 
-      // Listen for pairing completion
-      const cleanup = listenForPairingCompletion(token, (userId) => {
-        if (userId) {
-          setStep('pairing')
-          // Store user ID
-          localStorage.setItem('syncflow_user_id', userId)
-          setUserId(userId)
-
+      // Listen for approval/rejection
+      unsubscribeRef.current = listenForPairingApproval(session.token, (status: PairingStatus) => {
+        if (status.status === 'approved' && status.pairedUid) {
+          // Success! Store credentials and redirect
+          localStorage.setItem('syncflow_user_id', status.pairedUid)
+          if (status.deviceId) {
+            localStorage.setItem('syncflow_device_id', status.deviceId)
+          }
+          setUserId(status.pairedUid)
           setStep('success')
 
-          // Redirect to messages
-          setTimeout(() => {
+          // Cleanup listeners
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current()
+            unsubscribeRef.current = null
+          }
+          if (timerRef.current) {
+            clearInterval(timerRef.current)
+            timerRef.current = null
+          }
+
+          // Redirect after brief delay
+          redirectTimeoutRef.current = setTimeout(() => {
             router.push('/messages')
           }, 2000)
+        } else if (status.status === 'rejected') {
+          setStep('rejected')
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current()
+            unsubscribeRef.current = null
+          }
+          if (timerRef.current) {
+            clearInterval(timerRef.current)
+            timerRef.current = null
+          }
+        } else if (status.status === 'expired') {
+          // Token expired, show error
+          setStep('error')
+          setErrorMessage('Pairing session expired. Please try again.')
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current()
+            unsubscribeRef.current = null
+          }
+          if (timerRef.current) {
+            clearInterval(timerRef.current)
+            timerRef.current = null
+          }
         }
       })
-
-      // Cleanup listener after 5 minutes
-      setTimeout(() => {
-        cleanup()
-        if (step === 'showing-qr') {
-          setErrorMessage('QR code expired. Please generate a new one.')
-          setStep('error')
-        }
-      }, 5 * 60 * 1000)
     } catch (error: any) {
+      console.error('Failed to start pairing:', error)
       setStep('error')
-      setErrorMessage(error.message || 'Failed to generate QR code')
+      setErrorMessage(error.message || 'Failed to start pairing session')
     }
+  }, [router, setUserId])
+
+  // Start pairing on mount
+  useEffect(() => {
+    startPairing()
+  }, [startPairing])
+
+  // Handle timer expiration
+  useEffect(() => {
+    if (timeRemaining === 0 && step === 'qr') {
+      setStep('error')
+      setErrorMessage('Pairing session expired. Please try again.')
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current()
+        unsubscribeRef.current = null
+      }
+    }
+  }, [timeRemaining, step])
+
+  // Format time remaining
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
   return (
@@ -101,105 +166,83 @@ export default function PairingScreen() {
 
         {/* Main Card */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8">
-          {step === 'intro' && (
+          {step === 'loading' && (
+            <div className="text-center py-12">
+              <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+                Generating QR Code...
+              </h2>
+              <p className="text-gray-600 dark:text-gray-400">
+                Please wait while we prepare the pairing session
+              </p>
+            </div>
+          )}
+
+          {step === 'qr' && pairingSession && (
             <div className="text-center">
-              <Monitor className="w-20 h-20 text-blue-600 mx-auto mb-6" />
-              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-4">
-                Pair Your Phone
+              <Monitor className="w-16 h-16 text-blue-600 mx-auto mb-4" />
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
+                Scan to Pair
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                To get started, scan the QR code with your phone's SyncFlow app.
+                Scan this QR code with your SyncFlow Android app
               </p>
 
-              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-6 mb-6">
-                <h3 className="font-semibold text-gray-900 dark:text-white mb-3">
+              {/* QR Code */}
+              <div className="bg-white p-6 rounded-xl inline-block mb-6 shadow-inner">
+                <QRCodeSVG
+                  value={pairingSession.qrPayload}
+                  size={220}
+                  level="M"
+                  includeMargin={false}
+                />
+              </div>
+
+              {/* Timer */}
+              <div className="flex items-center justify-center gap-2 mb-6">
+                <Clock className={`w-5 h-5 ${timeRemaining <= 60 ? 'text-orange-500' : 'text-gray-400'}`} />
+                <span className={`font-mono text-lg ${timeRemaining <= 60 ? 'text-orange-500 font-semibold' : 'text-gray-600 dark:text-gray-400'}`}>
+                  {formatTime(timeRemaining)}
+                </span>
+              </div>
+
+              {/* Instructions */}
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 text-left">
+                <h3 className="font-semibold text-gray-900 dark:text-white mb-2">
                   Instructions:
                 </h3>
-                <ol className="text-left text-gray-700 dark:text-gray-300 space-y-2">
+                <ol className="text-gray-700 dark:text-gray-300 space-y-1 text-sm">
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">1.</span>
-                    <span>Click "Generate QR Code" below</span>
+                    <span>Open SyncFlow app on your Android phone</span>
                   </li>
                   <li className="flex items-start">
                     <span className="font-semibold mr-2">2.</span>
-                    <span>Open SyncFlow app on your phone</span>
-                  </li>
-                  <li className="flex items-start">
-                    <span className="font-semibold mr-2">3.</span>
                     <span>Go to Settings → Desktop Integration</span>
                   </li>
                   <li className="flex items-start">
+                    <span className="font-semibold mr-2">3.</span>
+                    <span>Tap "Scan Desktop QR Code"</span>
+                  </li>
+                  <li className="flex items-start">
                     <span className="font-semibold mr-2">4.</span>
-                    <span>Tap "Scan QR Code" and scan the code shown here</span>
+                    <span>Point your camera at this QR code</span>
+                  </li>
+                  <li className="flex items-start">
+                    <span className="font-semibold mr-2">5.</span>
+                    <span>Approve the pairing request on your phone</span>
                   </li>
                 </ol>
               </div>
 
+              {/* Refresh button */}
               <button
-                onClick={handleGenerateQR}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center"
-              >
-                <QrCode className="w-5 h-5 mr-2" />
-                Generate QR Code
-              </button>
-            </div>
-          )}
-
-          {step === 'showing-qr' && (
-            <div className="text-center">
-              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-4">
-                Scan this QR Code
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Open SyncFlow app on your phone and scan this code
-              </p>
-
-              {/* QR Code Display */}
-              <div className="bg-white p-6 rounded-xl mb-6 inline-block">
-                <QRCodeSVG
-                  value={pairingToken}
-                  size={256}
-                  level="H"
-                  includeMargin={true}
-                />
-              </div>
-
-              {/* Manual Code */}
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 mb-6">
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                  Or enter this code manually:
-                </p>
-                <code className="text-lg font-mono text-gray-900 dark:text-white bg-white dark:bg-gray-800 px-4 py-2 rounded border border-gray-200 dark:border-gray-600 inline-block">
-                  {pairingToken}
-                </code>
-              </div>
-
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                This code will expire in 5 minutes
-              </p>
-
-              <button
-                onClick={() => {
-                  setStep('intro')
-                  setPairingToken('')
-                }}
-                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white flex items-center justify-center mx-auto"
+                onClick={startPairing}
+                className="mt-6 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium flex items-center justify-center mx-auto"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
-                Generate New Code
+                Generate New QR Code
               </button>
-            </div>
-          )}
-
-          {step === 'pairing' && (
-            <div className="text-center py-12">
-              <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-                Pairing Device...
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400">
-                Please wait while we connect to your phone
-              </p>
             </div>
           )}
 
@@ -215,6 +258,25 @@ export default function PairingScreen() {
             </div>
           )}
 
+          {step === 'rejected' && (
+            <div className="text-center py-12">
+              <XCircle className="w-20 h-20 text-orange-500 mx-auto mb-4" />
+              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
+                Pairing Declined
+              </h2>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                The pairing request was declined on your phone.
+              </p>
+              <button
+                onClick={startPairing}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center mx-auto"
+              >
+                <RefreshCw className="w-5 h-5 mr-2" />
+                Try Again
+              </button>
+            </div>
+          )}
+
           {step === 'error' && (
             <div className="text-center py-12">
               <AlertCircle className="w-20 h-20 text-red-500 mx-auto mb-4" />
@@ -223,9 +285,10 @@ export default function PairingScreen() {
               </h2>
               <p className="text-gray-600 dark:text-gray-400 mb-6">{errorMessage}</p>
               <button
-                onClick={() => setStep('intro')}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
+                onClick={startPairing}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center mx-auto"
               >
+                <RefreshCw className="w-5 h-5 mr-2" />
                 Try Again
               </button>
             </div>

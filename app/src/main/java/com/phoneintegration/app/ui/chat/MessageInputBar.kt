@@ -7,12 +7,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.unit.dp
+import com.phoneintegration.app.utils.InputValidation
 
 @Composable
 fun MessageInputBar(
     onSend: (String) -> Unit
 ) {
     var text by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
     Row(
         modifier = Modifier
@@ -22,16 +24,28 @@ fun MessageInputBar(
     ) {
         OutlinedTextField(
             value = text,
-            onValueChange = { text = it },
+            onValueChange = {
+                text = it
+                // Clear error when user starts typing
+                if (errorMessage != null) {
+                    errorMessage = null
+                }
+            },
             modifier = Modifier.weight(1f),
-            placeholder = { Text("Type a message…") }
+            placeholder = { Text("Type a message…") },
+            isError = errorMessage != null,
+            supportingText = errorMessage?.let { { Text(it) } }
         )
 
         IconButton(
             onClick = {
-                if (text.isNotBlank()) {
-                    onSend(text.trim())
+                val validation = InputValidation.validateMessage(text)
+                if (validation.isValid) {
+                    onSend(validation.sanitizedValue ?: text.trim())
                     text = ""
+                    errorMessage = null
+                } else {
+                    errorMessage = validation.errorMessage
                 }
             }
         ) {

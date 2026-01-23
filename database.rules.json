@@ -1,10 +1,74 @@
 {
   "rules": {
     "users": {
+      ".read": "auth != null && auth.token.admin === true",
+      ".write": "auth != null && auth.token.admin === true",
       "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid",
+        ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid || auth.token.admin === true || auth.uid == 'durgaprasad.chavali@gmail.com' || auth.uid == 'admin')",
+        ".write": "auth != null && auth.uid == $uid",
+        "devices": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$deviceId": {
+            ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            ".validate": "newData.hasChildren(['name'])",
+            "name": {
+              ".validate": "newData.isString() && newData.val().length <= 50"
+            },
+            "type": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'android' || newData.val() == 'web' || newData.val() == 'macos' || newData.val() == 'ios'))"
+            },
+            "platform": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'android' || newData.val() == 'web' || newData.val() == 'macos' || newData.val() == 'ios' || newData.val() == 'macOS'))"
+            },
+            "pairedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "isPaired": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            },
+            "lastSeen": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          }
+        },
+        "usage": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "plan": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 20)"
+          },
+          "planUpdatedAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "planExpiresAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "trialStartedAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "storageBytes": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "lastUpdatedAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "monthly": {
+            "$period": {
+              "uploadBytes": {
+                ".validate": "!newData.exists() || newData.isNumber()"
+              },
+              "mmsBytes": {
+                ".validate": "!newData.exists() || newData.isNumber()"
+              },
+              "fileBytes": {
+                ".validate": "!newData.exists() || newData.isNumber()"
+              }
+            }
+          }
+        },
         "messages": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           "$messageId": {
             ".validate": "newData.hasChildren(['address', 'body', 'date', 'type'])",
             "address": {
@@ -25,23 +89,11 @@
           },
           ".indexOn": ["date", "timestamp"]
         },
-        "devices": {
-          "$deviceId": {
-            ".validate": "newData.hasChildren(['name', 'type', 'pairedAt'])",
-            "name": {
-              ".validate": "newData.isString() && newData.val().length <= 50"
-            },
-            "type": {
-              ".validate": "newData.isString() && (newData.val() == 'android' || newData.val() == 'web' || newData.val() == 'macos' || newData.val() == 'ios')"
-            },
-            "pairedAt": {
-              ".validate": "newData.isNumber()"
-            }
-          }
-        },
         "outgoing_messages": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           "$messageId": {
-            ".validate": "newData.hasChildren(['address', 'body', 'timestamp', 'status'])",
+            ".validate": "newData.hasChildren(['address', 'body'])",
             "address": {
               ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
             },
@@ -49,13 +101,141 @@
               ".validate": "newData.isString() && newData.val().length <= 1600"
             },
             "timestamp": {
-              ".validate": "newData.isNumber()"
+              ".validate": "!newData.exists() || newData.isNumber()"
             },
             "status": {
-              ".validate": "newData.isString() && (newData.val() == 'pending' || newData.val() == 'sent' || newData.val() == 'failed')"
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'pending' || newData.val() == 'sent' || newData.val() == 'failed'))"
             }
           },
           ".indexOn": ["timestamp", "status"]
+        },
+        "read_receipts": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$messageId": {
+            ".validate": "newData.hasChildren(['readAt', 'readBy'])",
+            "messageId": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "readAt": {
+              ".validate": "newData.isNumber()"
+            },
+            "readBy": {
+              ".validate": "newData.isString()"
+            },
+            "readDeviceName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "conversationAddress": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "message_reactions": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)"
+        },
+        "spam_messages": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$spamId": {
+            ".validate": "newData.hasChildren(['address', 'body', 'date'])",
+            "address": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+            },
+            "body": {
+              ".validate": "newData.isString() && newData.val().length <= 1600"
+            },
+            "date": {
+              ".validate": "newData.isNumber()"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+            },
+            "spamConfidence": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "spamReasons": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "detectedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "isUserMarked": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            },
+            "isRead": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            }
+          },
+          ".indexOn": ["date", "timestamp"]
+        },
+        "file_transfers": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$fileId": {
+            ".validate": "(!data.exists() && newData.hasChildren(['fileName','fileSize','contentType','downloadUrl','source','status','timestamp'])) || data.exists()",
+            "fileName": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 255)"
+            },
+            "fileSize": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "contentType": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "downloadUrl": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "source": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'android' || newData.val() == 'macos' || newData.val() == 'web'))"
+            },
+            "status": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'pending' || newData.val() == 'uploading' || newData.val() == 'uploaded' || newData.val() == 'downloading' || newData.val() == 'downloaded' || newData.val() == 'failed'))"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "error": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          },
+          ".indexOn": ["timestamp", "status"]
+        },
+        "continuity_state": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$deviceId": {
+            ".validate": "newData.hasChildren(['type', 'address', 'timestamp', 'platform', 'deviceName'])",
+            "type": {
+              ".validate": "newData.isString() && newData.val() == 'conversation'"
+            },
+            "address": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 50"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+            },
+            "threadId": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "draft": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 1000)"
+            },
+            "deviceName": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 100"
+            },
+            "deviceId": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "platform": {
+              ".validate": "newData.isString() && (newData.val() == 'android' || newData.val() == 'macos' || newData.val() == 'web')"
+            },
+            "timestamp": {
+              ".validate": "newData.isNumber()"
+            }
+          },
+          ".indexOn": ["timestamp"]
         },
         "groups": {
           "$groupId": {
@@ -66,25 +246,575 @@
               }
             }
           }
+        },
+        "calls": {
+          "$callId": {
+            ".validate": "newData.hasChildren(['phoneNumber', 'callType', 'callState'])",
+            "id": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "phoneNumber": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "callType": {
+              ".validate": "newData.isString() && (newData.val() == 'incoming' || newData.val() == 'outgoing')"
+            },
+            "callState": {
+              ".validate": "newData.isString() && (newData.val() == 'ringing' || newData.val() == 'active' || newData.val() == 'ended')"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "date": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "lastUpdated": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          }
+        },
+        "call_requests": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$requestId": {
+            ".validate": "newData.hasChildren(['phoneNumber', 'requestedAt'])",
+            "phoneNumber": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "requestedAt": {
+              ".validate": "newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'pending' || newData.val() == 'calling' || newData.val() == 'completed' || newData.val() == 'failed'))"
+            },
+            "error": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "completedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "simSubscriptionId": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "simSlotIndex": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          },
+          ".indexOn": ["requestedAt", "status"]
+        },
+        "sims": {
+          ".validate": "newData.isString() || newData.hasChildren()",
+          "$simIndex": {
+            "subscriptionId": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "slotIndex": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "displayName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "carrierName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "phoneNumber": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "iccId": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "isEmbedded": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            },
+            "isActive": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            }
+          }
+        },
+        "syncflow_calls": {
+          "$callId": {
+            ".validate": "newData.hasChildren(['callerId', 'calleeId', 'callType', 'status'])",
+            "id": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "callerId": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "callerName": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+            },
+            "callerPlatform": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'android' || newData.val() == 'macos' || newData.val() == 'ios' || newData.val() == 'web'))"
+            },
+            "calleeId": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "calleeName": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+            },
+            "calleePlatform": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'android' || newData.val() == 'macos' || newData.val() == 'ios' || newData.val() == 'web'))"
+            },
+            "callType": {
+              ".validate": "newData.isString() && (newData.val() == 'audio' || newData.val() == 'video')"
+            },
+            "status": {
+              ".validate": "newData.isString() && (newData.val() == 'ringing' || newData.val() == 'active' || newData.val() == 'ended' || newData.val() == 'rejected' || newData.val() == 'missed' || newData.val() == 'failed')"
+            },
+            "startedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "answeredAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "endedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "offer": {
+              ".validate": "!newData.exists() || newData.hasChildren(['sdp', 'type'])",
+              "sdp": {
+                ".validate": "newData.isString()"
+              },
+              "type": {
+                ".validate": "newData.isString() && newData.val() == 'offer'"
+              }
+            },
+            "answer": {
+              ".validate": "!newData.exists() || newData.hasChildren(['sdp', 'type'])",
+              "sdp": {
+                ".validate": "newData.isString()"
+              },
+              "type": {
+                ".validate": "newData.isString() && newData.val() == 'answer'"
+              }
+            },
+            "ice_caller": {
+              "$candidateId": {
+                ".validate": "newData.hasChildren(['candidate', 'sdpMLineIndex'])",
+                "candidate": {
+                  ".validate": "newData.isString()"
+                },
+                "sdpMid": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                },
+                "sdpMLineIndex": {
+                  ".validate": "newData.isNumber()"
+                }
+              }
+            },
+            "ice_callee": {
+              "$candidateId": {
+                ".validate": "newData.hasChildren(['candidate', 'sdpMLineIndex'])",
+                "candidate": {
+                  ".validate": "newData.isString()"
+                },
+                "sdpMid": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                },
+                "sdpMLineIndex": {
+                  ".validate": "newData.isNumber()"
+                }
+              }
+            }
+          },
+          ".indexOn": ["status", "startedAt", "callerId", "calleeId"]
+        },
+        "call_commands": {
+          "$commandId": {
+            ".validate": "newData.hasChildren(['command', 'callId'])",
+            "command": {
+              ".validate": "newData.isString() && (newData.val() == 'answer' || newData.val() == 'reject' || newData.val() == 'end' || newData.val() == 'mute' || newData.val() == 'unmute')"
+            },
+            "callId": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "processed": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          },
+          ".indexOn": ["timestamp", "processed"]
+        },
+        "active_calls": {
+          "$callId": {
+            ".validate": "newData.hasChildren(['phoneNumber', 'state'])",
+            "phoneNumber": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "state": {
+              ".validate": "newData.isString() && (newData.val() == 'ringing' || newData.val() == 'active' || newData.val() == 'holding' || newData.val() == 'disconnecting')"
+            },
+            "direction": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'incoming' || newData.val() == 'outgoing'))"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "duration": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          },
+          ".indexOn": ["timestamp", "state"]
+        },
+        "call_history": {
+          "$callId": {
+            ".validate": "newData.hasChildren(['phoneNumber', 'callType'])",
+            "id": {
+              ".validate": "!newData.exists() || newData.isString() || newData.isNumber()"
+            },
+            "phoneNumber": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "contactName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "callType": {
+              ".validate": "newData.isString() && (newData.val() == 'Incoming' || newData.val() == 'Outgoing' || newData.val() == 'Missed' || newData.val() == 'Rejected' || newData.val() == 'Blocked' || newData.val() == 'Voicemail' || newData.val() == 'incoming' || newData.val() == 'outgoing' || newData.val() == 'missed' || newData.val() == 'rejected' || newData.val() == 'blocked' || newData.val() == 'unknown')"
+            },
+            "callTypeInt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "callDate": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "date": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "duration": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "formattedDuration": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "formattedDate": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "simId": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "syncedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "isRead": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            }
+          },
+          ".indexOn": ["callDate", "date", "callType", "phoneNumber"]
+        },
+        "contacts": {
+          "$contactId": {
+            ".validate": "newData.hasChildren(['displayName'])",
+            "displayName": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200"
+            },
+            "phoneNumbers": {
+              "$phoneId": {
+                "number": {
+                  ".validate": "newData.isString() && newData.val().length > 0"
+                },
+                "type": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                },
+                "label": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                }
+              }
+            },
+            "emails": {
+              "$emailId": {
+                "address": {
+                  ".validate": "newData.isString()"
+                },
+                "type": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                }
+              }
+            },
+            "photoUri": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "lastUpdated": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          },
+          ".indexOn": ["displayName", "lastUpdated"]
+        },
+        "webrtc_signaling": {
+          "$callId": {
+            "offer": {
+              ".validate": "!newData.exists() || newData.hasChildren(['sdp', 'type'])",
+              "sdp": {
+                ".validate": "newData.isString()"
+              },
+              "type": {
+                ".validate": "newData.isString()"
+              }
+            },
+            "answer": {
+              ".validate": "!newData.exists() || newData.hasChildren(['sdp', 'type'])",
+              "sdp": {
+                ".validate": "newData.isString()"
+              },
+              "type": {
+                ".validate": "newData.isString()"
+              }
+            },
+            "ice_candidates": {
+              "$candidateId": {
+                "candidate": {
+                  ".validate": "newData.isString()"
+                },
+                "sdpMid": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                },
+                "sdpMLineIndex": {
+                  ".validate": "!newData.exists() || newData.isNumber()"
+                }
+              }
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          },
+          ".indexOn": ["timestamp", "status"]
+        },
+        "incoming_syncflow_calls": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null",
+          "$callId": {
+            ".read": "auth != null && (auth.uid == $uid || data.child('callerUid').val() == auth.uid)",
+            ".validate": "newData.hasChildren(['callerUid', 'callType', 'status'])"
+          },
+          ".indexOn": ["status", "startedAt", "callerUid"]
+        },
+        "outgoing_syncflow_calls": {
+          ".write": "auth != null",
+          "$callId": {
+            ".validate": "newData.hasChildren(['callType', 'status'])"
+          },
+          ".indexOn": ["status", "startedAt", "recipientUid"]
+        },
+        "clipboard": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "content": {
+            ".validate": "newData.isString() && newData.val().length <= 100000"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "source": {
+            ".validate": "!newData.exists() || newData.isString()"
+          }
+        },
+        "media_command": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "command": {
+            ".validate": "newData.isString() && (newData.val() == 'play' || newData.val() == 'pause' || newData.val() == 'next' || newData.val() == 'previous' || newData.val() == 'volume_up' || newData.val() == 'volume_down')"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
+        },
+        "media_status": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "isPlaying": {
+            ".validate": "!newData.exists() || newData.isBoolean()"
+          },
+          "title": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "artist": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "album": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "appName": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "packageName": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "volume": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "maxVolume": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "hasPermission": {
+            ".validate": "!newData.exists() || newData.isBoolean()"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
         }
       }
     },
-    "pending_pairings": {
-      "$token": {
-        ".read": true,
-        ".write": true,
-        ".validate": "newData.hasChildren(['createdAt', 'expiresAt', 'userId']) && newData.child('expiresAt').val() > now && newData.child('expiresAt').val() - now <= 600000",
-        "userId": {
+    "e2ee_keys": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+        ".write": "auth != null && auth.uid == $uid",
+        "publicKey": {
           ".validate": "newData.isString() && newData.val().length > 0"
         },
+        "algorithm": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "version": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "platform": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "timestamp": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "$deviceId": {
+          ".validate": "newData.hasChildren(['publicKeyX963'])",
+          ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+          "publicKeyX963": {
+            ".validate": "newData.isString() && newData.val().length > 0"
+          },
+          "format": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "keyVersion": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "platform": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
+        }
+      }
+    },
+    "phone_to_uid": {
+      "$phoneNumber": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        ".validate": "newData.isString()"
+      }
+    },
+    "pending_pairings": {
+      ".read": false,
+      ".write": false,
+      "$token": {
+        ".read": "auth != null && data.child('requesterUid').val() == auth.uid",
+        ".write": false,
+        ".validate": "newData.hasChildren(['expiresAt'])",
+        "userId": {
+          ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0)"
+        },
         "createdAt": {
-          ".validate": "newData.val() === now"
+          ".validate": "!newData.exists() || newData.isNumber()"
         },
         "expiresAt": {
-          ".validate": "newData.isNumber() && newData.val() > now"
+          ".validate": "newData.isNumber()"
+        },
+        "token": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "platform": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "macDeviceName": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "type": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "completedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
         },
         "deviceName": {
           ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 50)"
+        },
+        "appVersion": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "status": {
+          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'pending' || newData.val() == 'approved' || newData.val() == 'rejected' || newData.val() == 'expired'))"
+        },
+        "approvedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "approvedBy": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "rejectedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "rejectedBy": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "pairedUid": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "deviceId": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "customToken": {
+          ".validate": "!newData.exists() || newData.isString()"
+        }
+      }
+    },
+    "pairing_tokens": {
+      ".read": false,
+      ".write": false
+    },
+    "fcm_tokens": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid",
+        ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 500"
+      }
+    },
+    "fcm_notifications": {
+      "$userId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "$callId": {
+          ".validate": "newData.hasChildren(['type', 'callId'])",
+          "type": {
+            ".validate": "newData.isString() && (newData.val() == 'incoming_call' || newData.val() == 'call_cancelled')"
+          },
+          "callId": {
+            ".validate": "newData.isString()"
+          },
+          "callerName": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "callerPhone": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "isVideo": {
+            ".validate": "!newData.exists() || newData.isString()"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
         }
       }
     }

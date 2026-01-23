@@ -22,7 +22,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import com.phoneintegration.app.SmsMessage
+import com.phoneintegration.app.ai.AIService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
@@ -228,6 +230,9 @@ private data class QueryHandler(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AIAssistantScreen(messages: List<SmsMessage>, onDismiss: () -> Unit) {
+
+    val context = LocalContext.current
+    val aiService = remember { AIService(context) }
 
     val transactions by remember(messages) {
         mutableStateOf(SpendingParser.analyze(messages))
@@ -512,7 +517,7 @@ Try asking:
 """.trimIndent()
     }
 // -------------------------------------------------------
-// SEND LOGIC
+// SEND LOGIC - Enhanced with AI
 // -------------------------------------------------------
 
     fun handleSubmit() {
@@ -525,8 +530,14 @@ Try asking:
         conversation += ChatMessage("user", userMessage)
 
         scope.launch {
-            delay(300)
-            val response = generateResponse(userMessage)
+            // Use AIService for intelligent conversation
+            val response = try {
+                val history = conversation.dropLast(1).map { it.role to it.content }
+                aiService.chatWithAI(userMessage, messages, history)
+            } catch (e: Exception) {
+                "⚠️ Error: ${e.message ?: "Unknown error occurred"}"
+            }
+
             conversation += ChatMessage("assistant", response)
             isLoading = false
         }
