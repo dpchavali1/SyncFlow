@@ -97,6 +97,7 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
 
             state = UsageUiState.Loading
             try {
+                // FIRST: Try to load from users/{uid}/usage
                 val snapshot = database.reference
                     .child("users")
                     .child(userId)
@@ -104,7 +105,26 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
                     .get()
                     .await()
 
-                state = UsageUiState.Loaded(parseUsage(snapshot))
+                // If usage data exists, use it
+                if (snapshot.exists() && snapshot.child("plan").value != null) {
+                    state = UsageUiState.Loaded(parseUsage(snapshot))
+                    return@launch
+                }
+
+                // FALLBACK: Check subscription_records/{uid}/active (persists after user deletion)
+                val subscriptionSnapshot = database.reference
+                    .child("subscription_records")
+                    .child(userId)
+                    .child("active")
+                    .get()
+                    .await()
+
+                // If subscription record exists, use it with empty usage stats
+                if (subscriptionSnapshot.exists()) {
+                    state = UsageUiState.Loaded(parseUsage(snapshot, subscriptionSnapshot))
+                } else {
+                    state = UsageUiState.Loaded(parseUsage(snapshot))
+                }
             } catch (e: Exception) {
                 state = UsageUiState.Error(e.message ?: "Failed to load usage")
             }
@@ -285,9 +305,17 @@ private fun UsageBar(label: String, progress: Float) {
     }
 }
 
-private fun parseUsage(snapshot: DataSnapshot): UsageSummary {
-    val plan = snapshot.child("plan").getValue(String::class.java)
-    val planExpiresAt = snapshot.child("planExpiresAt").longValue()
+private fun parseUsage(snapshot: DataSnapshot, subscriptionSnapshot: DataSnapshot? = null): UsageSummary {
+    // Load plan and expiry data
+    var plan = snapshot.child("plan").getValue(String::class.java)
+    var planExpiresAt = snapshot.child("planExpiresAt").longValue()
+
+    // FALLBACK: If no plan in usage snapshot, check subscription_records
+    if (plan.isNullOrBlank() && subscriptionSnapshot != null && subscriptionSnapshot.exists()) {
+        plan = subscriptionSnapshot.child("plan").getValue(String::class.java)
+        planExpiresAt = subscriptionSnapshot.child("planExpiresAt").longValue()
+    }
+
     val trialStartedAt = snapshot.child("trialStartedAt").longValue()
     val storageBytes = snapshot.child("storageBytes").longValue() ?: 0L
     val lastUpdatedAt = snapshot.child("lastUpdatedAt").longValue()
