@@ -13,6 +13,7 @@ import FirebaseDatabase
 import FirebaseAuth
 import FirebaseStorage
 import FirebaseFunctions
+import SyncGroupManager
 
 class FirebaseService {
 
@@ -23,7 +24,20 @@ class FirebaseService {
     private let storage = Storage.storage()
     private let functions = Functions.functions(region: "us-central1")
 
-    private init() {}
+    // Sync Group Manager for device pairing
+    let syncGroupManager = SyncGroupManager.shared
+    private var _syncGroupId: String? {
+        didSet {
+            if let id = _syncGroupId {
+                UserDefaults.standard.set(id, forKey: "sync_group_id")
+            }
+        }
+    }
+
+    private init() {
+        // Restore sync group ID on init
+        self._syncGroupId = syncGroupManager.syncGroupId
+    }
 
     // MARK: - Authentication
 
@@ -46,6 +60,35 @@ class FirebaseService {
             return pairedDeviceId
         }
         return getOrCreateDeviceId()
+    }
+
+    var syncGroupId: String? {
+        _syncGroupId
+    }
+
+    // MARK: - Sync Group Pairing
+
+    /**
+     * Initiate sync group pairing (called on first app launch or when not paired)
+     */
+    func initiateSyncGroupPairing(completion: @escaping (Result<String, Error>) -> Void) {
+        // Check if already has sync group
+        if let existing = syncGroupManager.syncGroupId {
+            completion(.success(existing))
+            return
+        }
+
+        // Create new sync group
+        syncGroupManager.createSyncGroup(deviceName: "macOS") { result in
+            switch result {
+            case .success(let groupId):
+                self._syncGroupId = groupId
+                completion(.success(groupId))
+
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
     }
 
     fileprivate func isRcsAddress(_ address: String) -> Bool {

@@ -278,21 +278,28 @@ struct PairingView: View {
         pairingSession = nil
         errorMessage = nil
 
-        do {
-            let session = try await FirebaseService.shared.initiatePairing()
-            await MainActor.run {
-                pairingSession = session
-                timeRemaining = session.timeRemaining
-                pairingStatus = .waitingForScan
+        let firebaseService = FirebaseService.shared
 
-                // Start listening for approval
-                listenerHandle = FirebaseService.shared.listenForPairingApproval(token: session.token) { status in
-                    handlePairingStatus(status)
+        firebaseService.initiateSyncGroupPairing { result in
+            switch result {
+            case .success(let syncGroupId):
+                // Create a dummy pairing session with the sync group ID as the QR payload
+                let session = PairingSession(
+                    token: syncGroupId,
+                    qrPayload: syncGroupId,
+                    expiresAt: Date().timeIntervalSince1970 * 1000 + (30 * 60 * 1000) // 30 minutes
+                )
+
+                DispatchQueue.main.async {
+                    self.pairingSession = session
+                    self.timeRemaining = session.timeRemaining
+                    self.pairingStatus = .waitingForScan
                 }
-            }
-        } catch {
-            await MainActor.run {
-                pairingStatus = .error(error.localizedDescription)
+
+            case .failure(let error):
+                DispatchQueue.main.async {
+                    self.pairingStatus = .error(error.localizedDescription)
+                }
             }
         }
     }
@@ -323,10 +330,9 @@ struct PairingView: View {
     }
 
     private func cleanupListener() {
-        if let handle = listenerHandle, let session = pairingSession {
-            FirebaseService.shared.removePairingApprovalListener(token: session.token, handle: handle)
-            listenerHandle = nil
-        }
+        // For sync group pairing, we don't need to clean up a listener
+        // The QR code is simply displayed for Android to scan
+        listenerHandle = nil
     }
 }
 
