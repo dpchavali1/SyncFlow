@@ -1736,3 +1736,306 @@ async function getUserCleanupCounts(userId, now) {
 
     return counts;
 }
+
+// ============================================
+// SYNC GROUP MANAGEMENT (Device-based pairing)
+// ============================================
+
+/**
+ * Update sync group plan (admin only)
+ * Called when upgrading/downgrading a sync group's plan
+ */
+exports.updateSyncGroupPlan = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const { syncGroupId, plan } = data;
+
+        if (!syncGroupId) {
+            throw new functions.https.HttpsError("invalid-argument", "syncGroupId required");
+        }
+
+        const validPlans = ["free", "monthly", "yearly", "lifetime"];
+        if (!validPlans.includes(plan)) {
+            throw new functions.https.HttpsError("invalid-argument", "Invalid plan");
+        }
+
+        const now = Date.now();
+        const groupRef = admin.database().ref(`/syncGroups/${syncGroupId}`);
+        const snapshot = await groupRef.once("value");
+
+        if (!snapshot.exists()) {
+            throw new functions.https.HttpsError("not-found", "Sync group not found");
+        }
+
+        const updates = {
+            "plan": plan,
+            "updatedAt": now
+        };
+
+        // Calculate expiry based on plan
+        if (plan === "free") {
+            updates["planExpiresAt"] = null;
+        } else if (plan === "lifetime") {
+            updates["planExpiresAt"] = null;
+        } else {
+            // Monthly/yearly expire in respective periods
+            const expiryMs = plan === "monthly" ? 30 * 24 * 60 * 60 * 1000 : 365 * 24 * 60 * 60 * 1000;
+            updates["planExpiresAt"] = now + expiryMs;
+        }
+
+        // Track premium status
+        if (["monthly", "yearly", "lifetime"].includes(plan)) {
+            updates["wasPremium"] = true;
+            if (!snapshot.child("firstPremiumDate").exists()) {
+                updates["firstPremiumDate"] = now;
+            }
+        }
+
+        // Add history entry
+        updates[`history/${now}`] = {
+            action: "plan_updated",
+            newPlan: plan,
+            previousPlan: snapshot.child("plan").val() || "free",
+            updatedBy: context.auth.uid
+        };
+
+        await groupRef.update(updates);
+
+        return {
+            success: true,
+            syncGroupId,
+            plan,
+            updatedAt: now
+        };
+    } catch (error) {
+        console.error("Error updating sync group plan:", error);
+        throw error;
+    }
+});
+
+/**
+ * Remove device from sync group (admin or device owner)
+ */
+exports.removeDeviceFromSyncGroup = functions.https.onCall(async (data, context) => {
+    try {
+        requireAuth(context);
+
+        const { syncGroupId, deviceId } = data;
+
+        if (!syncGroupId || !deviceId) {
+            throw new functions.https.HttpsError("invalid-argument", "syncGroupId and deviceId required");
+        }
+
+        const now = Date.now();
+        const groupRef = admin.database().ref(`/syncGroups/${syncGroupId}`);
+        const snapshot = await groupRef.once("value");
+
+        if (!snapshot.exists()) {
+            throw new functions.https.HttpsError("not-found", "Sync group not found");
+        }
+
+        // Check authorization: must be admin or device owner
+        const isAdmin = context.auth.token?.admin === true;
+        if (!isAdmin && context.auth.uid !== deviceId) {
+            throw new functions.https.HttpsError("permission-denied", "You can only remove your own device");
+        }
+
+        const updates = {
+            [`devices/${deviceId}`]: null,
+            [`history/${now}`]: {
+                action: "device_removed",
+                deviceId: deviceId,
+                removedBy: context.auth.uid
+            }
+        };
+
+        await groupRef.update(updates);
+
+        return {
+            success: true,
+            syncGroupId,
+            deviceId,
+            removedAt: now
+        };
+    } catch (error) {
+        console.error("Error removing device from sync group:", error);
+        throw error;
+    }
+});
+
+/**
+ * Get sync group info (any authenticated user can view)
+ */
+exports.getSyncGroupInfo = functions.https.onCall(async (data, context) => {
+    try {
+        requireAuth(context);
+
+        const { syncGroupId } = data;
+
+        if (!syncGroupId) {
+            throw new functions.https.HttpsError("invalid-argument", "syncGroupId required");
+        }
+
+        const groupRef = admin.database().ref(`/syncGroups/${syncGroupId}`);
+        const snapshot = await groupRef.once("value");
+
+        if (!snapshot.exists()) {
+            throw new functions.https.HttpsError("not-found", "Sync group not found");
+        }
+
+        const groupData = snapshot.val();
+        const plan = groupData.plan || "free";
+        const deviceLimit = plan === "free" ? 3 : 999;
+        const devices = groupData.devices || {};
+
+        return {
+            success: true,
+            data: {
+                syncGroupId,
+                plan,
+                deviceLimit,
+                deviceCount: Object.keys(devices).length,
+                createdAt: groupData.createdAt,
+                devices: Object.entries(devices).map(([deviceId, info]) => ({
+                    deviceId,
+                    deviceType: info.deviceType,
+                    joinedAt: info.joinedAt,
+                    lastSyncedAt: info.lastSyncedAt,
+                    status: info.status || "active",
+                    deviceName: info.deviceName
+                }))
+            }
+        };
+    } catch (error) {
+        console.error("Error getting sync group info:", error);
+        throw error;
+    }
+});
+
+/**
+ * List all sync groups (admin only)
+ */
+exports.listSyncGroups = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const groupsRef = admin.database().ref("/syncGroups");
+        const snapshot = await groupsRef.once("value");
+
+        if (!snapshot.exists()) {
+            return {
+                success: true,
+                groups: []
+            };
+        }
+
+        const groups = [];
+        snapshot.forEach((child) => {
+            const groupData = child.val();
+            const plan = groupData.plan || "free";
+            const devices = groupData.devices || {};
+
+            groups.push({
+                syncGroupId: child.key,
+                plan,
+                deviceCount: Object.keys(devices).length,
+                deviceLimit: plan === "free" ? 3 : 999,
+                createdAt: groupData.createdAt,
+                masterDevice: groupData.masterDevice
+            });
+        });
+
+        return {
+            success: true,
+            groups: groups.sort((a, b) => b.createdAt - a.createdAt)
+        };
+    } catch (error) {
+        console.error("Error listing sync groups:", error);
+        throw error;
+    }
+});
+
+/**
+ * Get detailed sync group info (admin only)
+ */
+exports.getSyncGroupDetails = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const { syncGroupId } = data;
+
+        if (!syncGroupId) {
+            throw new functions.https.HttpsError("invalid-argument", "syncGroupId required");
+        }
+
+        const groupRef = admin.database().ref(`/syncGroups/${syncGroupId}`);
+        const snapshot = await groupRef.once("value");
+
+        if (!snapshot.exists()) {
+            throw new functions.https.HttpsError("not-found", "Sync group not found");
+        }
+
+        const groupData = snapshot.val();
+        const devices = groupData.devices || {};
+        const history = groupData.history || {};
+
+        return {
+            success: true,
+            data: {
+                syncGroupId,
+                plan: groupData.plan || "free",
+                deviceLimit: (groupData.plan || "free") === "free" ? 3 : 999,
+                deviceCount: Object.keys(devices).length,
+                createdAt: groupData.createdAt,
+                masterDevice: groupData.masterDevice,
+                wasPremium: groupData.wasPremium || false,
+                firstPremiumDate: groupData.firstPremiumDate,
+                devices: Object.entries(devices).map(([deviceId, info]) => ({
+                    deviceId,
+                    deviceType: info.deviceType,
+                    joinedAt: info.joinedAt,
+                    lastSyncedAt: info.lastSyncedAt,
+                    status: info.status || "active",
+                    deviceName: info.deviceName
+                })),
+                history: Object.entries(history)
+                    .map(([timestamp, entry]) => ({
+                        ...entry,
+                        timestamp: parseInt(timestamp)
+                    }))
+                    .sort((a, b) => b.timestamp - a.timestamp)
+            }
+        };
+    } catch (error) {
+        console.error("Error getting sync group details:", error);
+        throw error;
+    }
+});
+
+/**
+ * Delete a sync group (admin only - used for cleanup)
+ */
+exports.deleteSyncGroup = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const { syncGroupId } = data;
+
+        if (!syncGroupId) {
+            throw new functions.https.HttpsError("invalid-argument", "syncGroupId required");
+        }
+
+        const groupRef = admin.database().ref(`/syncGroups/${syncGroupId}`);
+        await groupRef.remove();
+
+        return {
+            success: true,
+            syncGroupId,
+            deletedAt: Date.now()
+        };
+    } catch (error) {
+        console.error("Error deleting sync group:", error);
+        throw error;
+    }
+});

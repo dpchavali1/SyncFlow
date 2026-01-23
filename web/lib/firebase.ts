@@ -3382,4 +3382,300 @@ export const unregisterDevice = async (deviceId: string): Promise<any> => {
   return result.data
 }
 
+// ============================================
+// SYNC GROUP MANAGEMENT (Device-based pairing)
+// ============================================
+
+/**
+ * Get or create a sync group ID for this device (web)
+ * Returns stable ID across browser sessions (stored in localStorage)
+ */
+export const getSyncGroupId = (): string => {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+
+  let id = localStorage.getItem('sync_group_id')
+  if (!id) {
+    id = `web_${crypto.randomUUID()}`
+    localStorage.setItem('sync_group_id', id)
+  }
+  return id
+}
+
+/**
+ * Get device ID for this web browser
+ * Returns same ID across browser sessions
+ */
+export const getWebDeviceId = (): string => {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+
+  let id = localStorage.getItem('device_id')
+  if (!id) {
+    id = `web_${crypto.randomUUID()}`
+    localStorage.setItem('device_id', id)
+  }
+  return id
+}
+
+/**
+ * Create a new sync group (called when first device initializes)
+ */
+export const createSyncGroup = async (syncGroupId: string, deviceType: 'web' | 'macos' | 'android'): Promise<boolean> => {
+  try {
+    const deviceId = deviceType === 'web' ? getWebDeviceId() : syncGroupId // For web, use device ID
+
+    const syncGroupRef = ref(database, `syncGroups/${syncGroupId}`)
+    const now = Date.now()
+
+    await set(syncGroupRef, {
+      plan: 'free',
+      deviceLimit: 3,
+      masterDevice: deviceId,
+      createdAt: now,
+      devices: {
+        [deviceId]: {
+          deviceType,
+          joinedAt: now,
+          status: 'active'
+        }
+      }
+    })
+
+    return true
+  } catch (error) {
+    console.error('Error creating sync group:', error)
+    return false
+  }
+}
+
+/**
+ * Join an existing sync group
+ * Checks device limit before allowing join
+ */
+export const joinSyncGroup = async (syncGroupId: string, deviceType: 'web' | 'macos' | 'android', scannedGroupId?: string): Promise<{success: boolean; error?: string; deviceCount?: number; limit?: number}> => {
+  try {
+    // Use scanned group ID if provided (from QR code), otherwise use local sync group ID
+    const targetGroupId = scannedGroupId || syncGroupId
+    const deviceId = deviceType === 'web' ? getWebDeviceId() : undefined
+
+    // First, check if sync group exists and get current device count
+    const syncGroupRef = ref(database, `syncGroups/${targetGroupId}`)
+    const groupSnapshot = await get(syncGroupRef)
+
+    if (!groupSnapshot.exists()) {
+      return {
+        success: false,
+        error: 'Sync group not found'
+      }
+    }
+
+    const groupData = groupSnapshot.val()
+    const plan = groupData.plan || 'free'
+    const deviceLimit = plan === 'free' ? 3 : 999
+    const currentDevices = Object.keys(groupData.devices || {}).length
+
+    // Check device limit
+    if (currentDevices >= deviceLimit) {
+      return {
+        success: false,
+        error: `Device limit reached: ${currentDevices}/${deviceLimit}. Upgrade to Pro for unlimited devices.`,
+        deviceCount: currentDevices,
+        limit: deviceLimit
+      }
+    }
+
+    // Save locally
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('sync_group_id', targetGroupId)
+    }
+
+    // Register device in Firebase
+    const now = Date.now()
+    const actualDeviceId = deviceId || `${deviceType}_${crypto.randomUUID()}`
+
+    await update(syncGroupRef, {
+      [`devices/${actualDeviceId}`]: {
+        deviceType,
+        joinedAt: now,
+        status: 'active'
+      }
+    })
+
+    // Log to history
+    await update(syncGroupRef, {
+      [`history/${now}`]: {
+        action: 'device_joined',
+        deviceId: actualDeviceId,
+        deviceType
+      }
+    })
+
+    return {
+      success: true,
+      deviceCount: currentDevices + 1,
+      limit: deviceLimit
+    }
+  } catch (error) {
+    console.error('Error joining sync group:', error)
+    return {
+      success: false,
+      error: `Error joining sync group: ${error}`
+    }
+  }
+}
+
+/**
+ * Recover sync group on reinstall/browser clear
+ * Searches for existing sync group by device ID
+ */
+export const recoverSyncGroup = async (deviceType: 'web' | 'macos' | 'android', deviceId?: string): Promise<{success: boolean; syncGroupId?: string; error?: string}> {
+  try {
+    if (deviceType !== 'web') {
+      return {
+        success: false,
+        error: 'Device recovery only supported for web via localStorage'
+      }
+    }
+
+    // For web, check localStorage
+    const storedId = typeof window !== 'undefined' ? localStorage.getItem('sync_group_id') : null
+    if (storedId) {
+      // Verify it still exists in Firebase
+      const groupRef = ref(database, `syncGroups/${storedId}`)
+      const snapshot = await get(groupRef)
+      if (snapshot.exists()) {
+        return {
+          success: true,
+          syncGroupId: storedId
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: 'No previous sync group found'
+    }
+  } catch (error) {
+    console.error('Error recovering sync group:', error)
+    return {
+      success: false,
+      error: `Recovery failed: ${error}`
+    }
+  }
+}
+
+/**
+ * Get sync group info with all devices
+ */
+export const getSyncGroupInfo = async (syncGroupId: string): Promise<{
+  success: boolean
+  data?: {
+    plan: string
+    deviceLimit: number
+    deviceCount: number
+    devices: Array<{
+      deviceId: string
+      deviceType: string
+      joinedAt: number
+      lastSyncedAt?: number
+      status: string
+    }>
+  }
+  error?: string
+}> => {
+  try {
+    const syncGroupRef = ref(database, `syncGroups/${syncGroupId}`)
+    const snapshot = await get(syncGroupRef)
+
+    if (!snapshot.exists()) {
+      return {
+        success: false,
+        error: 'Sync group not found'
+      }
+    }
+
+    const groupData = snapshot.val()
+    const plan = groupData.plan || 'free'
+    const deviceLimit = plan === 'free' ? 3 : 999
+    const devices = groupData.devices || {}
+
+    return {
+      success: true,
+      data: {
+        plan,
+        deviceLimit,
+        deviceCount: Object.keys(devices).length,
+        devices: Object.entries(devices).map(([deviceId, info]: [string, any]) => ({
+          deviceId,
+          deviceType: info.deviceType,
+          joinedAt: info.joinedAt,
+          lastSyncedAt: info.lastSyncedAt,
+          status: info.status || 'active'
+        }))
+      }
+    }
+  } catch (error) {
+    console.error('Error getting sync group info:', error)
+    return {
+      success: false,
+      error: `Error fetching sync group: ${error}`
+    }
+  }
+}
+
+/**
+ * Update plan for a sync group (admin only via Cloud Functions)
+ */
+export const updateSyncGroupPlan = async (syncGroupId: string, plan: 'free' | 'monthly' | 'yearly' | 'lifetime'): Promise<boolean> => {
+  try {
+    const call = httpsCallable(functions, 'updateSyncGroupPlan')
+    await call({ syncGroupId, plan })
+    return true
+  } catch (error) {
+    console.error('Error updating sync group plan:', error)
+    return false
+  }
+}
+
+/**
+ * Remove device from sync group
+ */
+export const removeDeviceFromGroup = async (syncGroupId: string, deviceId: string): Promise<boolean> => {
+  try {
+    const deviceRef = ref(database, `syncGroups/${syncGroupId}/devices/${deviceId}`)
+    await remove(deviceRef)
+
+    // Log to history
+    const syncGroupRef = ref(database, `syncGroups/${syncGroupId}`)
+    const now = Date.now()
+    await update(syncGroupRef, {
+      [`history/${now}`]: {
+        action: 'device_removed',
+        deviceId
+      }
+    })
+
+    return true
+  } catch (error) {
+    console.error('Error removing device from group:', error)
+    return false
+  }
+}
+
+/**
+ * Listen to sync group changes in real-time
+ */
+export const listenToSyncGroup = (syncGroupId: string, callback: (data: any) => void) => {
+  const syncGroupRef = ref(database, `syncGroups/${syncGroupId}`)
+
+  return onValue(syncGroupRef, (snapshot) => {
+    if (snapshot.exists()) {
+      callback(snapshot.val())
+    }
+  })
+}
+
 export { auth, database, storage, signInAnon as signInAnonymously, getAuth }

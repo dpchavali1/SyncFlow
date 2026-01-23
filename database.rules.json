@@ -818,6 +818,75 @@
         }
       }
     },
+    "syncGroups": {
+      "$syncGroupId": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.token.admin === true",
+        "plan": {
+          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime'))"
+        },
+        "deviceLimit": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "masterDevice": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "createdAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "planExpiresAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "wasPremium": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "firstPremiumDate": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "devices": {
+          ".read": "auth != null",
+          "$deviceId": {
+            ".read": "auth != null",
+            ".write": "auth != null && auth.token.admin === true",
+            ".validate": "newData.hasChildren(['deviceType', 'joinedAt'])",
+            "deviceType": {
+              ".validate": "newData.isString() && (newData.val() == 'android' || newData.val() == 'macos' || newData.val() == 'web')"
+            },
+            "joinedAt": {
+              ".validate": "newData.isNumber()"
+            },
+            "lastSyncedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'active' || newData.val() == 'inactive'))"
+            }
+          }
+        },
+        "history": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.admin === true",
+          "$timestamp": {
+            ".validate": "newData.hasChildren(['action'])",
+            "action": {
+              ".validate": "newData.isString()"
+            },
+            "deviceId": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "planChanged": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            },
+            "newPlan": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "previousPlan": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        }
+      }
+    },
     "subscription_accounts": {
       "$deviceId": {
         ".read": "auth != null && auth.token.admin === true",
