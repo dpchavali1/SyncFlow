@@ -76,7 +76,9 @@ import {
   getCostOptimizationRecommendations,
   OrphanCounts,
   CleanupStats,
+  database,
 } from '@/lib/firebase'
+import { ref, update, serverTimestamp, get } from 'firebase/database'
 
 interface AdminSession {
   authenticated: boolean
@@ -179,6 +181,9 @@ export default function AdminCleanupPage() {
 
   // Testing state
   const [testUserId, setTestUserId] = useState('')
+  const [testPlan, setTestPlan] = useState<'free' | 'monthly' | 'yearly' | 'lifetime'>('free')
+  const [testDaysValid, setTestDaysValid] = useState('7')
+  const [isSettingPlan, setIsSettingPlan] = useState(false)
 
   const logContainerRef = useRef<HTMLDivElement>(null)
 
@@ -653,6 +658,57 @@ export default function AdminCleanupPage() {
     }
   }
 
+  const handleSetUserPlan = async () => {
+    if (!testUserId.trim()) {
+      addLog('⚠️ Please enter a User ID')
+      return
+    }
+
+    setIsSettingPlan(true)
+    addLog(`🔧 Assigning ${testPlan} plan to user ${testUserId}...`)
+
+    try {
+      const userRef = ref(database, `users/${testUserId}`)
+      const userSnapshot = await get(userRef)
+
+      if (!userSnapshot.exists()) {
+        addLog(`❌ User ${testUserId} not found`)
+        setIsSettingPlan(false)
+        return
+      }
+
+      const now = Date.now()
+      const days = parseInt(testDaysValid) || 7
+      const updateData: any = {
+        plan: testPlan,
+        updatedAt: serverTimestamp(),
+      }
+
+      if (testPlan === 'free') {
+        updateData.freeTrialExpiresAt = now + (days * 24 * 60 * 60 * 1000)
+      } else if (testPlan === 'lifetime') {
+        updateData.planExpiresAt = null
+      } else {
+        updateData.planExpiresAt = now + (days * 24 * 60 * 60 * 1000)
+      }
+
+      await update(userRef, updateData)
+
+      const expiryDate = new Date(updateData.planExpiresAt || updateData.freeTrialExpiresAt || now)
+      addLog(`✅ User plan updated to ${testPlan}`)
+      addLog(`⏰ Expires at: ${expiryDate.toISOString()}`)
+      addLog(`📍 User must sign out and back in to see changes`)
+
+      setTestUserId('')
+      setTestPlan('free')
+      setTestDaysValid('7')
+    } catch (error: any) {
+      addLog(`❌ Error: ${error.message}`)
+      console.error(error)
+    } finally {
+      setIsSettingPlan(false)
+    }
+  }
 
   const handleEnforceSmsFree = async () => {
     if (!confirm('⚠️ This will REMOVE all non-SMS messages (calls, media, etc.) from FREE tier users.\n\nThis enforces SMS-only messaging for free accounts.\n\nPaid users will not be affected.\n\nThis action CANNOT be undone. Are you sure?')) {
@@ -1142,8 +1198,8 @@ export default function AdminCleanupPage() {
         {activeTab === 'testing' && (
           <div className="space-y-6">
             <div className="bg-gradient-to-r from-purple-600 to-pink-600 rounded-xl p-6">
-              <h3 className="text-xl font-bold mb-1">🧪 Testing</h3>
-              <p className="text-purple-100 mb-6">Test free vs. paid user functionality</p>
+              <h3 className="text-xl font-bold mb-1">🧪 User Plan Assignment</h3>
+              <p className="text-purple-100 mb-6">Assign plans to test free vs. paid functionality</p>
 
               <div className="bg-gray-800 rounded-lg p-6 space-y-4">
                 <div>
@@ -1152,34 +1208,73 @@ export default function AdminCleanupPage() {
                     type="text"
                     value={testUserId}
                     onChange={(e) => setTestUserId(e.target.value)}
-                    placeholder="Enter user ID to test"
+                    placeholder="Enter user Firebase ID (e.g., abc123def456)"
                     className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
                   />
-                  <p className="text-xs text-gray-400 mt-2">
-                    Get user ID from Firebase Console → Authentication → Users
-                  </p>
                 </div>
 
-                <div className="bg-gray-700 rounded-lg p-4 mt-6 space-y-3">
-                  <p className="text-sm font-semibold text-gray-300">How to Test:</p>
-                  <ol className="text-sm text-gray-400 space-y-2 ml-4 list-decimal">
-                    <li>Enter user ID above</li>
-                    <li>Sign in as that user to test their plan features</li>
-                    <li>Go to Firebase Console → Realtime Database → users/{'{userId}'} to view plan data</li>
-                    <li>Update plan manually in Firebase: plan, planExpiresAt, freeTrialExpiresAt</li>
-                    <li>Sign out and back in to see plan changes</li>
-                  </ol>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Plan</label>
+                    <select
+                      value={testPlan}
+                      onChange={(e) => setTestPlan(e.target.value as any)}
+                      className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    >
+                      <option value="free">Free (7-day trial)</option>
+                      <option value="monthly">Monthly Paid</option>
+                      <option value="yearly">Yearly Paid</option>
+                      <option value="lifetime">Lifetime</option>
+                    </select>
+                  </div>
 
-                  <div className="mt-4 border-t border-gray-600 pt-4">
-                    <p className="text-sm font-semibold text-gray-300 mb-2">Plan Options:</p>
-                    <ul className="text-sm text-gray-400 space-y-1 ml-4">
-                      <li>• <strong>free</strong>: 7-day trial (set freeTrialExpiresAt)</li>
-                      <li>• <strong>monthly</strong>: Monthly subscription (set planExpiresAt)</li>
-                      <li>• <strong>yearly</strong>: Yearly subscription (set planExpiresAt)</li>
-                      <li>• <strong>lifetime</strong>: Lifetime access (no expiry)</li>
-                    </ul>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Days Valid</label>
+                    <input
+                      type="number"
+                      value={testDaysValid}
+                      onChange={(e) => setTestDaysValid(e.target.value)}
+                      placeholder="7"
+                      min="1"
+                      max="365"
+                      className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
                   </div>
                 </div>
+
+                <button
+                  onClick={handleSetUserPlan}
+                  disabled={isSettingPlan || !testUserId.trim()}
+                  className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-white text-purple-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors"
+                >
+                  {isSettingPlan ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5" />}
+                  {isSettingPlan ? 'Assigning Plan...' : 'Assign Plan'}
+                </button>
+
+                <div className="bg-gray-700 rounded-lg p-4 mt-6">
+                  <p className="text-sm text-gray-300 mb-2">
+                    <strong>Quick Test Cases:</strong>
+                  </p>
+                  <ul className="text-sm text-gray-400 space-y-1 ml-4">
+                    <li>✅ Expired Free User: Plan = "free", Days = 1</li>
+                    <li>✅ Active Trial User: Plan = "free", Days = 7</li>
+                    <li>✅ Monthly Subscriber: Plan = "monthly", Days = 30</li>
+                    <li>✅ Lifetime User: Plan = "lifetime", Days = 365</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-gray-800 rounded-xl p-6 flex-1 flex flex-col">
+              <h3 className="text-lg font-semibold mb-4">Assignment Log</h3>
+              <div className="flex-1 overflow-y-auto bg-gray-900 rounded-lg p-4 font-mono text-sm space-y-1">
+                {cleanupLog.length === 0 ? (
+                  <p className="text-gray-500">No plan assignments yet. Assign a plan above to see logs.</p>
+                ) : (
+                  cleanupLog.map((log: string, index: number) => (
+                    <div key={index} className="text-gray-300">{log}</div>
+                  ))
+                )}
               </div>
             </div>
           </div>
