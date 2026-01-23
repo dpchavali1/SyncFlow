@@ -821,10 +821,10 @@
     "subscription_records": {
       "$uid": {
         ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
-        ".write": "auth != null && (auth.token.admin === true)",
+        ".write": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
         "active": {
           ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
-          ".write": "auth != null && auth.token.admin === true",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
           "plan": {
             ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime' || newData.val() == 'free'))"
           },
