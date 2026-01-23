@@ -351,22 +351,40 @@ class SubscriptionService: ObservableObject {
 
         print("SubscriptionService: Loading plan from Firebase for userId: \(userId)")
 
-        let usageRef = Database.database()
+        let userRef = Database.database()
             .reference()
             .child("users")
             .child(userId)
-            .child("usage")
 
-        // FIRST: Try to load plan from Firebase (for testing tab assignments)
+        // FIRST: Try to load plan from Firebase (check both root level and usage path)
         do {
-            let snapshot = try await usageRef.getData()
-            if let usageData = snapshot.value as? [String: Any] {
-                print("SubscriptionService: Firebase data loaded: \(usageData)")
-                let plan = usageData["plan"] as? String ?? ""
-                let planExpiresAt = usageData["planExpiresAt"] as? NSNumber
-                let freeTrialExpiresAt = usageData["freeTrialExpiresAt"] as? NSNumber
-                let now = Int64(Date().timeIntervalSince1970 * 1000)
+            let snapshot = try await userRef.getData()
+            if let userData = snapshot.value as? [String: Any] {
+                print("SubscriptionService: Firebase user data loaded")
 
+                var plan = ""
+                var planExpiresAt: NSNumber?
+                var freeTrialExpiresAt: NSNumber?
+
+                // Check for plan at root level (legacy location from before)
+                if let rootPlan = userData["plan"] as? String {
+                    plan = rootPlan
+                    planExpiresAt = userData["planExpiresAt"] as? NSNumber
+                    freeTrialExpiresAt = userData["freeTrialExpiresAt"] as? NSNumber
+                    print("SubscriptionService: Found plan at root level: \(plan)")
+                }
+
+                // Check for plan in usage (new location from Testing tab)
+                if let usageData = userData["usage"] as? [String: Any] {
+                    if let usagePlan = usageData["plan"] as? String, !usagePlan.isEmpty {
+                        plan = usagePlan
+                        planExpiresAt = usageData["planExpiresAt"] as? NSNumber
+                        freeTrialExpiresAt = usageData["freeTrialExpiresAt"] as? NSNumber
+                        print("SubscriptionService: Found plan in usage: \(plan)")
+                    }
+                }
+
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
                 print("SubscriptionService: plan=\(plan), planExpiresAt=\(planExpiresAt?.int64Value ?? 0), now=\(now)")
 
                 // If Firebase has a valid paid plan that hasn't expired, use it
@@ -406,6 +424,7 @@ class SubscriptionService: ObservableObject {
         }
 
         // FALLBACK: Sync StoreKit subscription data to Firebase
+        let usageRef = userRef.child("usage")
         var updates: [String: Any] = [
             "planUpdatedAt": ServerValue.timestamp()
         ]
