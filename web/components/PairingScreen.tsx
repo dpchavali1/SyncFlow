@@ -115,8 +115,8 @@ export default function PairingScreen() {
   }, [])
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center overflow-y-auto bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 p-4">
-      <div className="max-w-2xl w-full">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 py-16 px-4">
+      <div className="max-w-2xl mx-auto w-full">
         {/* Logo and Title */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center mb-4">
