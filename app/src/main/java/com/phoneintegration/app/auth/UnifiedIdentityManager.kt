@@ -11,6 +11,7 @@ import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.security.SecurityEvent
 import com.phoneintegration.app.security.SecurityEventType
 import com.phoneintegration.app.security.SecurityMonitor
+import com.phoneintegration.app.sync.SyncGroupManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -49,11 +50,16 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
         Log.w(TAG, "Failed to initialize SecurityMonitor, continuing without it", e)
         null
     }
+    private val syncGroupManager = SyncGroupManager(context, database)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Device management
     private val _pairedDevices = MutableStateFlow<Map<String, DeviceInfo>>(emptyMap())
     val pairedDevices: StateFlow<Map<String, DeviceInfo>> = _pairedDevices.asStateFlow()
+
+    // Sync group info
+    private val _syncGroupId = MutableStateFlow<String?>(syncGroupManager.syncGroupId)
+    val syncGroupId: StateFlow<String?> = _syncGroupId.asStateFlow()
 
     private var deviceHeartbeatJob: Job? = null
     private var deviceMonitorJob: Job? = null
@@ -140,6 +146,24 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
 
             Log.d(TAG, "Device registered successfully: ${deviceInfo.name} (${deviceInfo.id})")
 
+            // Try to recover existing sync group, or create new one
+            val syncGroupResult = syncGroupManager.recoverSyncGroup().getOrNull()
+            if (syncGroupResult != null) {
+                Log.d(TAG, "Recovered existing sync group: $syncGroupResult")
+                _syncGroupId.value = syncGroupResult
+            } else {
+                // No existing group, create new one
+                val createResult = syncGroupManager.createSyncGroup(deviceName)
+                if (createResult.isSuccess) {
+                    val newGroupId = createResult.getOrNull() ?: return Result.failure(Exception("Failed to create sync group"))
+                    Log.d(TAG, "Created new sync group: $newGroupId")
+                    _syncGroupId.value = newGroupId
+                } else {
+                    Log.w(TAG, "Failed to create sync group: ${createResult.exceptionOrNull()}")
+                    // Continue anyway, sync group creation is not blocking
+                }
+            }
+
             // Mark token as used
             pairingRef.child("status").setValue("completed").await()
             pairingRef.child("completedAt").setValue(System.currentTimeMillis()).await()
@@ -224,6 +248,86 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "Error unregistering device", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Join a sync group by scanning QR code from another device
+     * Called when user scans QR code containing sync group ID
+     */
+    suspend fun joinSyncGroupFromQRCode(scannedSyncGroupId: String, deviceName: String): Result<JoinSyncGroupResult> {
+        return try {
+            Log.d(TAG, "Attempting to join sync group: $scannedSyncGroupId")
+
+            val result = syncGroupManager.joinSyncGroup(scannedSyncGroupId, deviceName)
+
+            if (result.isSuccess) {
+                val joinResult = result.getOrNull() ?: return Result.failure(Exception("Failed to join sync group"))
+                Log.i(TAG, "Successfully joined sync group. Device count: ${joinResult.deviceCount}/${joinResult.limit}")
+                _syncGroupId.value = scannedSyncGroupId
+
+                return Result.success(
+                    JoinSyncGroupResult(
+                        success = true,
+                        syncGroupId = scannedSyncGroupId,
+                        deviceCount = joinResult.deviceCount,
+                        deviceLimit = joinResult.limit,
+                        message = "Connected! Using ${joinResult.deviceCount}/${joinResult.limit} devices"
+                    )
+                )
+            } else {
+                val error = result.exceptionOrNull()?.message ?: "Unknown error"
+                Log.e(TAG, "Failed to join sync group: $error")
+
+                // Check if it's a device limit error
+                val isLimitError = error.contains("Device limit reached")
+                return Result.success(
+                    JoinSyncGroupResult(
+                        success = false,
+                        syncGroupId = scannedSyncGroupId,
+                        deviceCount = 0,
+                        deviceLimit = 0,
+                        message = error,
+                        isDeviceLimitError = isLimitError
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error joining sync group", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Get sync group info
+     */
+    suspend fun getSyncGroupInfo(): Result<SyncGroupInfo> {
+        return try {
+            val result = syncGroupManager.getSyncGroupInfo()
+            if (result.isSuccess) {
+                val info = result.getOrNull() ?: return Result.failure(Exception("No sync group info"))
+                return Result.success(
+                    SyncGroupInfo(
+                        plan = info.plan,
+                        deviceLimit = info.deviceLimit,
+                        deviceCount = info.deviceCount,
+                        devices = info.devices.map {
+                            SyncGroupDeviceInfo(
+                                deviceId = it.deviceId,
+                                deviceType = it.deviceType,
+                                joinedAt = it.joinedAt,
+                                lastSyncedAt = it.lastSyncedAt,
+                                status = it.status
+                            )
+                        }
+                    )
+                )
+            } else {
+                Result.failure(result.exceptionOrNull() ?: Exception("Failed to get sync group info"))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting sync group info", e)
             Result.failure(e)
         }
     }
@@ -571,4 +675,37 @@ data class PairingToken(
     val deviceName: String,
     val deviceType: String,
     val expiresAt: Long
+)
+
+/**
+ * Result of joining a sync group
+ */
+data class JoinSyncGroupResult(
+    val success: Boolean,
+    val syncGroupId: String,
+    val deviceCount: Int,
+    val deviceLimit: Int,
+    val message: String,
+    val isDeviceLimitError: Boolean = false
+)
+
+/**
+ * Sync group information
+ */
+data class SyncGroupInfo(
+    val plan: String,
+    val deviceLimit: Int,
+    val deviceCount: Int,
+    val devices: List<SyncGroupDeviceInfo>
+)
+
+/**
+ * Device info within a sync group
+ */
+data class SyncGroupDeviceInfo(
+    val deviceId: String,
+    val deviceType: String,
+    val joinedAt: Long,
+    val lastSyncedAt: Long?,
+    val status: String
 )
