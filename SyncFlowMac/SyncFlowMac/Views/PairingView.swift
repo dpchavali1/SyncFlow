@@ -19,6 +19,8 @@ struct PairingView: View {
     @State private var pairingStatus: PairingStatusState = .generating
     @State private var timeRemaining: TimeInterval = 0
     @State private var listenerHandle: DatabaseHandle?
+    @State private var showManualJoin = false
+    @State private var manualSyncGroupId = ""
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -56,13 +58,62 @@ struct PairingView: View {
             // Content based on state
             switch pairingStatus {
             case .generating:
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Generating QR Code...")
-                        .foregroundColor(.secondary)
+                if showManualJoin {
+                    // Manual join form
+                    VStack(spacing: 20) {
+                        Text("Join Existing Sync Group")
+                            .font(.headline)
+
+                        Text("Enter the sync group ID or paste the QR code content")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        TextField("Sync Group ID", text: $manualSyncGroupId)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 300)
+
+                        HStack(spacing: 10) {
+                            Button(action: {
+                                Task {
+                                    await joinExistingSyncGroup()
+                                }
+                            }) {
+                                Label("Join", systemImage: "checkmark")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button(action: {
+                                showManualJoin = false
+                                manualSyncGroupId = ""
+                            }) {
+                                Label("Back", systemImage: "arrow.left")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    .padding(40)
+                } else {
+                    VStack(spacing: 20) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        Text("Generating QR Code...")
+                            .foregroundColor(.secondary)
+
+                        Divider()
+                            .padding(.vertical, 10)
+
+                        Button(action: {
+                            showManualJoin = true
+                        }) {
+                            Label("Or join existing sync group", systemImage: "qrcode.viewfinder")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(.blue)
+                    }
+                    .padding(40)
                 }
-                .padding(40)
 
             case .waitingForScan:
                 if let session = pairingSession {
@@ -299,6 +350,36 @@ struct PairingView: View {
             case .failure(let error):
                 DispatchQueue.main.async {
                     self.pairingStatus = .error(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func joinExistingSyncGroup() async {
+        guard !manualSyncGroupId.trimmingCharacters(in: .whitespaces).isEmpty else {
+            errorMessage = "Please enter a sync group ID"
+            return
+        }
+
+        pairingStatus = .generating
+        errorMessage = nil
+
+        let syncGroupManager = SyncGroupManager.shared
+
+        syncGroupManager.joinSyncGroup(scannedSyncGroupId: manualSyncGroupId.trimmingCharacters(in: .whitespaces), deviceName: "macOS") { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let joinResult):
+                    pairingStatus = .success
+                    // Redirect after brief delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        appState.setPaired(userId: "")
+                    }
+
+                case .failure(let error):
+                    pairingStatus = .error(error.localizedDescription)
+                    errorMessage = error.localizedDescription
+                    showManualJoin = false
                 }
             }
         }

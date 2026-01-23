@@ -77,7 +77,9 @@
       "Bash(identify:*)",
       "WebFetch(domain:firebase.google.com)",
       "Bash(npx vercel:*)",
-      "Bash(./gradlew build:*)"
+      "Bash(./gradlew build:*)",
+      "Bash(git checkout:*)",
+      "Bash(npm --version:*)"
     ],
     "deny": [],
     "ask": []

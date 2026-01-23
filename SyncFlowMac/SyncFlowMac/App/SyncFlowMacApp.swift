@@ -8,6 +8,7 @@
 import SwiftUI
 import FirebaseCore
 import FirebaseDatabase
+import FirebaseAuth
 import Combine
 
 extension ColorScheme {
@@ -29,11 +30,30 @@ struct SyncFlowMacApp: App {
         // Configure Firebase
         FirebaseApp.configure()
 
+        // Initialize Firebase authentication (sign in anonymously if needed)
+        initializeFirebaseAuth()
+
         // Configure app appearance
         configureAppearance()
 
         // Initialize performance optimizations
         setupPerformanceOptimizations()
+    }
+
+    private func initializeFirebaseAuth() {
+        let auth = Auth.auth()
+
+        // If no current user, sign in anonymously
+        if auth.currentUser == nil {
+            Task {
+                do {
+                    let result = try await auth.signInAnonymously()
+                    print("[App] Firebase anonymous authentication successful: \(result.user.uid)")
+                } catch {
+                    print("[App] Firebase anonymous authentication failed: \(error)")
+                }
+            }
+        }
     }
 
     private func setupPerformanceOptimizations() {
