@@ -11,6 +11,7 @@ import {
   recoverSyncGroup,
   getSyncGroupInfo,
   getWebDeviceId,
+  signInAnon,
 } from '@/lib/firebase'
 
 export default function PairingScreen() {
@@ -38,6 +39,9 @@ export default function PairingScreen() {
     setErrorMessage('')
 
     try {
+      // Authenticate first (anonymous)
+      await signInAnon()
+
       // Try to recover existing sync group first
       const recovered = await recoverSyncGroup('web')
       if (recovered.success && recovered.syncGroupId) {
