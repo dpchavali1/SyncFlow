@@ -116,8 +116,36 @@ fun DesktopIntegrationScreen(
                         val qrContent = result.contents.trim()
                         android.util.Log.d("DesktopIntegrationScreen", "Scanned QR content: '$qrContent'")
 
-                        // Try new unified pairing format first
-                        val tokenData = parsePairingQrCode(qrContent)
+                        // Check if this is a sync group QR code (new format: web_xxx, macos_xxx, sync_xxx)
+                        if (qrContent.startsWith("web_") || qrContent.startsWith("macos_") || qrContent.startsWith("sync_") || qrContent.startsWith("android_")) {
+                            android.util.Log.d("DesktopIntegrationScreen", "Detected sync group QR code")
+                            try {
+                                val result = unifiedIdentityManager.joinSyncGroupFromQRCode(qrContent, "Android")
+                                if (result.isSuccess) {
+                                    val joinResult = result.getOrNull()
+                                    if (joinResult?.success == true) {
+                                        successMessage = "Successfully joined sync group! (${joinResult.deviceCount}/${joinResult.deviceLimit} devices)"
+                                        showSuccessDialog = true
+                                        scope.launch {
+                                            try {
+                                                refreshPairedDevices()
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("DesktopIntegrationScreen", "Error refreshing devices", e)
+                                            }
+                                        }
+                                    } else {
+                                        errorMessage = joinResult?.message ?: "Failed to join sync group"
+                                    }
+                                } else {
+                                    errorMessage = result.exceptionOrNull()?.message ?: "Failed to join sync group"
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.e("DesktopIntegrationScreen", "Sync group join failed", e)
+                                errorMessage = e.message ?: "Failed to join sync group"
+                            }
+                        } else {
+                            // Try new unified pairing format first (token-based)
+                            val tokenData = parsePairingQrCode(qrContent)
                         android.util.Log.d("DesktopIntegrationScreen", "Parsed token data: $tokenData")
 
                         if (tokenData != null) {
@@ -182,6 +210,7 @@ fun DesktopIntegrationScreen(
                             // Invalid format
                             errorMessage = "Invalid QR code format. Please ensure you're scanning a valid pairing code from a compatible app."
                         }
+                        } // Close the else block for sync group vs token-based pairing
 
                     } catch (e: Exception) {
                         errorMessage = e.message ?: "Failed to pair device"
