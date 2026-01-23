@@ -3455,7 +3455,11 @@ export const createSyncGroup = async (syncGroupId: string, deviceType: 'web' | '
  * Join an existing sync group
  * Checks device limit before allowing join
  */
-export const joinSyncGroup = async (syncGroupId: string, deviceType: 'web' | 'macos' | 'android', scannedGroupId?: string): Promise<{success: boolean; error?: string; deviceCount?: number; limit?: number}> => {
+export const joinSyncGroup = async (
+  syncGroupId: string,
+  deviceType: 'web' | 'macos' | 'android',
+  scannedGroupId?: string
+): Promise<{ success: boolean; error?: string; deviceCount?: number; limit?: number }> => {
   try {
     // Use scanned group ID if provided (from QR code), otherwise use local sync group ID
     const targetGroupId = scannedGroupId || syncGroupId
@@ -3531,7 +3535,10 @@ export const joinSyncGroup = async (syncGroupId: string, deviceType: 'web' | 'ma
  * Recover sync group on reinstall/browser clear
  * Searches for existing sync group by device ID
  */
-export const recoverSyncGroup = async (deviceType: 'web' | 'macos' | 'android', deviceId?: string): Promise<{success: boolean; syncGroupId?: string; error?: string}> {
+export const recoverSyncGroup = async (
+  deviceType: 'web' | 'macos' | 'android',
+  deviceId?: string
+): Promise<{ success: boolean; syncGroupId?: string; error?: string }> => {
   try {
     if (deviceType !== 'web') {
       return {
