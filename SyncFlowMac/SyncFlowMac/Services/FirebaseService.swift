@@ -13,7 +13,6 @@ import FirebaseDatabase
 import FirebaseAuth
 import FirebaseStorage
 import FirebaseFunctions
-import SyncGroupManager
 
 class FirebaseService {
 
