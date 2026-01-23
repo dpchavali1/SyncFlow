@@ -77,14 +77,24 @@ class FirebaseService {
             return
         }
 
-        // Create new sync group
-        syncGroupManager.createSyncGroup(deviceName: "macOS") { result in
-            switch result {
-            case .success(let groupId):
-                self._syncGroupId = groupId
-                completion(.success(groupId))
+        Task {
+            do {
+                if auth.currentUser == nil {
+                    _ = try await signInAnonymously()
+                }
 
-            case .failure(let error):
+                // Create new sync group
+                syncGroupManager.createSyncGroup(deviceName: "macOS") { result in
+                    switch result {
+                    case .success(let groupId):
+                        self._syncGroupId = groupId
+                        completion(.success(groupId))
+
+                    case .failure(let error):
+                        completion(.failure(error))
+                    }
+                }
+            } catch {
                 completion(.failure(error))
             }
         }
@@ -143,20 +153,25 @@ class FirebaseService {
     // MARK: - QR Code Pairing (New Flow: macOS generates QR, Android scans)
 
     /// Initiate a pairing session and get QR code data
-    func initiatePairing(deviceName: String? = nil) async throws -> PairingSession {
+    func initiatePairing(deviceName: String? = nil, syncGroupId: String? = nil) async throws -> PairingSession {
         // Ensure we are authenticated so the pairing session is scoped to this requester.
         if auth.currentUser == nil {
             _ = try await auth.signInAnonymously()
         }
         let macDeviceName = deviceName ?? Host.current().localizedName ?? "Mac"
 
+        var payload: [String: Any] = [
+            "deviceName": macDeviceName,
+            "platform": "macos",
+            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        ]
+        if let syncGroupId = syncGroupId, !syncGroupId.isEmpty {
+            payload["syncGroupId"] = syncGroupId
+        }
+
         let result = try await functions
             .httpsCallable("initiatePairing")
-            .call([
-                "deviceName": macDeviceName,
-                "platform": "macos",
-                "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-            ])
+            .call(payload)
 
         guard let data = result.data as? [String: Any],
               let token = data["token"] as? String,

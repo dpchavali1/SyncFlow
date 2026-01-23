@@ -331,26 +331,33 @@ struct PairingView: View {
 
         let firebaseService = FirebaseService.shared
 
-        firebaseService.initiateSyncGroupPairing { result in
-            switch result {
-            case .success(let syncGroupId):
-                // Create a dummy pairing session with the sync group ID as the QR payload
-                let session = PairingSession(
-                    token: syncGroupId,
-                    qrPayload: syncGroupId,
-                    expiresAt: Date().timeIntervalSince1970 * 1000 + (30 * 60 * 1000) // 30 minutes
-                )
-
-                DispatchQueue.main.async {
-                    self.pairingSession = session
-                    self.timeRemaining = session.timeRemaining
-                    self.pairingStatus = .waitingForScan
+        do {
+            let syncGroupId = try await withCheckedThrowingContinuation { continuation in
+                firebaseService.initiateSyncGroupPairing { result in
+                    continuation.resume(with: result)
                 }
+            }
 
-            case .failure(let error):
-                DispatchQueue.main.async {
-                    self.pairingStatus = .error(error.localizedDescription)
-                }
+            let session = try await firebaseService.initiatePairing(
+                deviceName: Host.current().localizedName ?? "Mac",
+                syncGroupId: syncGroupId
+            )
+
+            await MainActor.run {
+                self.pairingSession = session
+                self.timeRemaining = session.timeRemaining
+                self.pairingStatus = .waitingForScan
+            }
+
+            let handle = firebaseService.listenForPairingApproval(token: session.token) { status in
+                handlePairingStatus(status)
+            }
+            await MainActor.run {
+                self.listenerHandle = handle
+            }
+        } catch {
+            await MainActor.run {
+                self.pairingStatus = .error(error.localizedDescription)
             }
         }
     }
@@ -363,23 +370,46 @@ struct PairingView: View {
 
         pairingStatus = .generating
         errorMessage = nil
+        showManualJoin = false
 
+        let syncGroupId = manualSyncGroupId.trimmingCharacters(in: .whitespaces)
         let syncGroupManager = SyncGroupManager.shared
+        let firebaseService = FirebaseService.shared
 
-        syncGroupManager.joinSyncGroup(scannedSyncGroupId: manualSyncGroupId.trimmingCharacters(in: .whitespaces), deviceName: "macOS") { result in
+        syncGroupManager.joinSyncGroup(scannedSyncGroupId: syncGroupId, deviceName: "macOS") { result in
             DispatchQueue.main.async {
                 switch result {
                 case .success(let joinResult):
-                    pairingStatus = .success
-                    // Redirect after brief delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        appState.setPaired(userId: "")
+                    // Successfully joined sync group, now initiate pairing for authorization
+                    Task {
+                        do {
+                            let session = try await firebaseService.initiatePairing(
+                                deviceName: Host.current().localizedName ?? "Mac",
+                                syncGroupId: syncGroupId
+                            )
+
+                            await MainActor.run {
+                                self.pairingSession = session
+                                self.timeRemaining = session.timeRemaining
+                                self.pairingStatus = .waitingForScan
+                            }
+
+                            let handle = firebaseService.listenForPairingApproval(token: session.token) { status in
+                                handlePairingStatus(status)
+                            }
+                            await MainActor.run {
+                                self.listenerHandle = handle
+                            }
+                        } catch {
+                            await MainActor.run {
+                                self.pairingStatus = .error("Failed to initiate pairing: \(error.localizedDescription)")
+                            }
+                        }
                     }
 
                 case .failure(let error):
                     pairingStatus = .error(error.localizedDescription)
                     errorMessage = error.localizedDescription
-                    showManualJoin = false
                 }
             }
         }
@@ -411,8 +441,11 @@ struct PairingView: View {
     }
 
     private func cleanupListener() {
-        // For sync group pairing, we don't need to clean up a listener
-        // The QR code is simply displayed for Android to scan
+        guard let session = pairingSession, let handle = listenerHandle else {
+            listenerHandle = nil
+            return
+        }
+        FirebaseService.shared.removePairingApprovalListener(token: session.token, handle: handle)
         listenerHandle = nil
     }
 }

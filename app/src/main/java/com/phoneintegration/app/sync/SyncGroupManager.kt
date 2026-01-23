@@ -3,6 +3,7 @@ package com.phoneintegration.app.sync
 import android.content.Context
 import android.content.SharedPreferences
 import android.provider.Settings
+import android.util.Log
 import com.google.firebase.database.DatabaseReference
 import com.google.firebase.database.FirebaseDatabase
 import kotlinx.coroutines.tasks.await
@@ -17,6 +18,7 @@ class SyncGroupManager(
     private val database: FirebaseDatabase = FirebaseDatabase.getInstance()
 ) {
     private val prefs: SharedPreferences = context.getSharedPreferences("syncflow", Context.MODE_PRIVATE)
+    private val TAG = "SyncGroupManager"
 
     companion object {
         private const val SYNC_GROUP_ID_KEY = "sync_group_id"
@@ -71,10 +73,13 @@ class SyncGroupManager(
         deviceName: String = "Android Phone"
     ): Result<JoinResult> {
         return try {
+            Log.d(TAG, "[SyncGroupManager] joinSyncGroup called with ID: $scannedSyncGroupId")
             val groupRef = database.reference.child("syncGroups").child(scannedSyncGroupId)
             val groupSnapshot = groupRef.get().await()
 
+            Log.d(TAG, "[SyncGroupManager] Group snapshot exists: ${groupSnapshot.exists()}")
             if (!groupSnapshot.exists()) {
+                Log.e(TAG, "[SyncGroupManager] Sync group not found: $scannedSyncGroupId")
                 return Result.failure(Exception("Sync group not found"))
             }
 
@@ -83,8 +88,11 @@ class SyncGroupManager(
             val deviceLimit = if (plan == "free") 3 else 999
             val currentDevices = (groupData["devices"] as? Map<*, *>)?.size ?: 0
 
+            Log.d(TAG, "[SyncGroupManager] Group data: plan=$plan, deviceLimit=$deviceLimit, currentDevices=$currentDevices")
+
             // Check device limit
             if (currentDevices >= deviceLimit) {
+                Log.w(TAG, "[SyncGroupManager] Device limit reached: $currentDevices/$deviceLimit")
                 return Result.failure(
                     Exception(
                         "Device limit reached: $currentDevices/$deviceLimit. " +
@@ -95,6 +103,7 @@ class SyncGroupManager(
 
             // Save locally
             setSyncGroupId(scannedSyncGroupId)
+            Log.d(TAG, "[SyncGroupManager] Saved sync group ID locally: $scannedSyncGroupId")
 
             // Register device in Firebase
             val now = System.currentTimeMillis()
@@ -105,9 +114,12 @@ class SyncGroupManager(
                 "deviceName" to deviceName
             )
 
+            Log.d(TAG, "[SyncGroupManager] Registering device: $deviceId with data: $deviceData")
             groupRef.child("devices").child(deviceId).setValue(deviceData).await()
+            Log.d(TAG, "[SyncGroupManager] Device registered successfully")
 
             // Log to history
+            Log.d(TAG, "[SyncGroupManager] Logging to history")
             groupRef.child("history").child(now.toString()).setValue(
                 mapOf(
                     "action" to "device_joined",
@@ -117,6 +129,7 @@ class SyncGroupManager(
                 )
             ).await()
 
+            Log.d(TAG, "[SyncGroupManager] joinSyncGroup completed successfully")
             Result.success(
                 JoinResult(
                     success = true,
@@ -125,6 +138,7 @@ class SyncGroupManager(
                 )
             )
         } catch (e: Exception) {
+            Log.e(TAG, "[SyncGroupManager] joinSyncGroup failed", e)
             Result.failure(e)
         }
     }

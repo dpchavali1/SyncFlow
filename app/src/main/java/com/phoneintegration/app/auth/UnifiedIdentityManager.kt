@@ -258,18 +258,19 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
      */
     suspend fun joinSyncGroupFromQRCode(scannedSyncGroupId: String, deviceName: String): Result<JoinSyncGroupResult> {
         return try {
-            Log.d(TAG, "Attempting to join sync group: $scannedSyncGroupId")
+            Log.d(TAG, "[QRJoin] Attempting to join sync group: '$scannedSyncGroupId' with device name: '$deviceName'")
 
             // CRITICAL: Ensure Firebase authentication before attempting to join sync group
             // The Firebase rules require auth != null to read/write syncGroups
             val userId = getUnifiedUserId()
             if (userId == null) {
-                Log.e(TAG, "Failed to authenticate with Firebase, cannot join sync group")
+                Log.e(TAG, "[QRJoin] Failed to authenticate with Firebase, cannot join sync group")
                 return Result.failure(Exception("Firebase authentication failed"))
             }
-            Log.d(TAG, "Authenticated as: $userId, proceeding with sync group join")
+            Log.d(TAG, "[QRJoin] Authenticated as: $userId, proceeding with sync group join")
 
             val result = syncGroupManager.joinSyncGroup(scannedSyncGroupId, deviceName)
+            Log.d(TAG, "[QRJoin] syncGroupManager.joinSyncGroup result: success=${result.isSuccess}")
 
             if (result.isSuccess) {
                 val joinResult = result.getOrNull() ?: return Result.failure(Exception("Failed to join sync group"))

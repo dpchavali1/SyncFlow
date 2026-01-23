@@ -1165,12 +1165,13 @@ class DesktopSyncService(context: Context) {
             val name = json.optString("name", "Desktop")
             val platform = json.optString("platform", "web")
             val version = json.optString("version", "1.0.0")
+            val syncGroupId = json.optString("syncGroupId", "")
 
             if (token.isBlank()) {
                 Log.w(TAG, "Invalid QR code: missing token")
                 null
             } else {
-                PairingQrData(token, name, platform, version)
+                PairingQrData(token, name, platform, version, syncGroupId.ifBlank { null })
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse pairing QR code: ${e.message}")
@@ -1468,7 +1469,8 @@ data class PairingQrData(
     val token: String,
     val name: String,
     val platform: String,
-    val version: String
+    val version: String,
+    val syncGroupId: String?
 ) {
     val displayName: String
         get() = "$name ($platform)"

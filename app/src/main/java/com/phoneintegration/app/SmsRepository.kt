@@ -1020,7 +1020,11 @@ class SmsRepository(private val context: Context) {
                 val msgBox = c.getInt(5)
 
                 val timestamp = dateSec * 1000L
-                val rawAddress = MmsHelper.getMmsAddress(resolver, mmsId)
+                val rawAddress = if (inboxOnly) {
+                    MmsHelper.getMmsSender(resolver, mmsId)
+                } else {
+                    MmsHelper.getMmsAddress(resolver, mmsId)
+                }
                 Log.d("SmsRepository", "MMS $mmsId raw address: '$rawAddress'")
                 val address = rawAddress
                     ?.takeIf { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }

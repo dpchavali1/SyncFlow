@@ -16,6 +16,9 @@ class MmsReceiver : BroadcastReceiver() {
         private var lastCleanupTime = 0L
         private const val CLEANUP_INTERVAL_MS = 60_000L // Clean up every minute
         private const val MAX_TRACKED_IDS = 100
+        private var lastNotifiedMmsId: Long? = null
+        private var lastNotificationTime: Long = 0L
+        private const val NOTIFICATION_DEBOUNCE_MS = 8000L
 
         @Synchronized
         fun markMmsSynced(mmsId: Long) {
@@ -117,7 +120,7 @@ class MmsReceiver : BroadcastReceiver() {
             }
 
             // Notify once for the newest unsynced MMS
-            if (!notifiedOnce) {
+            if (!notifiedOnce && shouldNotifyForMms(mmsId)) {
                 val contactName = smsRepository.resolveContactName(message.address)
                 Log.d("MmsReceiver", "Showing MMS notification - address: '${message.address}', contactName: '$contactName', mmsId: $mmsId")
 
@@ -150,5 +153,18 @@ class MmsReceiver : BroadcastReceiver() {
         }
 
         Log.d("MmsReceiver", "MMS processing complete: $syncedCount synced, $skippedCount skipped, $notified notified")
+    }
+
+    private fun shouldNotifyForMms(mmsId: Long): Boolean {
+        val now = System.currentTimeMillis()
+        if (lastNotifiedMmsId == mmsId && now - lastNotificationTime < NOTIFICATION_DEBOUNCE_MS) {
+            return false
+        }
+        if (now - lastNotificationTime < NOTIFICATION_DEBOUNCE_MS) {
+            return false
+        }
+        lastNotifiedMmsId = mmsId
+        lastNotificationTime = now
+        return true
     }
 }

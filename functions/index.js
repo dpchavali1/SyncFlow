@@ -134,6 +134,7 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
         const platform = data && data.platform ? String(data.platform) : "web";
         const appVersion = data && data.appVersion ? String(data.appVersion) : "1.0.0";
         const existingDeviceId = data && data.existingDeviceId ? String(data.existingDeviceId) : null;
+        const syncGroupId = data && data.syncGroupId ? String(data.syncGroupId) : null;
 
         console.log(`initiatePairing: Creating pairing session for ${deviceName} (${platform}), existingDeviceId: ${existingDeviceId}`);
 
@@ -149,6 +150,7 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
             platform,
             appVersion,
             existingDeviceId,
+            syncGroupId,
             requesterUid,
             status: "pending", // pending | approved | rejected | expired
             createdAt: now,
@@ -163,6 +165,7 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
             name: deviceName,
             platform,
             version: appVersion,
+            syncGroupId,
         });
 
         console.log(`initiatePairing: Session created with token ${token.slice(0, 8)}...`);
