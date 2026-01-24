@@ -1082,150 +1082,445 @@ export default function AdminCleanupPage() {
         )}
 
         {activeTab === 'data' && (
-          <div className="space-y-6">
-            {/* COST OPTIMIZATION: New cleanup options */}
-            <div className="bg-gradient-to-r from-emerald-600 to-teal-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">🆕 Detect Orphaned Data</h3>
-                  <p className="text-emerald-100">Scan for orphaned user nodes and inactive accounts</p>
-                  <p className="text-emerald-100 text-sm mt-2">💾 Finds empty nodes, abandoned users, and wasted storage</p>
+          <div className="space-y-8">
+            {/* Executive Summary Header */}
+            <div className="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 rounded-2xl p-8 border border-slate-700 shadow-2xl">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl shadow-lg">
+                    <Database className="w-8 h-8 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-white mb-1">Data Management Center</h2>
+                    <p className="text-slate-300">Professional cleanup and optimization tools</p>
+                  </div>
                 </div>
-                <button onClick={handleDetectOrphans} disabled={isDetectingOrphans} className="flex items-center gap-2 px-6 py-3 bg-white text-emerald-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isDetectingOrphans ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
-                  {isDetectingOrphans ? 'Scanning...' : 'Detect Orphans'}
-                </button>
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <div className="text-2xl font-bold text-white">{cleanupLog.length}</div>
+                    <div className="text-xs text-slate-400 uppercase tracking-wide">Operations Logged</div>
+                  </div>
+                  <div className="w-px h-12 bg-slate-600"></div>
+                  <div className="text-right">
+                    <div className="text-2xl font-bold text-green-400">Active</div>
+                    <div className="text-xs text-slate-400 uppercase tracking-wide">System Status</div>
+                  </div>
+                </div>
               </div>
-            </div>
 
-            <div className="bg-gradient-to-r from-indigo-600 to-violet-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">🆕 Smart Global Cleanup</h3>
-                  <p className="text-indigo-100">Intelligent cleanup based on user plan tier</p>
-                  <p className="text-indigo-100 text-sm mt-2">⚡ Deletes orphaned accounts & empties nodes (FREE: 14d, PAID: 60d)</p>
-                </div>
-                <button onClick={handleSmartGlobalCleanup} disabled={isRunningSmartCleanup} className="flex items-center gap-2 px-6 py-3 bg-white text-indigo-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isRunningSmartCleanup ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5" />}
-                  {isRunningSmartCleanup ? 'Cleaning...' : 'Smart Cleanup'}
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-gradient-to-r from-pink-600 to-rose-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">🆕 Detect & Delete Duplicate Users</h3>
-                  <p className="text-pink-100">Find accounts from same device (disconnect/reconnect) and remove</p>
-                  <p className="text-pink-100 text-sm mt-2">🔄 Keeps newest account per device, deletes older ones</p>
-                </div>
-                <div className="flex gap-3">
-                  <button onClick={handleDetectDuplicates} disabled={isDetectingDuplicates} className="flex items-center gap-2 px-6 py-3 bg-white text-pink-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                    {isDetectingDuplicates ? <Loader2 className="w-5 h-5 animate-spin" /> : <AlertTriangle className="w-5 h-5" />}
-                    {isDetectingDuplicates ? 'Scanning...' : 'Detect'}
+              {/* Quick Action Bar */}
+              <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-600">
+                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-yellow-400" />
+                  Quick Actions
+                </h3>
+                <div className="flex flex-wrap gap-4">
+                  <button
+                    onClick={handleAutoCleanup}
+                    disabled={isRunningAuto || !userId}
+                    className="flex items-center gap-3 px-6 py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white font-semibold rounded-xl shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                  >
+                    {isRunningAuto ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5" />}
+                    <div className="text-left">
+                      <div className="text-sm font-bold">Auto Cleanup</div>
+                      <div className="text-xs opacity-90">12 categories • Full report</div>
+                    </div>
                   </button>
-                  <button onClick={handleDeleteDuplicates} disabled={isDeletingDuplicates || duplicatesList.length === 0} className="flex items-center gap-2 px-6 py-3 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                    {isDeletingDuplicates ? <Loader2 className="w-5 h-5 animate-spin" /> : <Trash2 className="w-5 h-5" />}
-                    {isDeletingDuplicates ? 'Deleting...' : 'Delete'}
+
+                  <button
+                    onClick={handleSmartGlobalCleanup}
+                    disabled={isRunningSmartCleanup}
+                    className="flex items-center gap-3 px-6 py-4 bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white font-semibold rounded-xl shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                  >
+                    {isRunningSmartCleanup ? <Loader2 className="w-5 h-5 animate-spin" /> : <Activity className="w-5 h-5" />}
+                    <div className="text-left">
+                      <div className="text-sm font-bold">Smart Cleanup</div>
+                      <div className="text-xs opacity-90">Plan-based • Intelligent</div>
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={handleDetectOrphans}
+                    disabled={isDetectingOrphans}
+                    className="flex items-center gap-3 px-6 py-4 bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white font-semibold rounded-xl shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                  >
+                    {isDetectingOrphans ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
+                    <div className="text-left">
+                      <div className="text-sm font-bold">Scan Orphans</div>
+                      <div className="text-xs opacity-90">Find wasted data</div>
+                    </div>
                   </button>
                 </div>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">Auto Cleanup with Email Reports</h3>
-                  <p className="text-blue-100">Clean all orphan data with one click (12 categories)</p>
-                  <p className="text-blue-100 text-sm mt-2">📧 Generates detailed cleanup report and logs to console</p>
+            {/* User Management Section */}
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-indigo-500 to-purple-600 p-6">
+                <h3 className="text-xl font-bold text-white flex items-center gap-3">
+                  <div className="p-2 bg-white/20 rounded-lg">
+                    <Users className="w-6 h-6 text-white" />
+                  </div>
+                  User Account Management
+                </h3>
+                <p className="text-indigo-100 mt-2">Manage user accounts, duplicates, and orphaned data</p>
+              </div>
+
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {/* Duplicate Users Card */}
+                  <div className="group bg-gradient-to-br from-red-50 to-pink-50 border border-red-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-red-100 rounded-xl group-hover:bg-red-200 transition-colors">
+                        <AlertTriangle className="w-6 h-6 text-red-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                          {duplicatesList.length} Found
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">Duplicate Users</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Remove accounts created from device disconnect/reconnect cycles
+                    </p>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleDetectDuplicates}
+                        disabled={isDetectingDuplicates}
+                        className="flex-1 px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
+                      >
+                        {isDetectingDuplicates ? 'Scanning...' : 'Detect'}
+                      </button>
+                      <button
+                        onClick={handleDeleteDuplicates}
+                        disabled={isDeletingDuplicates || duplicatesList.length === 0}
+                        className="px-4 py-2 bg-red-700 text-white text-sm font-medium rounded-lg hover:bg-red-800 disabled:opacity-50 transition-colors"
+                      >
+                        {isDeletingDuplicates ? '...' : `Delete`}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Orphaned Accounts Card */}
+                  <div className="group bg-gradient-to-br from-orange-50 to-red-50 border border-orange-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-orange-100 rounded-xl group-hover:bg-orange-200 transition-colors">
+                        <UserX className="w-6 h-6 text-orange-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                          Critical
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">Orphaned Accounts</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Remove users without active devices who cannot access their messages
+                    </p>
+
+                    <div className="mb-3 p-3 bg-orange-100 rounded-lg">
+                      <div className="flex items-center gap-2 text-xs text-orange-800 font-medium">
+                        <DollarSign className="w-4 h-4" />
+                        ~$0.005/month savings per user
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleDeleteNoDeviceUsers}
+                      disabled={isDeletingNoDeviceUsers}
+                      className="w-full px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isDeletingNoDeviceUsers ? 'Deleting...' : 'Delete Orphaned Users'}
+                    </button>
+                  </div>
+
+                  {/* Data Scanner Card */}
+                  <div className="group bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200 md:col-span-2 lg:col-span-1">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-emerald-100 rounded-xl group-hover:bg-emerald-200 transition-colors">
+                        <Search className="w-6 h-6 text-emerald-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+                          Analysis
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">Data Integrity Scanner</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Comprehensive scan for orphaned nodes, empty accounts, and data inconsistencies
+                    </p>
+
+                    <button
+                      onClick={handleDetectOrphans}
+                      disabled={isDetectingOrphans}
+                      className="w-full px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isDetectingOrphans ? 'Scanning...' : 'Start Deep Scan'}
+                    </button>
+                  </div>
                 </div>
-                <button onClick={handleAutoCleanup} disabled={isRunningAuto || !userId} className="flex items-center gap-2 px-6 py-3 bg-white text-blue-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isRunningAuto ? <Loader2 className="w-5 h-5 animate-spin" /> : <Mail className="w-5 h-5" />}
-                  {isRunningAuto ? 'Running...' : 'Run Auto Cleanup'}
-                </button>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-red-600 to-orange-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">Device Cleanup</h3>
-                  <p className="text-red-100">Remove duplicate and old device entries</p>
-                  <p className="text-red-100 text-sm mt-2">🗑️ Cleans devices not seen in 7+ days, keeps most recent per platform</p>
+            {/* Message Management Section */}
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-cyan-500 to-blue-600 p-6">
+                <h3 className="text-xl font-bold text-white flex items-center gap-3">
+                  <div className="p-2 bg-white/20 rounded-lg">
+                    <MessageSquare className="w-6 h-6 text-white" />
+                  </div>
+                  Message & Media Management
+                </h3>
+                <p className="text-cyan-100 mt-2">Clean up old messages, media files, and enforce plan limits</p>
+              </div>
+
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {/* SMS Cleanup Card */}
+                  <div className="group bg-gradient-to-br from-blue-50 to-cyan-50 border border-blue-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-blue-100 rounded-xl group-hover:bg-blue-200 transition-colors">
+                        <Mail className="w-6 h-6 text-blue-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                          SMS Only
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">SMS Message Cleanup</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Remove SMS messages older than retention periods based on user plans
+                    </p>
+
+                    <div className="mb-3 space-y-2">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-600">Free Tier:</span>
+                        <span className="font-medium text-gray-900">30 days</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-600">Paid Plans:</span>
+                        <span className="font-medium text-gray-900">90 days</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-600">Storage per message:</span>
+                        <span className="font-medium text-gray-900">~500 bytes</span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleDeleteOldMessages}
+                      disabled={isDeletingOldMessages}
+                      className="w-full px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isDeletingOldMessages ? 'Cleaning...' : 'Clean Old SMS'}
+                    </button>
+                  </div>
+
+                  {/* MMS Cleanup Card */}
+                  <div className="group bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-orange-100 rounded-xl group-hover:bg-orange-200 transition-colors">
+                        <HardDrive className="w-6 h-6 text-orange-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                          High Impact
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">MMS & Media Cleanup</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Aggressively remove MMS messages and large media attachments
+                    </p>
+
+                    <div className="mb-3 space-y-2">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-600">Free Tier:</span>
+                        <span className="font-medium text-gray-900">7 days</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-600">Paid Plans:</span>
+                        <span className="font-medium text-gray-900">90 days</span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-600">Avg. size per MMS:</span>
+                        <span className="font-medium text-gray-900">~2MB</span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleDeleteOldMms}
+                      disabled={isDeletingOldMms}
+                      className="w-full px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isDeletingOldMms ? 'Cleaning...' : 'Clean MMS & Media'}
+                    </button>
+                  </div>
+
+                  {/* Plan Enforcement Card */}
+                  <div className="group bg-gradient-to-br from-green-50 to-emerald-50 border border-green-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-green-100 rounded-xl group-hover:bg-green-200 transition-colors">
+                        <Shield className="w-6 h-6 text-green-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                          Policy
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">Free Tier Enforcement</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Remove calls and media from free users, keeping SMS only for compliance
+                    </p>
+
+                    <div className="mb-3 p-3 bg-green-100 rounded-lg">
+                      <div className="flex items-center gap-2 text-xs text-green-800 font-medium">
+                        <TrendingUp className="w-4 h-4" />
+                        95% storage reduction per free user
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleEnforceSmsFree}
+                      disabled={isEnforcingSms}
+                      className="w-full px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isEnforcingSms ? 'Enforcing...' : 'Enforce SMS Only'}
+                    </button>
+                  </div>
                 </div>
-                <button onClick={handleDeviceCleanup} disabled={isRunningDeviceCleanup} className="flex items-center gap-2 px-6 py-3 bg-white text-red-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isRunningDeviceCleanup ? <Loader2 className="w-5 h-5 animate-spin" /> : <UserX className="w-5 h-5" />}
-                  {isRunningDeviceCleanup ? 'Cleaning...' : 'Clean Old Devices'}
-                </button>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-yellow-600 to-amber-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">🗑️ Delete Users Without Devices</h3>
-                  <p className="text-yellow-100">Remove orphaned accounts that cannot access any messages</p>
-                  <p className="text-yellow-100 text-sm mt-2">💾 Saves ~$0.005/month per user deleted</p>
+            {/* Device Management Section */}
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-slate-600 to-slate-700 p-6">
+                <h3 className="text-xl font-bold text-white flex items-center gap-3">
+                  <div className="p-2 bg-white/20 rounded-lg">
+                    <UserX className="w-6 h-6 text-white" />
+                  </div>
+                  Device & Session Management
+                </h3>
+                <p className="text-slate-200 mt-2">Clean up device registrations and session data</p>
+              </div>
+
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="group bg-gradient-to-br from-slate-50 to-gray-50 border border-slate-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-slate-100 rounded-xl group-hover:bg-slate-200 transition-colors">
+                        <UserX className="w-6 h-6 text-slate-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-800">
+                          Maintenance
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">Device Registry Cleanup</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Remove duplicate and inactive device entries from the registry
+                    </p>
+
+                    <div className="mb-3 p-3 bg-slate-100 rounded-lg">
+                      <div className="flex items-center gap-2 text-xs text-slate-800 font-medium">
+                        <RefreshCw className="w-4 h-4" />
+                        Cleans devices inactive for 7+ days
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleDeviceCleanup}
+                      disabled={isRunningDeviceCleanup}
+                      className="w-full px-4 py-2 bg-slate-600 text-white text-sm font-medium rounded-lg hover:bg-slate-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isRunningDeviceCleanup ? 'Cleaning...' : 'Clean Device Registry'}
+                    </button>
+                  </div>
                 </div>
-                <button onClick={handleDeleteNoDeviceUsers} disabled={isDeletingNoDeviceUsers} className="flex items-center gap-2 px-6 py-3 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isDeletingNoDeviceUsers ? <Loader2 className="w-5 h-5 animate-spin" /> : <UserX className="w-5 h-5" />}
-                  {isDeletingNoDeviceUsers ? 'Deleting...' : 'Delete Users'}
-                </button>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">⏰ Delete Old Messages</h3>
-                  <p className="text-cyan-100">Remove messages older than retention period</p>
-                  <p className="text-cyan-100 text-sm mt-2">Free: 30 days | Paid: 90 days | 💾 ~500 bytes per message</p>
+            {/* Activity Monitor */}
+            <div className="bg-slate-900 rounded-2xl shadow-2xl border border-slate-700 overflow-hidden">
+              <div className="bg-gradient-to-r from-slate-800 to-slate-900 p-6 border-b border-slate-700">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-slate-700 rounded-lg">
+                      <Activity className="w-5 h-5 text-slate-300" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-white">Cleanup Activity Monitor</h3>
+                      <p className="text-slate-400 text-sm">Real-time operation logs and system status</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                      <span className="text-xs text-slate-400 uppercase tracking-wide">Live</span>
+                    </div>
+                    <button
+                      onClick={() => setCleanupLog([])}
+                      className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium rounded-lg transition-colors"
+                    >
+                      Clear Logs
+                    </button>
+                  </div>
                 </div>
-                <button onClick={handleDeleteOldMessages} disabled={isDeletingOldMessages} className="flex items-center gap-2 px-6 py-3 bg-white text-cyan-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isDeletingOldMessages ? <Loader2 className="w-5 h-5 animate-spin" /> : <Trash2 className="w-5 h-5" />}
-                  {isDeletingOldMessages ? 'Deleting...' : 'Clean Old Messages'}
-                </button>
               </div>
-            </div>
 
-            <div className="bg-gradient-to-r from-orange-600 to-amber-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">📎 Delete Old MMS Messages</h3>
-                  <p className="text-orange-100">Aggressively remove MMS messages and attachments</p>
-                  <p className="text-orange-100 text-sm mt-2">Free: 7 days | Paid: 90 days | 💾 ~2MB per MMS attachment</p>
+              <div className="p-6">
+                <div ref={logContainerRef} className="bg-slate-800 rounded-xl p-4 font-mono text-sm max-h-80 overflow-y-auto border border-slate-600">
+                  {cleanupLog.length === 0 ? (
+                    <div className="text-center py-8">
+                      <Activity className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                      <p className="text-slate-500">No cleanup activity yet.</p>
+                      <p className="text-slate-600 text-sm">Run operations above to see live activity logs.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {cleanupLog.slice(-30).map((log: string, index: number) => {
+                        const isError = log.toLowerCase().includes('error') || log.toLowerCase().includes('failed')
+                        const isSuccess = log.toLowerCase().includes('completed') || log.toLowerCase().includes('success')
+                        const isWarning = log.toLowerCase().includes('warning') || log.toLowerCase().includes('orphan')
+
+                        return (
+                          <div
+                            key={index}
+                            className={`p-3 rounded-lg border-l-4 ${
+                              isError ? 'bg-red-900/20 border-red-500 text-red-300' :
+                              isSuccess ? 'bg-green-900/20 border-green-500 text-green-300' :
+                              isWarning ? 'bg-yellow-900/20 border-yellow-500 text-yellow-300' :
+                              'bg-slate-700/50 border-slate-500 text-slate-300'
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className={`w-2 h-2 rounded-full mt-2 ${
+                                isError ? 'bg-red-400' :
+                                isSuccess ? 'bg-green-400' :
+                                isWarning ? 'bg-yellow-400' :
+                                'bg-slate-400'
+                              }`}></div>
+                              <div className="flex-1 font-medium text-xs leading-relaxed">{log}</div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-                <button onClick={handleDeleteOldMms} disabled={isDeletingOldMms} className="flex items-center gap-2 px-6 py-3 bg-white text-orange-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isDeletingOldMms ? <Loader2 className="w-5 h-5 animate-spin" /> : <Trash2 className="w-5 h-5" />}
-                  {isDeletingOldMms ? 'Deleting...' : 'Clean Old MMS'}
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-gradient-to-r from-green-600 to-emerald-600 rounded-xl p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xl font-bold mb-1">📱 Enforce SMS-Only for Free Tier</h3>
-                  <p className="text-green-100">Remove non-SMS messages (calls, media) from free users</p>
-                  <p className="text-green-100 text-sm mt-2">💾 95% storage reduction per free user | Paid users unaffected</p>
-                </div>
-                <button onClick={handleEnforceSmsFree} disabled={isEnforcingSms} className="flex items-center gap-2 px-6 py-3 bg-white text-green-600 font-semibold rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-400 transition-colors">
-                  {isEnforcingSms ? <Loader2 className="w-5 h-5 animate-spin" /> : <MessageSquare className="w-5 h-5" />}
-                  {isEnforcingSms ? 'Enforcing...' : 'Enforce SMS Only'}
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-gray-800 rounded-xl p-6 flex-1 flex flex-col">
-              <h3 className="text-lg font-semibold mb-4">Cleanup Activity Log</h3>
-              <div ref={logContainerRef} className="flex-1 overflow-y-auto bg-gray-900 rounded-lg p-4 font-mono text-sm space-y-1">
-                {cleanupLog.length === 0 ? (
-                  <p className="text-gray-500">No cleanup activity yet. Run auto cleanup to see results.</p>
-                ) : (
-                  cleanupLog.map((log: string, index: number) => (
-                    <div key={index} className="text-gray-300">{log}</div>
-                  ))
-                )}
               </div>
             </div>
           </div>

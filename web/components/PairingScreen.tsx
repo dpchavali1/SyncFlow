@@ -26,6 +26,7 @@ export default function PairingScreen() {
   const [deviceLimit, setDeviceLimit] = useState(3)
   const [isInitializing, setIsInitializing] = useState(false)
   const [pairingSession, setPairingSession] = useState<PairingSession | null>(null)
+  const hasApprovedRef = useRef(false)
 
   const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const unsubscribeRef = useRef<(() => void) | null>(null)
@@ -90,7 +91,11 @@ export default function PairingScreen() {
       }
 
       unsubscribeRef.current = listenForPairingApproval(session.token, (status) => {
+        if (hasApprovedRef.current) {
+          return
+        }
         if (status.status === 'approved') {
+          hasApprovedRef.current = true
           if (status.pairedUid) {
             localStorage.setItem('syncflow_user_id', status.pairedUid)
             setUserId(status.pairedUid)
@@ -100,6 +105,10 @@ export default function PairingScreen() {
           }
 
           setStep('approved')
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current()
+            unsubscribeRef.current = null
+          }
 
           if (redirectTimeoutRef.current) {
             clearTimeout(redirectTimeoutRef.current)
@@ -108,9 +117,17 @@ export default function PairingScreen() {
             router.push('/messages')
           }, 1500)
         } else if (status.status === 'rejected') {
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current()
+            unsubscribeRef.current = null
+          }
           setStep('error')
           setErrorMessage('Pairing was rejected on your phone.')
         } else if (status.status === 'expired') {
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current()
+            unsubscribeRef.current = null
+          }
           setStep('error')
           setErrorMessage('Pairing session expired. Please try again.')
         }

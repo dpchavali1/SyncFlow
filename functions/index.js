@@ -2042,3 +2042,79 @@ exports.deleteSyncGroup = functions.https.onCall(async (data, context) => {
         throw error;
     }
 });
+
+/**
+ * List all users with their device counts and subscription status (admin only)
+ */
+exports.listUsers = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const usersRef = admin.database().ref('users');
+        const usersSnapshot = await usersRef.once('value');
+
+        if (!usersSnapshot.exists()) {
+            return {
+                success: true,
+                users: [],
+                totalUsers: 0
+            };
+        }
+
+        const users = usersSnapshot.val();
+        const syncGroupsRef = admin.database().ref('syncGroups');
+        const syncGroupsSnapshot = await syncGroupsRef.once('value');
+        const syncGroups = syncGroupsSnapshot.exists() ? syncGroupsSnapshot.val() : {};
+
+        // Build user list with device counts
+        const userList = [];
+
+        for (const [userId, userData] of Object.entries(users)) {
+            // Count devices for this user
+            const userDevices = userData.devices || {};
+            const deviceCount = Object.keys(userDevices).length;
+
+            // Find which sync group(s) this user belongs to
+            let syncGroupId = null;
+            let subscription = 'free';
+            let deviceLimit = 3;
+
+            for (const [groupId, groupData] of Object.entries(syncGroups)) {
+                const groupDevices = groupData.devices || {};
+                // Check if any of this user's devices are in this sync group
+                for (const deviceId of Object.keys(userDevices)) {
+                    if (groupDevices[deviceId]) {
+                        syncGroupId = groupId;
+                        subscription = groupData.plan || 'free';
+                        deviceLimit = groupData.deviceLimit || 3;
+                        break;
+                    }
+                }
+                if (syncGroupId) break;
+            }
+
+            userList.push({
+                userId,
+                deviceCount,
+                syncGroupId,
+                subscription,
+                deviceLimit,
+                createdAt: userData.createdAt || null,
+                lastActive: userData.lastActive || null
+            });
+        }
+
+        // Sort by most recent first
+        userList.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+        return {
+            success: true,
+            users: userList,
+            totalUsers: userList.length,
+            totalDevices: userList.reduce((sum, u) => sum + u.deviceCount, 0)
+        };
+    } catch (error) {
+        console.error("Error listing users:", error);
+        throw error;
+    }
+});
