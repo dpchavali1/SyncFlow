@@ -1026,6 +1026,7 @@ export default function AdminCleanupPage() {
                         <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">User ID</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">Messages</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">Storage</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">Devices</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">Plan</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">Expires</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-gray-300">Assigned By</th>
@@ -1046,6 +1047,11 @@ export default function AdminCleanupPage() {
                             <td className="px-3 py-2 text-xs font-mono text-blue-400">{user.userId}</td>
                             <td className="px-3 py-2 text-xs">{user.messagesCount.toLocaleString()}</td>
                             <td className="px-3 py-2 text-xs">{user.storageUsedMB}MB</td>
+                            <td className="px-3 py-2 text-xs">
+                              <span className="px-2 py-1 rounded text-xs font-semibold bg-blue-900/30 text-blue-300">
+                                {user.devicesCount}
+                              </span>
+                            </td>
                             <td className="px-3 py-2 text-xs">
                               <span className={`px-2 py-1 rounded text-xs font-medium ${
                                 user.wasPremium && user.plan !== 'free'
