@@ -392,6 +392,109 @@ exports.unregisterDevice = functions.https.onCall(async (data, context) => {
 });
 
 /**
+ * Sync call history from Android to Firebase
+ * Used to avoid OOM from Firebase WebSocket sync on Android
+ */
+exports.syncCallHistory = functions.https.onCall(async (data, context) => {
+    try {
+        if (!context.auth) {
+            throw new functions.https.HttpsError("unauthenticated", "Authentication required");
+        }
+
+        const userId = data?.userId || context.auth.uid;
+        const callLogs = data?.callLogs;
+
+        if (!callLogs || !Array.isArray(callLogs)) {
+            throw new functions.https.HttpsError("invalid-argument", "callLogs array required");
+        }
+
+        if (callLogs.length === 0) {
+            return { success: true, count: 0 };
+        }
+
+        // Convert array to object keyed by call ID
+        const callLogsMap = {};
+        for (const call of callLogs) {
+            const callId = call.id || `${call.phoneNumber}_${call.callDate}`;
+            callLogsMap[callId] = {
+                phoneNumber: call.phoneNumber || "",
+                contactName: call.contactName || "",
+                callType: call.callType || "Unknown",
+                callDate: call.callDate || Date.now(),
+                duration: call.duration || 0,
+                formattedDuration: call.formattedDuration || "0:00",
+                formattedDate: call.formattedDate || "",
+                simId: call.simId || 0,
+                syncedAt: admin.database.ServerValue.TIMESTAMP
+            };
+        }
+
+        // Write to Firebase
+        await admin.database()
+            .ref(`/users/${userId}/call_history`)
+            .update(callLogsMap);
+
+        return { success: true, count: callLogs.length };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('syncCallHistory failed:', error.message);
+        throw new functions.https.HttpsError("internal", "Failed to sync call history");
+    }
+});
+
+/**
+ * Sync contacts from Android to Firebase
+ * Used to avoid OOM from Firebase WebSocket sync on Android
+ */
+exports.syncContacts = functions.https.onCall(async (data, context) => {
+    try {
+        if (!context.auth) {
+            throw new functions.https.HttpsError("unauthenticated", "Authentication required");
+        }
+
+        const userId = data?.userId || context.auth.uid;
+        const contacts = data?.contacts;
+
+        if (!contacts || !Array.isArray(contacts)) {
+            throw new functions.https.HttpsError("invalid-argument", "contacts array required");
+        }
+
+        if (contacts.length === 0) {
+            return { success: true, count: 0 };
+        }
+
+        // Convert array to object keyed by contact ID
+        const contactsMap = {};
+        for (const contact of contacts) {
+            const contactId = contact.id || contact.phoneNumber;
+            contactsMap[contactId] = {
+                displayName: contact.displayName || "",
+                phoneNumbers: contact.phoneNumbers || {},
+                photo: contact.photo || null,
+                email: contact.email || null,
+                notes: contact.notes || null,
+                syncedAt: admin.database.ServerValue.TIMESTAMP
+            };
+        }
+
+        // Write to Firebase
+        await admin.database()
+            .ref(`/users/${userId}/contacts`)
+            .update(contactsMap);
+
+        return { success: true, count: contacts.length };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('syncContacts failed:', error.message);
+        throw new functions.https.HttpsError("internal", "Failed to sync contacts");
+    }
+});
+
+/**
  * Manual cleanup of old devices (callable function)
  */
 exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) => {

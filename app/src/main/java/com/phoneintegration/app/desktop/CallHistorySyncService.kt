@@ -151,10 +151,10 @@ class CallHistorySyncService(private val context: Context) {
     }
 
     /**
-     * Sync call history to Firebase for a specific user ID
+     * Sync call history to Firebase for a specific user ID via Cloud Function
+     * Uses Cloud Function to avoid OOM from Firebase WebSocket sync
      */
     suspend fun syncCallHistoryForUser(userId: String) {
-        val db = com.google.firebase.database.FirebaseDatabase.getInstance()
         try {
             val callLogs = getCallHistory()
 
@@ -163,46 +163,38 @@ class CallHistorySyncService(private val context: Context) {
                 return
             }
 
-            Log.d(TAG, "Syncing ${callLogs.size} call logs to Firebase...")
+            Log.d(TAG, "Syncing ${callLogs.size} call logs via Cloud Function...")
 
-            // CRITICAL: Go online for Firebase write (normally offline to prevent OOM)
-            db.goOnline()
+            // Convert call logs to list of maps for Cloud Function
+            val callLogsList = callLogs.map { call ->
+                mapOf(
+                    "id" to "${call.phoneNumber}_${call.callDate}",
+                    "phoneNumber" to call.phoneNumber,
+                    "contactName" to (call.contactName ?: ""),
+                    "callType" to call.callType.toDisplayString(),
+                    "callDate" to call.callDate,
+                    "duration" to call.duration,
+                    "formattedDuration" to formatDuration(call.duration),
+                    "formattedDate" to formatDate(call.callDate),
+                    "simId" to (call.simId ?: 0)
+                )
+            }
 
-            try {
-                // Get Firebase reference
-                val callHistoryRef = db.reference
-                    .child("users")
-                    .child(userId)
-                    .child("call_history")
+            // Call Cloud Function to sync (avoids OOM from Firebase WebSocket)
+            val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
+            val result = functions
+                .getHttpsCallable("syncCallHistory")
+                .call(mapOf("userId" to userId, "callLogs" to callLogsList))
+                .await()
 
-                // Convert call logs to map
-                val callLogsMap = callLogs.associate { call ->
-                    val callId = "${call.phoneNumber}_${call.callDate}"
-                    callId to mapOf(
-                        "id" to call.id,
-                        "phoneNumber" to call.phoneNumber,
-                        "contactName" to (call.contactName ?: ""),
-                        "callType" to call.callType.toDisplayString(),
-                        "callTypeInt" to call.callType.value,
-                        "callDate" to call.callDate,
-                        "duration" to call.duration,
-                        "formattedDuration" to formatDuration(call.duration),
-                        "formattedDate" to formatDate(call.callDate),
-                        "simId" to (call.simId ?: 0),
-                        "syncedAt" to ServerValue.TIMESTAMP
-                    )
-                }
+            val data = result.data as? Map<*, *>
+            val success = data?.get("success") as? Boolean ?: false
+            val count = data?.get("count") as? Int ?: 0
 
-                // Update Firebase (merge to preserve existing data)
-                callHistoryRef.updateChildren(callLogsMap).await()
-
-                // Give Firebase time to sync
-                kotlinx.coroutines.delay(1000)
-
-                Log.d(TAG, "Successfully synced ${callLogs.size} call logs to Firebase")
-            } finally {
-                // CRITICAL: Go back offline to prevent OOM
-                db.goOffline()
+            if (success) {
+                Log.d(TAG, "Successfully synced $count call logs via Cloud Function")
+            } else {
+                Log.e(TAG, "Cloud Function sync failed: ${data?.get("error")}")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing call logs", e)

@@ -136,76 +136,54 @@ class ContactsSyncService(private val context: Context) {
     }
 
     /**
-     * Sync all contacts for a specific user ID
+     * Sync all contacts for a specific user ID via Cloud Function
+     * Uses Cloud Function to avoid OOM from Firebase WebSocket sync
      */
     suspend fun syncContactsForUser(userId: String) {
-        val db = com.google.firebase.database.FirebaseDatabase.getInstance()
         try {
             val contacts = getAllContacts()
 
-            Log.d(TAG, "Syncing ${contacts.size} Android contacts to Firebase...")
+            if (contacts.isEmpty()) {
+                Log.d(TAG, "No contacts to sync")
+                return
+            }
 
-            // CRITICAL: Go online for Firebase read/write (normally offline to prevent OOM)
-            db.goOnline()
+            Log.d(TAG, "Syncing ${contacts.size} contacts via Cloud Function...")
 
-            try {
-                val contactsRef = db.reference
-                    .child("users")
-                    .child(userId)
-                    .child("contacts")
+            // Convert contacts to list of maps for Cloud Function
+            // Skip photos to reduce payload size
+            val contactsList = contacts.map { contact ->
+                val contactId = PhoneNumberNormalizer.getDeduplicationKey(contact.phoneNumber, contact.displayName)
+                mapOf(
+                    "id" to contactId,
+                    "displayName" to contact.displayName,
+                    "phoneNumbers" to mapOf(
+                        "primary" to mapOf(
+                            "number" to contact.phoneNumber,
+                            "type" to (contact.phoneType ?: "Mobile")
+                        )
+                    ),
+                    "email" to contact.email,
+                    "notes" to contact.notes
+                    // Skip photo to reduce payload - can sync separately if needed
+                )
+            }
 
-                val existingSnapshot = contactsRef.get().await()
-                val existingContactsRaw = existingSnapshot.value as? Map<String, Any?> ?: emptyMap()
-                val existingContactsData = existingContactsRaw.mapValues { (_, value) ->
-                    value?.let { asStringMap(it) }
-                }
+            // Call Cloud Function to sync (avoids OOM from Firebase WebSocket)
+            val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
+            val result = functions
+                .getHttpsCallable("syncContacts")
+                .call(mapOf("userId" to userId, "contacts" to contactsList))
+                .await()
 
-                val mergedContacts = mutableMapOf<String, Any?>()
-                existingContactsData.forEach { (contactId, existingData) ->
-                    existingData?.let { mergedContacts[contactId] = copyMap(it) }
-                }
+            val data = result.data as? Map<*, *>
+            val success = data?.get("success") as? Boolean ?: false
+            val count = data?.get("count") as? Int ?: 0
 
-                val localContactIds = mutableSetOf<String>()
-                var hasChanges = false
-
-                contacts.forEach { contact ->
-                    val contactId = PhoneNumberNormalizer.getDeduplicationKey(contact.phoneNumber, contact.displayName)
-                    localContactIds.add(contactId)
-                    val existingData = existingContactsData[contactId]
-
-                    if (shouldSkipSync(existingData)) {
-                        // Desktop change is pending Android sync; preserve it for now.
-                        return@forEach
-                    }
-
-                    val contactPayload = buildContactPayload(existingData, contact)
-                    mergedContacts[contactId] = contactPayload
-                    hasChanges = true
-                }
-
-                // Remove Android-sourced contacts that no longer exist on-device (unless they are desktop-only)
-                existingContactsData.keys.forEach { existingId ->
-                    if (existingId in localContactIds) return@forEach
-                    val existingData = existingContactsData[existingId]
-                    val syncData = existingData?.get("sync") as? Map<String, Any?>
-                    val isDesktopOnly = (syncData?.get("desktopOnly") as? Boolean) == true
-                    if (isDesktopOnly) return@forEach
-                    if (mergedContacts.remove(existingId) != null) {
-                        hasChanges = true
-                    }
-                }
-
-                if (hasChanges) {
-                    contactsRef.setValue(mergedContacts).await()
-                    // Give Firebase time to sync
-                    kotlinx.coroutines.delay(1000)
-                    Log.d(TAG, "Successfully synced ${contacts.size} contacts to Firebase")
-                } else {
-                    Log.d(TAG, "Contacts unchanged, skipping sync")
-                }
-            } finally {
-                // CRITICAL: Go back offline to prevent OOM
-                db.goOffline()
+            if (success) {
+                Log.d(TAG, "Successfully synced $count contacts via Cloud Function")
+            } else {
+                Log.e(TAG, "Cloud Function sync failed: ${data?.get("error")}")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing contacts", e)
