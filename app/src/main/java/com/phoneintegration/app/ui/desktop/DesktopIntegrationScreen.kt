@@ -654,58 +654,9 @@ fun DesktopIntegrationScreen(
                             scope.launch {
                                 try {
                                     android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered")
-
-                                    val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
-                                    val userId = auth.currentUser?.uid
-                                    android.util.Log.d("DesktopIntegrationScreen", "Current userId: $userId")
-
-                                    if (userId == null) {
-                                        syncMessage = "Not authenticated - userId is null"
-                                        isSyncing = false
-                                        return@launch
-                                    }
-
-                                    // CRITICAL: Firebase is in OFFLINE mode to prevent OOM
-                                    // Must go online temporarily for writes
-                                    val db = com.google.firebase.database.FirebaseDatabase.getInstance()
-                                    android.util.Log.d("DesktopIntegrationScreen", "Going ONLINE for sync...")
-                                    db.goOnline()
-
-                                    try {
-                                        val testRef = db.reference
-                                            .child("users")
-                                            .child(userId)
-                                            .child("call_history")
-                                            .child("test_${System.currentTimeMillis()}")
-
-                                        val testData = mapOf(
-                                            "phoneNumber" to "+1234567890",
-                                            "contactName" to "Test Contact",
-                                            "callType" to "Incoming",
-                                            "callDate" to System.currentTimeMillis(),
-                                            "duration" to 60L,
-                                            "formattedDuration" to "1:00",
-                                            "formattedDate" to "Test",
-                                            "simId" to 0
-                                        )
-
-                                        withTimeout(10000L) {
-                                            testRef.setValue(testData).await()
-                                        }
-
-                                        // Give Firebase time to sync
-                                        kotlinx.coroutines.delay(1000)
-
-                                        android.util.Log.d("DesktopIntegrationScreen", "Test entry written!")
-                                        syncMessage = "Test synced! Check Mac Call History."
-                                    } finally {
-                                        // CRITICAL: Go back offline to prevent OOM
-                                        db.goOffline()
-                                        android.util.Log.d("DesktopIntegrationScreen", "Back OFFLINE")
-                                    }
-                                } catch (e: TimeoutCancellationException) {
-                                    android.util.Log.e("DesktopIntegrationScreen", "Sync timeout")
-                                    syncMessage = "Timeout - network issue"
+                                    // Sync call history (contacts are slow due to photos)
+                                    syncInitialCallHistory()
+                                    syncMessage = "Call history synced!"
                                 } catch (e: Exception) {
                                     android.util.Log.e("DesktopIntegrationScreen", "Sync failed", e)
                                     syncMessage = "Failed: ${e.message}"
@@ -727,7 +678,7 @@ fun DesktopIntegrationScreen(
                         } else {
                             Icon(Icons.Default.Sync, "Sync")
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Test Sync (10s timeout)")
+                            Text("Sync Call History")
                         }
                     }
 

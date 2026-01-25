@@ -146,6 +146,7 @@ class CallHistorySyncService(private val context: Context) {
      * Sync call history to Firebase
      */
     suspend fun syncCallHistory() {
+        val db = com.google.firebase.database.FirebaseDatabase.getInstance()
         try {
             val userId = syncService.getCurrentUserId()
             val callLogs = getCallHistory()
@@ -157,33 +158,45 @@ class CallHistorySyncService(private val context: Context) {
 
             Log.d(TAG, "Syncing ${callLogs.size} call logs to Firebase...")
 
-            // Get Firebase reference
-            val callHistoryRef = com.google.firebase.database.FirebaseDatabase.getInstance().reference
-                .child("users")
-                .child(userId)
-                .child("call_history")
+            // CRITICAL: Go online for Firebase write (normally offline to prevent OOM)
+            db.goOnline()
 
-            // Convert call logs to map
-            val callLogsMap = callLogs.associate { call ->
-                val callId = "${call.phoneNumber}_${call.callDate}"
-                callId to mapOf(
-                    "id" to call.id,
-                    "phoneNumber" to call.phoneNumber,
-                    "contactName" to (call.contactName ?: ""),
-                    "callType" to call.callType.toDisplayString(),
-                    "callTypeInt" to call.callType.value,
-                    "callDate" to call.callDate,
-                    "duration" to call.duration,
-                    "formattedDuration" to formatDuration(call.duration),
-                    "formattedDate" to formatDate(call.callDate),
-                    "simId" to (call.simId ?: 0),
-                    "syncedAt" to ServerValue.TIMESTAMP
-                )
+            try {
+                // Get Firebase reference
+                val callHistoryRef = db.reference
+                    .child("users")
+                    .child(userId)
+                    .child("call_history")
+
+                // Convert call logs to map
+                val callLogsMap = callLogs.associate { call ->
+                    val callId = "${call.phoneNumber}_${call.callDate}"
+                    callId to mapOf(
+                        "id" to call.id,
+                        "phoneNumber" to call.phoneNumber,
+                        "contactName" to (call.contactName ?: ""),
+                        "callType" to call.callType.toDisplayString(),
+                        "callTypeInt" to call.callType.value,
+                        "callDate" to call.callDate,
+                        "duration" to call.duration,
+                        "formattedDuration" to formatDuration(call.duration),
+                        "formattedDate" to formatDate(call.callDate),
+                        "simId" to (call.simId ?: 0),
+                        "syncedAt" to ServerValue.TIMESTAMP
+                    )
+                }
+
+                // Update Firebase (merge to preserve existing data)
+                callHistoryRef.updateChildren(callLogsMap).await()
+
+                // Give Firebase time to sync
+                kotlinx.coroutines.delay(1000)
+
+                Log.d(TAG, "Successfully synced ${callLogs.size} call logs to Firebase")
+            } finally {
+                // CRITICAL: Go back offline to prevent OOM
+                db.goOffline()
             }
-
-            // Update Firebase (merge to preserve existing data)
-            callHistoryRef.updateChildren(callLogsMap).await()
-            Log.d(TAG, "Successfully synced ${callLogs.size} call logs to Firebase")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing call logs", e)
             throw e

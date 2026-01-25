@@ -9,10 +9,14 @@ import android.util.Base64
 import android.util.Log
 import com.google.firebase.database.ServerValue
 import com.phoneintegration.app.utils.PhoneNumberNormalizer
+import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.tasks.await
 import java.io.ByteArrayOutputStream
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 
 /**
  * Handles syncing contacts to Firebase for desktop access
@@ -36,7 +40,8 @@ class ContactsSyncService(private val context: Context) {
         val phoneType: String?,
         val photoUri: String? = null,
         val photoBase64: String? = null,
-        val email: String? = null
+        val email: String? = null,
+        val notes: String? = null
     )
 
     /**
@@ -45,6 +50,13 @@ class ContactsSyncService(private val context: Context) {
     suspend fun getAllContacts(): List<Contact> = withContext(Dispatchers.IO) {
         val contacts = mutableListOf<Contact>()
         val seenNumbers = mutableSetOf<String>()
+
+        // Permission guard
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "READ_CONTACTS not granted; skipping contact sync")
+            return@withContext emptyList()
+        }
 
         val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
         val projection = arrayOf(
@@ -86,9 +98,11 @@ class ContactsSyncService(private val context: Context) {
 
                     val phoneType = getPhoneTypeLabel(type)
 
-                    // Get contact photo as Base64 (for Firebase sync)
+                    // Get contact photo as Base64 (small thumbnail for sync)
                     val photoBase64 = photoUri?.let { getContactPhotoBase64(it) }
 
+                    val email = getContactEmail(contactId)
+                    val notes = getContactNotes(contactId)
                     contacts.add(
                         Contact(
                             id = contactId,
@@ -97,7 +111,9 @@ class ContactsSyncService(private val context: Context) {
                             normalizedNumber = normalized,
                             phoneType = phoneType,
                             photoUri = photoUri,
-                            photoBase64 = photoBase64
+                            photoBase64 = photoBase64,
+                            email = email,
+                            notes = notes
                         )
                     )
                 }
@@ -111,58 +127,78 @@ class ContactsSyncService(private val context: Context) {
     }
 
     /**
-     * Sync all contacts to Firebase
+     * Sync all contacts to Firebase using the universal contact schema.
+     * Ensures desktop-originated contacts are preserved while Android data takes priority.
      */
     suspend fun syncContacts() {
+        val db = com.google.firebase.database.FirebaseDatabase.getInstance()
         try {
             val userId = syncService.getCurrentUserId()
             val contacts = getAllContacts()
 
-            Log.d(TAG, "Syncing ${contacts.size} contacts to Firebase...")
+            Log.d(TAG, "Syncing ${contacts.size} Android contacts to Firebase...")
 
-            // Get Firebase reference
-            val contactsRef = com.google.firebase.database.FirebaseDatabase.getInstance().reference
-                .child("users")
-                .child(userId)
-                .child("contacts")
+            // CRITICAL: Go online for Firebase read/write (normally offline to prevent OOM)
+            db.goOnline()
 
-            // Get existing contacts to avoid unnecessary updates
-            val existingContactsSnapshot = contactsRef.get().await()
-            val existingContacts = existingContactsSnapshot.children.associate { snapshot ->
-                snapshot.key to snapshot.value
-            }
+            try {
+                val contactsRef = db.reference
+                    .child("users")
+                    .child(userId)
+                    .child("contacts")
 
-            val contactsMap = contacts.associate { contact ->
-                // Use PhoneNumberNormalizer for consistent deduplication across all platforms
-                val contactId = PhoneNumberNormalizer.getDeduplicationKey(contact.phoneNumber, contact.displayName)
-                val contactData = mutableMapOf<String, Any>(
-                    "id" to contact.id,
-                    "displayName" to contact.displayName,
-                    "phoneNumber" to contact.phoneNumber,
-                    "normalizedNumber" to contact.normalizedNumber,
-                    "phoneType" to (contact.phoneType ?: "Mobile"),
-                    "photoUri" to (contact.photoUri ?: ""),
-                    "syncedAt" to ServerValue.TIMESTAMP
-                )
+                val existingSnapshot = contactsRef.get().await()
+                val existingContactsRaw = existingSnapshot.value as? Map<String, Any?> ?: emptyMap()
+                val existingContactsData = existingContactsRaw.mapValues { (_, value) ->
+                    value?.let { asStringMap(it) }
+                }
 
-                // Only include photo if it's not too large (< 50KB)
-                contact.photoBase64?.let { photo ->
-                    if (photo.length < 50000) {
-                        contactData["photoBase64"] = photo
+                val mergedContacts = mutableMapOf<String, Any?>()
+                existingContactsData.forEach { (contactId, existingData) ->
+                    existingData?.let { mergedContacts[contactId] = copyMap(it) }
+                }
+
+                val localContactIds = mutableSetOf<String>()
+                var hasChanges = false
+
+                contacts.forEach { contact ->
+                    val contactId = PhoneNumberNormalizer.getDeduplicationKey(contact.phoneNumber, contact.displayName)
+                    localContactIds.add(contactId)
+                    val existingData = existingContactsData[contactId]
+
+                    if (shouldSkipSync(existingData)) {
+                        // Desktop change is pending Android sync; preserve it for now.
+                        return@forEach
+                    }
+
+                    val contactPayload = buildContactPayload(existingData, contact)
+                    mergedContacts[contactId] = contactPayload
+                    hasChanges = true
+                }
+
+                // Remove Android-sourced contacts that no longer exist on-device (unless they are desktop-only)
+                existingContactsData.keys.forEach { existingId ->
+                    if (existingId in localContactIds) return@forEach
+                    val existingData = existingContactsData[existingId]
+                    val syncData = existingData?.get("sync") as? Map<String, Any?>
+                    val isDesktopOnly = (syncData?.get("desktopOnly") as? Boolean) == true
+                    if (isDesktopOnly) return@forEach
+                    if (mergedContacts.remove(existingId) != null) {
+                        hasChanges = true
                     }
                 }
 
-                contactId to contactData
-            }
-
-            // Only update if contacts have changed
-            if (contactsMap != existingContacts) {
-                // Use updateChildren instead of setValue to avoid removing all contacts first
-                // This prevents the UI from flickering
-                contactsRef.setValue(contactsMap).await()
-                Log.d(TAG, "Successfully synced ${contacts.size} contacts to Firebase")
-            } else {
-                Log.d(TAG, "Contacts unchanged, skipping sync")
+                if (hasChanges) {
+                    contactsRef.setValue(mergedContacts).await()
+                    // Give Firebase time to sync
+                    kotlinx.coroutines.delay(1000)
+                    Log.d(TAG, "Successfully synced ${contacts.size} contacts to Firebase")
+                } else {
+                    Log.d(TAG, "Contacts unchanged, skipping sync")
+                }
+            } finally {
+                // CRITICAL: Go back offline to prevent OOM
+                db.goOffline()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing contacts", e)
@@ -186,36 +222,256 @@ class ContactsSyncService(private val context: Context) {
 
     /**
      * Get contact photo as Base64 string
+     * Uses multiple methods to ensure photo is loaded:
+     * 1. Try openContactPhotoInputStream (most reliable)
+     * 2. Fallback to direct photo URI
      */
     private fun getContactPhotoBase64(photoUriString: String): String? {
         return try {
+            // Method 1: Try to open the photo URI directly
             val photoUri = Uri.parse(photoUriString)
-            val inputStream = context.contentResolver.openInputStream(photoUri)
+            var inputStream = context.contentResolver.openInputStream(photoUri)
+
+            // Method 2: If direct URI fails, try using contact ID to get photo
+            if (inputStream == null) {
+                // Extract contact ID from photo URI and try openContactPhotoInputStream
+                val contactId = extractContactIdFromPhotoUri(photoUriString)
+                if (contactId != null) {
+                    val contactUri = android.content.ContentUris.withAppendedId(
+                        ContactsContract.Contacts.CONTENT_URI,
+                        contactId
+                    )
+                    inputStream = ContactsContract.Contacts.openContactPhotoInputStream(
+                        context.contentResolver,
+                        contactUri,
+                        true // preferHighRes
+                    )
+                }
+            }
 
             inputStream?.use { stream ->
                 val bitmap = BitmapFactory.decodeStream(stream)
+                if (bitmap == null) {
+                    Log.w(TAG, "Failed to decode bitmap from stream for: $photoUriString")
+                    return null
+                }
 
-                // Resize image to reduce size (max 150x150)
+                // Resize image to reduce size (max 120x120)
                 val resized = Bitmap.createScaledBitmap(
                     bitmap,
-                    minOf(bitmap.width, 150),
-                    minOf(bitmap.height, 150),
+                    minOf(bitmap.width, 120),
+                    minOf(bitmap.height, 120),
                     true
                 )
 
                 // Convert to Base64
                 val outputStream = ByteArrayOutputStream()
-                resized.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+                resized.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
                 val byteArray = outputStream.toByteArray()
 
                 bitmap.recycle()
-                resized.recycle()
+                if (resized !== bitmap) {
+                    resized.recycle()
+                }
 
-                Base64.encodeToString(byteArray, Base64.DEFAULT)
+                Base64.encodeToString(byteArray, Base64.NO_WRAP)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error loading contact photo: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Extract contact ID from a photo URI string
+     */
+    private fun extractContactIdFromPhotoUri(photoUriString: String): Long? {
+        return try {
+            // Photo URIs typically look like: content://com.android.contacts/contacts/123/photo
+            val uri = Uri.parse(photoUriString)
+            val segments = uri.pathSegments
+            // Find "contacts" segment and get the ID after it
+            val contactsIndex = segments.indexOf("contacts")
+            if (contactsIndex >= 0 && contactsIndex + 1 < segments.size) {
+                segments[contactsIndex + 1].toLongOrNull()
+            } else {
+                // Try to extract from display_photo path
+                val displayPhotoIndex = segments.indexOf("display_photo")
+                if (displayPhotoIndex > 0) {
+                    segments[displayPhotoIndex - 1].toLongOrNull()
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to extract contact ID from photo URI: $photoUriString")
+            null
+        }
+    }
+
+    private fun getContactEmail(contactId: String): String? {
+        val uri = ContactsContract.CommonDataKinds.Email.CONTENT_URI
+        val projection = arrayOf(ContactsContract.CommonDataKinds.Email.ADDRESS)
+        val selection = "${ContactsContract.CommonDataKinds.Email.CONTACT_ID} = ?"
+        val selectionArgs = arrayOf(contactId)
+
+        try {
+            context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getString(0)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading email for contact $contactId", e)
+        }
+
+        return null
+    }
+
+    private fun getContactNotes(contactId: String): String? {
+        val uri = ContactsContract.Data.CONTENT_URI
+        val projection = arrayOf(ContactsContract.CommonDataKinds.Note.NOTE)
+        val selection = "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
+        val selectionArgs = arrayOf(contactId, ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE)
+
+        try {
+            context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getString(0)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading notes for contact $contactId", e)
+        }
+
+        return null
+    }
+
+    private fun sha1(data: String): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+        val bytes = digest.digest(data.toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun asStringMap(value: Any?): Map<String, Any?>? {
+        if (value !is Map<*, *>) return null
+        val map = mutableMapOf<String, Any?>()
+        for ((key, entry) in value) {
+            if (key is String) {
+                map[key] = entry
+            }
+        }
+        return map
+    }
+
+    private fun copyMap(value: Map<*, *>?): MutableMap<String, Any?> {
+        val copy = mutableMapOf<String, Any?>()
+        value?.forEach { (key, entry) ->
+            if (key !is String) return@forEach
+            copy[key] = when (entry) {
+                is Map<*, *> -> copyMap(entry)
+                else -> entry
+            }
+        }
+        return copy
+    }
+
+    private fun copyContactData(existing: Map<String, Any?>?): MutableMap<String, Any?> {
+        val map = mutableMapOf<String, Any?>()
+        existing?.forEach { (key, value) ->
+            if (key == "sync") return@forEach
+            map[key] = if (value is Map<*, *>) copyMap(value) else value
+        }
+        return map
+    }
+
+    private fun buildContactPayload(
+        existingData: Map<String, Any?>?,
+        contact: Contact
+    ): MutableMap<String, Any?> {
+        val payload = copyContactData(existingData)
+        payload["displayName"] = contact.displayName
+        payload["phoneNumbers"] = buildPhoneNumbersMap(contact)
+        payload["photo"] = buildPhotoMap(existingData?.get("photo") as? Map<String, Any?>, contact.photoBase64)
+        if (!contact.notes.isNullOrBlank()) {
+            payload["notes"] = contact.notes
+        } else {
+            payload.remove("notes")
+        }
+        if (!contact.email.isNullOrBlank()) {
+            val normalizedEmail = contact.email.trim().lowercase()
+            payload["emails"] = mapOf(
+                normalizedEmail to mapOf(
+                    "address" to contact.email.trim(),
+                    "type" to "primary",
+                    "isPrimary" to true
+                )
+            )
+        } else {
+            payload.remove("emails")
+        }
+        payload["sync"] = buildSyncMetadata(existingData?.get("sync") as? Map<String, Any?>)
+        payload["sources"] = buildSourcesMap(existingData?.get("sources") as? Map<String, Any?>)
+        return payload
+    }
+
+    private fun buildPhoneNumbersMap(contact: Contact): Map<String, Map<String, Any?>> {
+        val normalized = contact.normalizedNumber.ifBlank {
+            PhoneNumberNormalizer.normalize(contact.phoneNumber)
+        }
+        val fallbackKey = contact.phoneNumber.ifBlank { contact.id }
+        val key = if (normalized.isNotBlank()) normalized else fallbackKey
+        val phoneEntry = mutableMapOf<String, Any?>(
+            "number" to contact.phoneNumber,
+            "normalizedNumber" to normalized,
+            "type" to (contact.phoneType ?: "Mobile"),
+            "label" to (contact.phoneType ?: "Mobile"),
+            "isPrimary" to true
+        )
+        return mapOf(key to phoneEntry)
+    }
+
+    private fun buildPhotoMap(existingPhoto: Map<String, Any?>?, photoBase64: String?): MutableMap<String, Any?> {
+        val map = copyMap(existingPhoto)
+        if (!photoBase64.isNullOrBlank()) {
+            // New photo provided - update it
+            map["thumbnailBase64"] = photoBase64
+            map["hash"] = sha1(photoBase64)
+            map["updatedAt"] = ServerValue.TIMESTAMP
+        }
+        // If photoBase64 is null/blank, preserve existing photo (don't remove it)
+        // This prevents accidental photo loss due to temporary read errors
+        // Photos can only be explicitly removed via a separate operation
+        return map
+    }
+
+    private fun buildSyncMetadata(existingSync: Map<String, Any?>?): MutableMap<String, Any?> {
+        val existingVersion = (existingSync?.get("version") as? Number)?.toLong() ?: 0L
+        val version = existingVersion + 1
+        return mutableMapOf(
+            "lastUpdatedAt" to ServerValue.TIMESTAMP,
+            "lastUpdatedBy" to "android",
+            "version" to version,
+            "pendingAndroidSync" to false,
+            "desktopOnly" to false
+        )
+    }
+
+    private fun buildSourcesMap(existingSources: Map<String, Any?>?): MutableMap<String, Boolean> {
+        val sources = mutableMapOf<String, Boolean>()
+        existingSources?.forEach { (key, value) ->
+            if (value is Boolean) {
+                sources[key] = value
+            }
+        }
+        sources["android"] = true
+        return sources
+    }
+
+    private fun shouldSkipSync(existingData: Map<String, Any?>?): Boolean {
+        val sync = existingData?.get("sync") as? Map<String, Any?>
+        val pending = (sync?.get("pendingAndroidSync") as? Boolean) ?: false
+        val lastUpdatedBy = (sync?.get("lastUpdatedBy") as? String) ?: ""
+        return pending && !lastUpdatedBy.equals("android", ignoreCase = true)
     }
 }
