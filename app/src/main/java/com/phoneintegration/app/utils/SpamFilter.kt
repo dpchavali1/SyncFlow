@@ -20,11 +20,30 @@ object SpamFilter {
         "lottery winner",
         "you won",
         "winner selected",
+        "cash prize",
+        "gift card winner",
+
+        // Toll/Traffic scams (very common)
+        "missed toll",
+        "unpaid toll",
+        "toll fee",
+        "toll violation",
+        "toll balance",
+        "toll due",
+        "pay toll",
+        "ezpass",
+        "e-zpass",
+        "fastrak",
+        "sunpass",
+        "peach pass",
+        "tollway",
+        "outstanding toll",
 
         // Financial scams
         "urgent loan",
         "instant loan",
         "loan approved",
+        "pre-approved loan",
         "credit card offer",
         "debt relief",
         "make money fast",
@@ -33,6 +52,21 @@ object SpamFilter {
         "crypto profit",
         "bitcoin profit",
         "forex trading",
+        "cash advance",
+        "payday loan",
+        "guaranteed approval",
+
+        // Banking/Card scams
+        "card blocked",
+        "card suspended",
+        "suspicious transaction",
+        "unauthorized transaction",
+        "bank alert",
+        "account locked",
+        "verify transaction",
+        "confirm payment",
+        "payment declined",
+        "update payment",
 
         // Phishing
         "verify your account",
@@ -42,6 +76,50 @@ object SpamFilter {
         "confirm your identity",
         "unusual activity",
         "security alert",
+        "login attempt",
+        "password expired",
+        "immediate action required",
+        "action required",
+        "verify now",
+        "confirm now",
+
+        // IRS/Tax scams
+        "irs notice",
+        "tax refund",
+        "tax debt",
+        "irs audit",
+        "stimulus check",
+        "unclaimed refund",
+
+        // Delivery scams
+        "delivery failed",
+        "package waiting",
+        "customs fee required",
+        "shipping fee",
+        "redelivery fee",
+        "unable to deliver",
+        "delivery attempt",
+        "reschedule delivery",
+        "tracking update",
+        "package held",
+
+        // Job scams
+        "work from home",
+        "easy money",
+        "part time job",
+        "hiring now",
+        "earn daily",
+        "no experience needed",
+        "start today",
+        "remote job opportunity",
+
+        // Subscription scams
+        "subscription expired",
+        "renew now",
+        "auto-renewal",
+        "membership expiring",
+        "account will be closed",
+        "service interrupted",
 
         // Adult content
         "adult content",
@@ -49,14 +127,42 @@ object SpamFilter {
         "singles in your area",
         "meet singles",
         "hot singles",
+        "lonely housewives",
+        "hookup",
 
-        // Fake delivery
-        "delivery failed",
-        "package waiting",
-        "customs fee required",
-        "shipping fee",
+        // Promotional spam / Ads
+        "% off",
+        "50% off",
+        "70% off",
+        "80% off",
+        "90% off",
+        "huge discount",
+        "massive sale",
+        "flash sale",
+        "clearance sale",
+        "promo code",
+        "coupon code",
+        "use code",
+        "discount code",
+        "special offer",
+        "exclusive offer",
+        "deal expires",
+        "offer expires",
+        "limited stock",
+        "while supplies last",
+        "order now",
+        "shop now",
+        "buy now",
+        "don't miss out",
+        "last chance",
+        "final hours",
+        "ending soon",
+        "today only",
+        "one day only",
+        "free shipping",
+        "no minimum",
 
-        // General spam
+        // General spam triggers
         "act now",
         "limited time offer",
         "exclusive deal",
@@ -66,11 +172,41 @@ object SpamFilter {
         "call now",
         "text back",
         "reply stop to",
-        "unsubscribe"
+        "unsubscribe",
+        "opt out",
+        "text stop",
+        "click below",
+        "tap here",
+        "click link",
+        "visit link",
+        "urgent",
+        "important notice",
+        "dear customer",
+        "dear user",
+        "valued customer"
+    )
+
+    // High confidence spam phrases (instant flag)
+    private val HIGH_CONFIDENCE_PHRASES = listOf(
+        "your toll",
+        "pay your toll",
+        "toll invoice",
+        "settle your balance",
+        "avoid penalties",
+        "avoid late fees",
+        "collection action",
+        "legal action",
+        "arrest warrant",
+        "court appearance",
+        "verify your identity immediately",
+        "your package could not be delivered",
+        "click to reschedule",
+        "confirm delivery address"
     )
 
     // Suspicious URL patterns
     private val SUSPICIOUS_URL_PATTERNS = listOf(
+        // URL shorteners (commonly used in spam)
         Regex("""bit\.ly/\w+""", RegexOption.IGNORE_CASE),
         Regex("""tinyurl\.com/\w+""", RegexOption.IGNORE_CASE),
         Regex("""goo\.gl/\w+""", RegexOption.IGNORE_CASE),
@@ -78,10 +214,40 @@ object SpamFilter {
         Regex("""rb\.gy/\w+""", RegexOption.IGNORE_CASE),
         Regex("""is\.gd/\w+""", RegexOption.IGNORE_CASE),
         Regex("""cutt\.ly/\w+""", RegexOption.IGNORE_CASE),
+        Regex("""ow\.ly/\w+""", RegexOption.IGNORE_CASE),
+        Regex("""buff\.ly/\w+""", RegexOption.IGNORE_CASE),
+        Regex("""shorturl\.\w+/\w+""", RegexOption.IGNORE_CASE),
+        Regex("""tiny\.cc/\w+""", RegexOption.IGNORE_CASE),
+        Regex("""v\.gd/\w+""", RegexOption.IGNORE_CASE),
+
+        // Suspicious TLDs
         Regex("""\w+\.xyz/""", RegexOption.IGNORE_CASE),
         Regex("""\w+\.top/""", RegexOption.IGNORE_CASE),
         Regex("""\w+\.click/""", RegexOption.IGNORE_CASE),
-        Regex("""\w+\.link/""", RegexOption.IGNORE_CASE)
+        Regex("""\w+\.link/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.buzz/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.work/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.rest/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.fit/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.life/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.club/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.online/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.site/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.store/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.shop/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.icu/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.vip/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.win/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.space/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.fun/""", RegexOption.IGNORE_CASE),
+        Regex("""\w+\.monster/""", RegexOption.IGNORE_CASE),
+
+        // Fake toll/government domains
+        Regex("""toll.*\.com""", RegexOption.IGNORE_CASE),
+        Regex("""ezpass.*\.com""", RegexOption.IGNORE_CASE),
+        Regex("""pay.*toll""", RegexOption.IGNORE_CASE),
+        Regex("""usps.*\..*(?!usps\.com)""", RegexOption.IGNORE_CASE),
+        Regex("""fedex.*\..*(?!fedex\.com)""", RegexOption.IGNORE_CASE)
     )
 
     // Common spam sender patterns
@@ -112,33 +278,68 @@ object SpamFilter {
         var score = 0f
 
         // Messages from saved contacts are less likely to be spam
+        // But reduce the bonus - ads can come from "saved" business contacts
         if (isFromContact) {
-            score -= 0.3f
+            score -= 0.15f
         }
 
         val lowerBody = body.lowercase()
+        val upperSender = senderAddress.uppercase()
+
+        // HIGH PRIORITY: Check for high confidence spam phrases (scams)
+        val matchedHighConfidence = HIGH_CONFIDENCE_PHRASES.filter { phrase ->
+            lowerBody.contains(phrase)
+        }
+        if (matchedHighConfidence.isNotEmpty()) {
+            score += 0.6f  // High score for scam phrases
+            reasons.add("Scam phrase detected: ${matchedHighConfidence.first()}")
+        }
 
         // Check for spam keywords
         val matchedKeywords = SPAM_KEYWORDS.filter { keyword ->
             lowerBody.contains(keyword)
         }
         if (matchedKeywords.isNotEmpty()) {
-            score += 0.2f * matchedKeywords.size.coerceAtMost(3)
+            score += 0.15f * matchedKeywords.size.coerceAtMost(4)
             reasons.add("Contains spam keywords: ${matchedKeywords.take(3).joinToString(", ")}")
         }
 
         // Check for suspicious URLs
         val hasShortUrl = SUSPICIOUS_URL_PATTERNS.any { it.containsMatchIn(body) }
         if (hasShortUrl) {
-            score += 0.3f
+            score += 0.35f
             reasons.add("Contains shortened/suspicious URL")
         }
 
-        // Check sender patterns
+        // Check sender patterns (shortcodes, all caps, etc.)
         val isSuspiciousSender = SPAM_SENDER_PATTERNS.any { it.matches(senderAddress) }
         if (isSuspiciousSender) {
-            score += 0.2f
+            score += 0.25f
             reasons.add("Suspicious sender format")
+        }
+
+        // Check for promotional sender prefixes (AD-, BZ-, etc.)
+        if (upperSender.startsWith("AD-") || upperSender.startsWith("BZ-") ||
+            upperSender.startsWith("DM-") || upperSender.startsWith("VM-") ||
+            upperSender.startsWith("HP-") || upperSender.startsWith("JD-") ||
+            upperSender.startsWith("AM-") || upperSender.startsWith("BN-") ||
+            upperSender.startsWith("TD-") || upperSender.startsWith("TM-")) {
+            score += 0.3f
+            reasons.add("Promotional sender prefix")
+        }
+
+        // Check if sender is a brand/business shortcode (all letters, 5-11 chars)
+        if (senderAddress.matches(Regex("^[A-Za-z]{5,11}$"))) {
+            score += 0.2f
+            reasons.add("Business shortcode sender")
+        }
+
+        // Check for any URL in message from non-contact
+        val hasAnyUrl = body.contains("http://") || body.contains("https://") ||
+                        body.contains(".com") || body.contains(".in") || body.contains(".co")
+        if (hasAnyUrl && !isFromContact) {
+            score += 0.15f
+            reasons.add("Contains URL from unknown sender")
         }
 
         // Check for excessive caps
@@ -148,9 +349,9 @@ object SpamFilter {
             reasons.add("Excessive capital letters")
         }
 
-        // Check for excessive special characters
+        // Check for excessive special characters (common in spam/ads)
         val specialCharRatio = body.count { !it.isLetterOrDigit() && !it.isWhitespace() }.toFloat() / body.length.coerceAtLeast(1)
-        if (specialCharRatio > 0.2f) {
+        if (specialCharRatio > 0.15f) {
             score += 0.1f
             reasons.add("Excessive special characters")
         }
@@ -162,10 +363,17 @@ object SpamFilter {
             reasons.add("Contains phone number in message")
         }
 
-        // Check message length (very short or very long)
-        if (body.length < 10 && hasShortUrl) {
+        // Check message length (very short with link = suspicious)
+        if (body.length < 15 && hasAnyUrl) {
             score += 0.2f
             reasons.add("Very short message with link")
+        }
+
+        // Check for common ad/promotional patterns
+        if (lowerBody.contains("t&c apply") || lowerBody.contains("t&c") ||
+            lowerBody.contains("terms apply") || lowerBody.contains("conditions apply")) {
+            score += 0.2f
+            reasons.add("Contains terms/conditions disclaimer")
         }
 
         // Normalize score to 0-1 range
