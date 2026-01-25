@@ -146,9 +146,16 @@ class CallHistorySyncService(private val context: Context) {
      * Sync call history to Firebase
      */
     suspend fun syncCallHistory() {
+        val userId = syncService.getCurrentUserId()
+        syncCallHistoryForUser(userId)
+    }
+
+    /**
+     * Sync call history to Firebase for a specific user ID
+     */
+    suspend fun syncCallHistoryForUser(userId: String) {
         val db = com.google.firebase.database.FirebaseDatabase.getInstance()
         try {
-            val userId = syncService.getCurrentUserId()
             val callLogs = getCallHistory()
 
             if (callLogs.isEmpty()) {

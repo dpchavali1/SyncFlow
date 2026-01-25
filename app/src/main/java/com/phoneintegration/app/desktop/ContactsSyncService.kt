@@ -131,9 +131,16 @@ class ContactsSyncService(private val context: Context) {
      * Ensures desktop-originated contacts are preserved while Android data takes priority.
      */
     suspend fun syncContacts() {
+        val userId = syncService.getCurrentUserId()
+        syncContactsForUser(userId)
+    }
+
+    /**
+     * Sync all contacts for a specific user ID
+     */
+    suspend fun syncContactsForUser(userId: String) {
         val db = com.google.firebase.database.FirebaseDatabase.getInstance()
         try {
-            val userId = syncService.getCurrentUserId()
             val contacts = getAllContacts()
 
             Log.d(TAG, "Syncing ${contacts.size} Android contacts to Firebase...")
