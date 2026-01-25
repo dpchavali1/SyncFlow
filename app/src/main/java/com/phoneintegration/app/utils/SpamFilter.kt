@@ -100,11 +100,13 @@ object SpamFilter {
     /**
      * Check if a message is likely spam.
      * Returns a SpamCheckResult with confidence level and reasons.
+     * @param threshold The confidence threshold for spam classification (default 0.5)
      */
     fun checkMessage(
         body: String,
         senderAddress: String,
-        isFromContact: Boolean = false
+        isFromContact: Boolean = false,
+        threshold: Float = 0.5f
     ): SpamCheckResult {
         val reasons = mutableListOf<String>()
         var score = 0f
@@ -168,7 +170,7 @@ object SpamFilter {
 
         // Normalize score to 0-1 range
         val confidence = score.coerceIn(0f, 1f)
-        val isSpam = confidence >= 0.5f
+        val isSpam = confidence >= threshold
 
         return SpamCheckResult(
             isSpam = isSpam,

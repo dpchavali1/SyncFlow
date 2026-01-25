@@ -85,14 +85,77 @@ fun PrivacySettingsScreen(
                 title = "Incognito Mode",
                 subtitle = "Don't save conversation history",
                 checked = prefsManager.incognitoMode.value,
-                onCheckedChange = { 
+                onCheckedChange = {
                     prefsManager.setIncognitoMode(it)
-                    Toast.makeText(context, 
-                        if (it) "Incognito mode enabled" else "Incognito mode disabled", 
+                    Toast.makeText(context,
+                        if (it) "Incognito mode enabled" else "Incognito mode disabled",
                         Toast.LENGTH_SHORT).show()
                 }
             )
-            
+
+            Divider(modifier = Modifier.padding(vertical = 8.dp))
+
+            Text(
+                "Spam Protection",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            SwitchCard(
+                title = "Auto Spam Filter",
+                subtitle = "Automatically detect and filter spam messages",
+                checked = prefsManager.spamFilterEnabled.value,
+                onCheckedChange = {
+                    prefsManager.setSpamFilterEnabled(it)
+                    Toast.makeText(context,
+                        if (it) "Spam filter enabled" else "Spam filter disabled",
+                        Toast.LENGTH_SHORT).show()
+                }
+            )
+
+            // Sensitivity selector (only show if spam filter is enabled)
+            if (prefsManager.spamFilterEnabled.value) {
+                val sensitivityLabels = listOf("Low", "Medium", "High")
+                val currentSensitivity = prefsManager.spamFilterSensitivity.value
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "Filter Sensitivity",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            when (currentSensitivity) {
+                                0 -> "Low: Only catches obvious spam"
+                                1 -> "Medium: Balanced detection (recommended)"
+                                2 -> "High: Catches more spam but may have false positives"
+                                else -> "Medium: Balanced detection"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            sensitivityLabels.forEachIndexed { index, label ->
+                                FilterChip(
+                                    selected = currentSensitivity == index,
+                                    onClick = {
+                                        prefsManager.setSpamFilterSensitivity(index)
+                                        Toast.makeText(context, "Sensitivity set to $label", Toast.LENGTH_SHORT).show()
+                                    },
+                                    label = { Text(label) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             Divider(modifier = Modifier.padding(vertical = 8.dp))
 
             Text(

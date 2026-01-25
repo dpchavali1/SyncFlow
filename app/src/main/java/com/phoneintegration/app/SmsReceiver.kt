@@ -28,16 +28,28 @@ class SmsReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context?, intent: Intent?) {
-        if (context == null || intent == null) return
+        if (context == null || intent == null) {
+            SecureLogger.w("SMS_RECEIVER", "Null context or intent")
+            return
+        }
 
-        val action = intent.action
-        SecureLogger.d("SMS_RECEIVER", "onReceive action=$action")
+        try {
+            val action = intent.action
+            SecureLogger.d("SMS_RECEIVER", "onReceive action=$action")
 
-        // Samsung sends SMS only through SMS_DELIVER, not SMS_RECEIVED
-        if (action == Telephony.Sms.Intents.SMS_DELIVER_ACTION ||
-            action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
+            // Samsung sends SMS only through SMS_DELIVER, not SMS_RECEIVED
+            if (action != Telephony.Sms.Intents.SMS_DELIVER_ACTION &&
+                action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
+                return
+            }
 
-            val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+            val messages = try {
+                Telephony.Sms.Intents.getMessagesFromIntent(intent)
+            } catch (e: Exception) {
+                SecureLogger.e("SMS_RECEIVER", "Error parsing messages from intent", e)
+                return
+            }
+
             if (messages.isNullOrEmpty()) {
                 SecureLogger.w("SMS_RECEIVER", "No messages parsed from intent")
                 return
@@ -87,8 +99,18 @@ class SmsReceiver : BroadcastReceiver() {
             }
 
             // Get contact name
-            val contactHelper = ContactHelper(context)
-            val contactName = contactHelper.getContactName(sender)
+            val contactHelper = try {
+                ContactHelper(context)
+            } catch (e: Exception) {
+                SecureLogger.e("SMS_RECEIVER", "Error creating ContactHelper", e)
+                null
+            }
+            val contactName = try {
+                contactHelper?.getContactName(sender)
+            } catch (e: Exception) {
+                SecureLogger.e("SMS_RECEIVER", "Error getting contact name", e)
+                null
+            }
 
             // Check if contact is blocked or conversation is muted before showing notification
             CoroutineScope(Dispatchers.IO).launch {
@@ -106,9 +128,17 @@ class SmsReceiver : BroadcastReceiver() {
                         return@launch
                     }
 
-                    // Check for spam
+                    // Check for spam (if enabled)
+                    val preferencesManager = com.phoneintegration.app.data.PreferencesManager(context)
+                    val isSpamFilterEnabled = preferencesManager.spamFilterEnabled.value
+                    val spamThreshold = preferencesManager.getSpamThreshold()
+
                     val isFromContact = contactName != null && contactName != sender
-                    val spamResult = SpamFilter.checkMessage(fullMessage, sender, isFromContact)
+                    val spamResult = if (isSpamFilterEnabled) {
+                        SpamFilter.checkMessage(fullMessage, sender, isFromContact, spamThreshold)
+                    } else {
+                        SpamFilter.SpamCheckResult(isSpam = false, confidence = 0f, reasons = emptyList())
+                    }
 
                     if (spamResult.isSpam) {
                         SecureLogger.d("SMS_RECEIVER", "Message detected as spam (confidence: ${spamResult.confidence})")
@@ -160,22 +190,33 @@ class SmsReceiver : BroadcastReceiver() {
                 } catch (e: Exception) {
                     // Fallback: show notification if checks fail
                     SecureLogger.e("SMS_RECEIVER", "Error checking blocked/mute status", e)
-                    val notificationHelper = NotificationHelper(context)
-                    notificationHelper.showSmsNotification(sender, fullMessage, contactName, threadId = threadId)
+                    try {
+                        val notificationHelper = NotificationHelper(context)
+                        notificationHelper.showSmsNotification(sender, fullMessage, contactName, threadId = threadId)
+                    } catch (notifError: Exception) {
+                        SecureLogger.e("SMS_RECEIVER", "Error showing fallback notification", notifError)
+                    }
                 }
             }
 
             // Broadcast locally to update UI & ViewModel
-            val broadcast = Intent(SMS_RECEIVED_ACTION).apply {
-                putExtra(EXTRA_ADDRESS, sender)
-                putExtra(EXTRA_MESSAGE, fullMessage)
+            try {
+                val broadcast = Intent(SMS_RECEIVED_ACTION).apply {
+                    putExtra(EXTRA_ADDRESS, sender)
+                    putExtra(EXTRA_MESSAGE, fullMessage)
+                }
+                LocalBroadcastManager.getInstance(context).sendBroadcast(broadcast)
+            } catch (e: Exception) {
+                SecureLogger.e("SMS_RECEIVER", "Error broadcasting SMS received", e)
             }
-
-            LocalBroadcastManager.getInstance(context).sendBroadcast(broadcast)
 
             // Immediately sync this message to Firebase for desktop
             // Use WorkManager for guaranteed execution even if app is in background
-            com.phoneintegration.app.desktop.SmsSyncWorker.syncNow(context)
+            try {
+                com.phoneintegration.app.desktop.SmsSyncWorker.syncNow(context)
+            } catch (e: Exception) {
+                SecureLogger.e("SMS_RECEIVER", "Error scheduling SMS sync", e)
+            }
 
             // Also try immediate sync in coroutine (faster if app is active)
             CoroutineScope(Dispatchers.IO).launch {
@@ -193,6 +234,9 @@ class SmsReceiver : BroadcastReceiver() {
                     SecureLogger.e("SMS_RECEIVER", "Error syncing message to Firebase", e)
                 }
             }
+        } catch (e: Exception) {
+            SecureLogger.e("SMS_RECEIVER", "Critical error in SMS receiver", e)
+            // Don't crash - just log and continue
         }
     }
 }

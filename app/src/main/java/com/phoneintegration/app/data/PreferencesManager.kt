@@ -52,7 +52,8 @@ class PreferencesManager(context: Context) {
 
 
     
-    var swipeGesturesEnabled = mutableStateOf(prefs.getBoolean("swipe_gestures_enabled", true))
+    // Default to OFF to avoid accidental deletes/swipes on first launch
+    var swipeGesturesEnabled = mutableStateOf(prefs.getBoolean("swipe_gestures_enabled", false))
         private set
 
     var autoDeleteOld = mutableStateOf(prefs.getBoolean("auto_delete_old", false))
@@ -73,6 +74,14 @@ class PreferencesManager(context: Context) {
 
     // E2EE Settings
     var e2eeEnabled = mutableStateOf(prefs.getBoolean("e2ee_enabled", false))
+        private set
+
+    // Spam Filter Settings
+    var spamFilterEnabled = mutableStateOf(prefs.getBoolean("spam_filter_enabled", true))
+        private set
+
+    // Spam sensitivity: 0 = Low (0.7 threshold), 1 = Medium (0.5), 2 = High (0.3)
+    var spamFilterSensitivity = mutableStateOf(prefs.getInt("spam_filter_sensitivity", 1))
         private set
 
     // Desktop Sync Settings
@@ -264,6 +273,26 @@ class PreferencesManager(context: Context) {
     fun setE2eeEnabled(enabled: Boolean) {
         e2eeEnabled.value = enabled
         prefs.edit().putBoolean("e2ee_enabled", enabled).apply()
+    }
+
+    fun setSpamFilterEnabled(enabled: Boolean) {
+        spamFilterEnabled.value = enabled
+        prefs.edit().putBoolean("spam_filter_enabled", enabled).apply()
+    }
+
+    fun setSpamFilterSensitivity(sensitivity: Int) {
+        spamFilterSensitivity.value = sensitivity.coerceIn(0, 2)
+        prefs.edit().putInt("spam_filter_sensitivity", sensitivity.coerceIn(0, 2)).apply()
+    }
+
+    // Helper to get spam threshold based on sensitivity
+    fun getSpamThreshold(): Float {
+        return when (spamFilterSensitivity.value) {
+            0 -> 0.7f  // Low - only obvious spam
+            1 -> 0.5f  // Medium (default)
+            2 -> 0.3f  // High - catch more spam
+            else -> 0.5f
+        }
     }
 
     fun setDesktopCallSyncEnabled(enabled: Boolean) {
