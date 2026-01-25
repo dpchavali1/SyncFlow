@@ -138,6 +138,14 @@ struct CallHistoryView: View {
                 callHistoryStore.startListening(userId: userId)
             }
         }
+        .onChange(of: appState.userId) { newUserId in
+            // Start listener when userId becomes available (e.g., after pairing)
+            if let userId = newUserId {
+                callHistoryStore.startListening(userId: userId)
+            } else {
+                callHistoryStore.stopListening()
+            }
+        }
         .sheet(isPresented: $appState.showDialer) {
             DialerView()
                 .environmentObject(appState)
@@ -304,9 +312,7 @@ class CallHistoryStore: ObservableObject {
         isLoading = true
 
         // Remove existing listener if any
-        if let handle = listenerHandle, let uid = currentUserId {
-            removeListener(userId: uid, handle: handle)
-        }
+        stopListening()
 
         // Start listening for call history
         listenerHandle = FirebaseService.shared.listenToCallHistory(userId: userId) { [weak self] calls in
@@ -315,6 +321,13 @@ class CallHistoryStore: ObservableObject {
                 self?.isLoading = false
             }
         }
+    }
+
+    func stopListening() {
+        if let handle = listenerHandle, let userId = currentUserId {
+            removeListener(userId: userId, handle: handle)
+        }
+        listenerHandle = nil
     }
 
     private func removeListener(userId: String, handle: DatabaseHandle) {
@@ -327,8 +340,6 @@ class CallHistoryStore: ObservableObject {
     }
 
     deinit {
-        if let handle = listenerHandle, let userId = currentUserId {
-            removeListener(userId: userId, handle: handle)
-        }
+        stopListening()
     }
 }

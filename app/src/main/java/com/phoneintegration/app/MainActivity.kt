@@ -28,7 +28,9 @@ import com.phoneintegration.app.R
 import com.phoneintegration.app.SmsPermissions
 import com.phoneintegration.app.SmsViewModel
 import com.phoneintegration.app.auth.AuthManager
+import com.phoneintegration.app.auth.RecoveryCodeManager
 import com.phoneintegration.app.desktop.*
+import com.phoneintegration.app.ui.auth.RecoveryCodeScreen
 import com.phoneintegration.app.share.SharePayload
 import com.phoneintegration.app.utils.DefaultSmsHelper
 import com.phoneintegration.app.data.PreferencesManager
@@ -50,6 +52,7 @@ class MainActivity : ComponentActivity() {
     val viewModel: SmsViewModel by viewModels()
     private lateinit var preferencesManager: PreferencesManager
     private lateinit var authManager: AuthManager
+    private lateinit var recoveryCodeManager: RecoveryCodeManager
 
     // State for active call (can be updated from onNewIntent)
     private val _activeCallTrigger = mutableStateOf(0)
@@ -164,6 +167,7 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.SEND_SMS,
         Manifest.permission.RECEIVE_SMS,
         Manifest.permission.READ_CONTACTS,
+        Manifest.permission.READ_CALL_LOG, // For call history sync
         Manifest.permission.POST_NOTIFICATIONS // For local notifications
     )
 
@@ -172,7 +176,8 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.READ_PHONE_STATE,
         Manifest.permission.CALL_PHONE,
         Manifest.permission.ANSWER_PHONE_CALLS,
-        Manifest.permission.MANAGE_OWN_CALLS
+        Manifest.permission.MANAGE_OWN_CALLS,
+        Manifest.permission.READ_CALL_LOG
     )
 
     private val MEDIA_PERMISSIONS = arrayOf(
@@ -261,6 +266,7 @@ class MainActivity : ComponentActivity() {
             // Essential setup only - must be on main thread
             preferencesManager = PreferencesManager(this)
             authManager = AuthManager.getInstance(this)
+            recoveryCodeManager = RecoveryCodeManager.getInstance(this)
 
             if (preferencesManager.backgroundSyncEnabled.value) {
             com.phoneintegration.app.desktop.OutgoingMessageService.start(applicationContext)
@@ -509,15 +515,17 @@ class MainActivity : ComponentActivity() {
 
             PhoneIntegrationTheme(darkTheme = isDarkTheme) {
                 Surface(color = MaterialTheme.colorScheme.background) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        MainNavigation(
-                            viewModel = viewModel,
-                            preferencesManager = preferencesManager,
-                            pendingShare = pendingSharePayload.value,
-                            onShareHandled = { pendingSharePayload.value = null },
-                            pendingConversation = pendingConversationLaunch.value,
-                            onConversationHandled = { pendingConversationLaunch.value = null }
-                        )
+                    // No recovery code screen on startup - it will be shown when user tries to pair
+                    // This allows Android-only users to use the app without friction
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            MainNavigation(
+                                viewModel = viewModel,
+                                preferencesManager = preferencesManager,
+                                pendingShare = pendingSharePayload.value,
+                                onShareHandled = { pendingSharePayload.value = null },
+                                pendingConversation = pendingConversationLaunch.value,
+                                onConversationHandled = { pendingConversationLaunch.value = null }
+                            )
 
                         // Show incoming call screen
                         if (incomingCallId != null && callState != SyncFlowCallManager.CallState.Connected) {

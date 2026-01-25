@@ -8,6 +8,9 @@ import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.util.Log
+import androidx.core.content.ContextCompat
+import android.Manifest
+import android.content.pm.PackageManager
 import com.phoneintegration.app.utils.MemoryOptimizer
 import com.phoneintegration.app.utils.MemoryPressure
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +29,11 @@ class SmsRepository(private val context: Context) {
     // Memory-efficient pagination settings
     private val DEFAULT_PAGE_SIZE = 50
     private val MAX_CACHED_CONVERSATIONS = 100
+
+    private fun hasSmsPermission(): Boolean {
+        val perm = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS)
+        return perm == PackageManager.PERMISSION_GRANTED
+    }
 
     // ---------------------------------------------------------------------
     //  PRE-LOAD ALL CONTACTS (Fast batch loading)
@@ -143,48 +151,62 @@ class SmsRepository(private val context: Context) {
     // ---------------------------------------------------------------------
     suspend fun getMessages(address: String, limit: Int, offset: Int): List<SmsMessage> =
         withContext(Dispatchers.IO) {
+            try {
+                val threadId = findThreadIdForAddress(address)
+                    ?: return@withContext emptyList()
 
-            val threadId = findThreadIdForAddress(address)
-                ?: return@withContext emptyList()
+                val list = mutableListOf<SmsMessage>()
 
-            val list = mutableListOf<SmsMessage>()
+                val cursor = resolver.query(
+                    Telephony.Sms.CONTENT_URI,
+                    arrayOf(
+                        Telephony.Sms._ID,
+                        Telephony.Sms.ADDRESS,
+                        Telephony.Sms.BODY,
+                        Telephony.Sms.DATE,
+                        Telephony.Sms.TYPE
+                    ),
+                    "${Telephony.Sms.THREAD_ID} = ?",
+                    arrayOf(threadId.toString()),
+                    "${Telephony.Sms.DATE} DESC LIMIT $limit OFFSET $offset"
+                ) ?: return@withContext emptyList()
 
-            val cursor = resolver.query(
-                Telephony.Sms.CONTENT_URI,
-                arrayOf(
-                    Telephony.Sms._ID,
-                    Telephony.Sms.ADDRESS,
-                    Telephony.Sms.BODY,
-                    Telephony.Sms.DATE,
-                    Telephony.Sms.TYPE
-                ),
-                "${Telephony.Sms.THREAD_ID} = ?",
-                arrayOf(threadId.toString()),
-                "${Telephony.Sms.DATE} DESC LIMIT $limit OFFSET $offset"
-            ) ?: return@withContext emptyList()
+                val cachedName = contactCache[address] ?: address
 
-            val cachedName = contactCache[address] ?: address
+                cursor.use { c ->
+                    // Validate column indices
+                    if (c.columnCount < 5) {
+                        android.util.Log.e("SmsRepository", "Unexpected column count: ${c.columnCount}")
+                        return@withContext emptyList()
+                    }
 
-            cursor.use { c ->
-                while (c.moveToNext()) {
+                    while (c.moveToNext()) {
+                        try {
+                            val sms = SmsMessage(
+                                id = c.getLong(0),
+                                address = c.getString(1) ?: "",
+                                body = c.getString(2) ?: "",
+                                date = c.getLong(3),
+                                type = c.getInt(4),
+                                contactName = cachedName
+                            )
 
-                    val sms = SmsMessage(
-                        id = c.getLong(0),
-                        address = c.getString(1) ?: "",
-                        body = c.getString(2) ?: "",
-                        date = c.getLong(3),
-                        type = c.getInt(4),
-                        contactName = cachedName
-                    )
+                            sms.category = MessageCategorizer.categorizeMessage(sms)
+                            sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
 
-                    sms.category = MessageCategorizer.categorizeMessage(sms)
-                    sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
-
-                    list.add(sms)
+                            list.add(sms)
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error parsing message row", e)
+                            continue // Skip this message and continue with others
+                        }
+                    }
                 }
-            }
 
-            list
+                list
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Error in getMessages", e)
+                emptyList()
+            }
         }
 
     // ---------------------------------------------------------------------
@@ -192,52 +214,72 @@ class SmsRepository(private val context: Context) {
     // ---------------------------------------------------------------------
     suspend fun getAllMessages(limit: Int = DEFAULT_PAGE_SIZE): List<SmsMessage> =
         withContext(Dispatchers.IO) {
-            // Check memory pressure before loading large datasets
-            val memoryStats = memoryOptimizer.getMemoryStats()
+            try {
+                if (!hasSmsPermission()) {
+                    Log.w("SmsRepository", "READ_SMS not granted; getAllMessages returning empty")
+                    return@withContext emptyList()
+                }
+                // Check memory pressure before loading large datasets
+                val memoryStats = memoryOptimizer.getMemoryStats()
 
-            // Reduce limit if memory is under pressure
-            val adjustedLimit = when (memoryStats.pressure) {
-                MemoryPressure.CRITICAL -> minOf(limit, 20)
-                MemoryPressure.HIGH -> minOf(limit, 30)
-                MemoryPressure.NORMAL -> limit
-            }
+                // Reduce limit if memory is under pressure
+                val adjustedLimit = when (memoryStats.pressure) {
+                    MemoryPressure.CRITICAL -> minOf(limit, 20)
+                    MemoryPressure.HIGH -> minOf(limit, 30)
+                    MemoryPressure.NORMAL -> limit
+                }
 
-            val list = mutableListOf<SmsMessage>()
+                val list = mutableListOf<SmsMessage>()
 
-            val cursor = resolver.query(
-                Telephony.Sms.CONTENT_URI,
-                arrayOf(
-                    Telephony.Sms._ID,
-                    Telephony.Sms.ADDRESS,
-                    Telephony.Sms.BODY,
-                    Telephony.Sms.DATE,
-                    Telephony.Sms.TYPE
-                ),
-                null,
-                null,
-                "${Telephony.Sms.DATE} DESC LIMIT $adjustedLimit"
-            ) ?: return@withContext emptyList()
+                val cursor = resolver.query(
+                    Telephony.Sms.CONTENT_URI,
+                    arrayOf(
+                        Telephony.Sms._ID,
+                        Telephony.Sms.ADDRESS,
+                        Telephony.Sms.BODY,
+                        Telephony.Sms.DATE,
+                        Telephony.Sms.TYPE
+                    ),
+                    null,
+                    null,
+                    "${Telephony.Sms.DATE} DESC LIMIT $adjustedLimit"
+                ) ?: return@withContext emptyList()
 
-            cursor.use { c ->
-                while (c.moveToNext()) {
-                    val sms = SmsMessage(
-                        id = c.getLong(0),
-                        address = c.getString(1) ?: "",
-                        body = c.getString(2) ?: "",
-                        date = c.getLong(3),
-                        type = c.getInt(4)
-                    )
-                    list.add(sms)
+                cursor.use { c ->
+                    // Validate column count
+                    if (c.columnCount < 5) {
+                        android.util.Log.e("SmsRepository", "Unexpected column count: ${c.columnCount}")
+                        return@withContext emptyList()
+                    }
 
-                    // Track memory usage for large datasets
-                    if (list.size % 100 == 0) {
-                        memoryOptimizer.checkMemoryPressure()
+                    while (c.moveToNext()) {
+                        try {
+                            val sms = SmsMessage(
+                                id = c.getLong(0),
+                                address = c.getString(1) ?: "",
+                                body = c.getString(2) ?: "",
+                                date = c.getLong(3),
+                                type = c.getInt(4)
+                            )
+                            list.add(sms)
+
+                            // Track memory usage for large datasets
+                            if (list.size % 100 == 0) {
+                                memoryOptimizer.checkMemoryPressure()
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error parsing message row", e)
+                            continue // Skip this message
+                        }
                     }
                 }
-            }
 
-            Log.d("SmsRepository", "Loaded ${list.size} messages (adjusted limit: $adjustedLimit, memory pressure: ${memoryStats.pressure})")
-            list
+                Log.d("SmsRepository", "Loaded ${list.size} messages (adjusted limit: $adjustedLimit, memory pressure: ${memoryStats.pressure})")
+                list
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Error in getAllMessages", e)
+                emptyList()
+            }
         }
 
     // ---------------------------------------------------------------------
@@ -245,24 +287,41 @@ class SmsRepository(private val context: Context) {
     // ---------------------------------------------------------------------
     suspend fun getConversations(limit: Int = MAX_CACHED_CONVERSATIONS): List<ConversationInfo> =
         withContext(Dispatchers.IO) {
-            val startTime = System.currentTimeMillis()
+            try {
+                if (!hasSmsPermission()) {
+                    Log.w("SmsRepository", "READ_SMS not granted; getConversations returning empty")
+                    return@withContext emptyList()
+                }
+                val startTime = System.currentTimeMillis()
 
-            // Check memory pressure and adjust limit
-            val memoryStats = memoryOptimizer.getMemoryStats()
-            val adjustedLimit = when (memoryStats.pressure) {
-                MemoryPressure.CRITICAL -> minOf(limit, 20)
-                MemoryPressure.HIGH -> minOf(limit, 50)
-                MemoryPressure.NORMAL -> limit
-            }
+                // Check memory pressure and adjust limit
+                val memoryPressure = try {
+                    memoryOptimizer.getMemoryStats().pressure
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error getting memory stats", e)
+                    // Default to conservative values if memory check fails
+                    MemoryPressure.HIGH
+                }
 
-            val list = mutableListOf<ConversationInfo>()
-            val addressesToResolve = mutableSetOf<String>()
+                val adjustedLimit = when (memoryPressure) {
+                    MemoryPressure.CRITICAL -> minOf(limit, 20)
+                    MemoryPressure.HIGH -> minOf(limit, 50)
+                    MemoryPressure.NORMAL -> limit
+                }
 
-            // Get actual unread counts for all threads upfront (limit to prevent memory issues)
-            val unreadCounts = getUnreadCountsForThreads().let { counts ->
-                // Only keep counts for recent conversations to save memory
-                counts.entries.take(adjustedLimit).associate { it.key to it.value }
-            }
+                val list = mutableListOf<ConversationInfo>()
+                val addressesToResolve = mutableSetOf<String>()
+
+                // Get actual unread counts for all threads upfront (limit to prevent memory issues)
+                val unreadCounts = try {
+                    getUnreadCountsForThreads().let { counts ->
+                        // Only keep counts for recent conversations to save memory
+                        counts.entries.take(adjustedLimit).associate { it.key to it.value }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error getting unread counts", e)
+                    emptyMap()
+                }
 
             // Use the threads table which is MUCH faster than scanning all SMS
             val threadsCursor = resolver.query(
@@ -277,64 +336,82 @@ class SmsRepository(private val context: Context) {
                 ),
                 null,
                 null,
-                "date DESC LIMIT 500"  // Increased limit for better coverage
+                "date DESC LIMIT 200"  // Limit to reduce memory/permission load
             )
 
             threadsCursor?.use { c ->
-                val idxId = c.getColumnIndex("_id")
-                val idxDate = c.getColumnIndex("date")
-                val idxSnippet = c.getColumnIndex("snippet")
-                val idxRead = c.getColumnIndex("read")
-                val idxRecipientIds = c.getColumnIndex("recipient_ids")
+                try {
+                    val idxId = c.getColumnIndex("_id")
+                    val idxDate = c.getColumnIndex("date")
+                    val idxSnippet = c.getColumnIndex("snippet")
+                    val idxRead = c.getColumnIndex("read")
+                    val idxRecipientIds = c.getColumnIndex("recipient_ids")
 
-                while (c.moveToNext()) {
-                    val threadId = if (idxId >= 0) c.getLong(idxId) else continue
-                    val timestamp = if (idxDate >= 0) c.getLong(idxDate) else 0L
-                    val snippet = if (idxSnippet >= 0) c.getString(idxSnippet) ?: "" else ""
-                    val isRead = if (idxRead >= 0) c.getInt(idxRead) == 1 else true
-                    val recipientIds = if (idxRecipientIds >= 0) c.getString(idxRecipientIds) ?: "" else ""
+                    while (c.moveToNext()) {
+                        try {
+                            val threadId = if (idxId >= 0) c.getLong(idxId) else continue
+                            val timestamp = if (idxDate >= 0) c.getLong(idxDate) else 0L
+                            val snippet = if (idxSnippet >= 0) c.getString(idxSnippet) ?: "" else ""
+                            val isRead = if (idxRead >= 0) c.getInt(idxRead) == 1 else true
+                            val recipientIds = if (idxRecipientIds >= 0) c.getString(idxRecipientIds) ?: "" else ""
 
-                    val recipientAddresses = getAddressesForRecipientIds(recipientIds)
-                    val filteredRecipients = recipientAddresses.filterNot {
-                        it.contains("@rbm.goog", ignoreCase = true) || isRcsAddress(it)
+                            val recipientAddresses = try {
+                                getAddressesForRecipientIds(recipientIds)
+                            } catch (e: Exception) {
+                                android.util.Log.e("SmsRepository", "Error getting addresses for recipient IDs: $recipientIds", e)
+                                emptyList<String>()
+                            }
+
+                            val filteredRecipients = recipientAddresses.filterNot {
+                                it.contains("@rbm.goog", ignoreCase = true) || isRcsAddress(it)
+                            }
+
+                            val address = filteredRecipients.firstOrNull()
+                                ?: try { getAddressForThread(threadId) } catch (e: Exception) {
+                                    android.util.Log.e("SmsRepository", "Error getting address for thread $threadId", e)
+                                    null
+                                }
+                                ?: continue
+
+                            // Filter out RBM spam
+                            if (address.contains("@rbm.goog", ignoreCase = true)) continue
+                            if (isRcsAddress(address)) continue
+
+                            val isGroup = recipientIds.contains(" ") || filteredRecipients.size > 1
+                            val recipientCount = if (filteredRecipients.isNotEmpty()) {
+                                filteredRecipients.size
+                            } else if (isGroup) {
+                                recipientIds.split(Regex("[\\s,]+")).size
+                            } else {
+                                1
+                            }
+
+                            // Collect addresses that need name resolution
+                            if (!contactCache.containsKey(address)) {
+                                addressesToResolve.add(address)
+                            }
+
+                            list.add(
+                                ConversationInfo(
+                                    threadId = threadId,
+                                    address = address,
+                                    contactName = contactCache[address] ?: address,
+                                    lastMessage = snippet,
+                                    timestamp = timestamp,
+                                    unreadCount = unreadCounts[threadId] ?: 0,
+                                    isGroupConversation = isGroup,
+                                    recipientCount = recipientCount
+                                )
+                            )
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error processing conversation row", e)
+                            continue // Skip this row and continue with others
+                        }
                     }
-                    val address = filteredRecipients.firstOrNull()
-                        ?: getAddressForThread(threadId)
-                        ?: continue
-
-                    // Filter out RBM spam
-                    if (address.contains("@rbm.goog", ignoreCase = true)) continue
-                    if (isRcsAddress(address)) continue
-
-                    val isGroup = recipientIds.contains(" ") || filteredRecipients.size > 1
-                    val recipientCount = if (filteredRecipients.isNotEmpty()) {
-                        filteredRecipients.size
-                    } else if (isGroup) {
-                        recipientIds.split(Regex("[\\s,]+")).size
-                    } else {
-                        1
-                    }
-
-                    // Collect addresses that need name resolution
-                    if (!contactCache.containsKey(address)) {
-                        addressesToResolve.add(address)
-                    }
-
-                    list.add(
-                        ConversationInfo(
-                            threadId = threadId,
-                            address = address,
-                            contactName = contactCache[address] ?: address,
-                            lastMessage = snippet,
-                            timestamp = timestamp,
-                            unreadCount = unreadCounts[threadId] ?: 0,
-                            isGroupConversation = isGroup,
-                            recipientCount = recipientCount
-                        )
-                    )
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error processing threads cursor", e)
                 }
             }
-
             // If threads table didn't work, fallback to traditional method
             if (list.isEmpty()) {
                 return@withContext getConversationsFallback()
@@ -343,7 +420,11 @@ class SmsRepository(private val context: Context) {
             // Batch resolve contact names BEFORE returning (for first 50 to be fast)
             val priorityAddresses = addressesToResolve.take(50)
             for (address in priorityAddresses) {
-                resolveContactName(address) // This caches the result
+                try {
+                    resolveContactName(address) // This caches the result
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error resolving contact name for $address", e)
+                }
             }
 
             // Update list with resolved names
@@ -356,11 +437,26 @@ class SmsRepository(private val context: Context) {
                 }
             }
 
-            // Deduplicate by normalized phone number (handles +1234567890 vs 1234567890 duplicates)
-            val result = com.phoneintegration.app.utils.MessageDeduplicator.deduplicateByNormalizedAddress(resolvedList)
+                // Deduplicate by normalized phone number (handles +1234567890 vs 1234567890 duplicates)
+                val result = try {
+                    com.phoneintegration.app.utils.MessageDeduplicator.deduplicateByNormalizedAddress(resolvedList)
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error deduplicating conversations", e)
+                    resolvedList // Return without deduplication if it fails
+                }
 
-            android.util.Log.d("SmsRepository", "Loaded ${result.size} conversations (${list.size} before dedupe) in ${System.currentTimeMillis() - startTime}ms")
-            return@withContext result
+                android.util.Log.d("SmsRepository", "Loaded ${result.size} conversations (${list.size} before dedupe) in ${System.currentTimeMillis() - startTime}ms")
+                return@withContext result
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Critical error in getConversations", e)
+                // Try fallback method
+                return@withContext try {
+                    getConversationsFallback()
+                } catch (fallbackError: Exception) {
+                    android.util.Log.e("SmsRepository", "Fallback also failed", fallbackError)
+                    emptyList()
+                }
+            }
         }
 
     /**
@@ -514,102 +610,134 @@ class SmsRepository(private val context: Context) {
 
     // Fallback method - slower but works on all devices
     private fun getConversationsFallback(): List<ConversationInfo> {
-        val map = LinkedHashMap<Long, ConversationInfo>()
+        try {
+            val map = LinkedHashMap<Long, ConversationInfo>()
 
-        // Get actual unread counts
-        val unreadCounts = getUnreadCountsForThreads()
-
-        // Load recent SMS messages to build conversation list
-        val smsCursor = resolver.query(
-            Telephony.Sms.CONTENT_URI,
-            arrayOf(
-                Telephony.Sms.THREAD_ID,
-                Telephony.Sms.ADDRESS,
-                Telephony.Sms.BODY,
-                Telephony.Sms.DATE,
-                Telephony.Sms.READ
-            ),
-            null,
-            null,
-            "${Telephony.Sms.DATE} DESC LIMIT 2000"  // Reasonable limit
-        )
-
-        smsCursor?.use { c ->
-            while (c.moveToNext()) {
-                val threadId = c.getLong(0)
-                val address = c.getString(1) ?: continue
-
-                if (address.contains("@rbm.goog", ignoreCase = true)) continue
-                if (isRcsAddress(address)) continue
-
-                val body = c.getString(2) ?: ""
-                val ts = c.getLong(3)
-                val isRead = c.getInt(4) == 1
-
-                if (!map.containsKey(threadId)) {
-                    map[threadId] = ConversationInfo(
-                        threadId = threadId,
-                        address = address,
-                        contactName = contactCache[address] ?: address,
-                        lastMessage = body,
-                        timestamp = ts,
-                        unreadCount = unreadCounts[threadId] ?: 0
-                    )
-                }
+            // Get actual unread counts
+            val unreadCounts = try {
+                getUnreadCountsForThreads()
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Error getting unread counts", e)
+                emptyMap()
             }
-        }
 
-        // Load recent MMS messages
-        val mmsCursor = resolver.query(
-            Uri.parse("content://mms"),
-            arrayOf("_id", "thread_id", "date", "sub", "sub_cs"),
-            null,
-            null,
-            "date DESC LIMIT 500"  // Reasonable limit
-        )
+            // Load recent SMS messages to build conversation list
+            val smsCursor = resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms.THREAD_ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.READ
+                ),
+                null,
+                null,
+                "${Telephony.Sms.DATE} DESC LIMIT 2000"  // Reasonable limit
+            )
 
-        mmsCursor?.use { c ->
-            val subIdx = c.getColumnIndex("sub")
-            val subCsIdx = c.getColumnIndex("sub_cs")
-            while (c.moveToNext()) {
-                val mmsId = c.getLong(0)
-                val threadId = c.getLong(1)
-                val dateSec = c.getLong(2)
-                val subjectBytes = if (subIdx >= 0) c.getBlob(subIdx) else null
-                val subjectRaw = if (subIdx >= 0) c.getString(subIdx) else null
-                val subjectCharset = if (subCsIdx >= 0) c.getInt(subCsIdx) else null
-                val subject = MmsHelper.decodeMmsSubject(subjectBytes, subjectRaw, subjectCharset) ?: "(MMS)"
+            smsCursor?.use { c ->
+                // Validate column count
+                if (c.columnCount < 5) {
+                    android.util.Log.e("SmsRepository", "Unexpected column count in fallback: ${c.columnCount}")
+                    return emptyList()
+                }
 
-                val timestamp = dateSec * 1000L
+                while (c.moveToNext()) {
+                    try {
+                        val threadId = c.getLong(0)
+                        val address = c.getString(1) ?: continue
 
-                if (!map.containsKey(threadId)) {
-                    val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
-                    if (address.contains("@rbm.goog", ignoreCase = true)) continue
-                    if (isRcsAddress(address)) continue
+                        if (address.contains("@rbm.goog", ignoreCase = true)) continue
+                        if (isRcsAddress(address)) continue
 
-                    map[threadId] = ConversationInfo(
-                        threadId = threadId,
-                        address = address,
-                        contactName = contactCache[address] ?: address,
-                        lastMessage = subject,
-                        timestamp = timestamp,
-                        unreadCount = unreadCounts[threadId] ?: 0
-                    )
-                } else {
-                    val existing = map[threadId]!!
-                    if (timestamp > existing.timestamp) {
-                        map[threadId] = existing.copy(
-                            lastMessage = subject,
-                            timestamp = timestamp
-                        )
+                        val body = c.getString(2) ?: ""
+                        val ts = c.getLong(3)
+                        val isRead = c.getInt(4) == 1
+
+                        if (!map.containsKey(threadId)) {
+                            map[threadId] = ConversationInfo(
+                                threadId = threadId,
+                                address = address,
+                                contactName = contactCache[address] ?: address,
+                                lastMessage = body,
+                                timestamp = ts,
+                                unreadCount = unreadCounts[threadId] ?: 0
+                            )
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SmsRepository", "Error parsing SMS row in fallback", e)
+                        continue // Skip this row
                     }
                 }
             }
-        }
 
-        val sorted = map.values.sortedByDescending { it.timestamp }
-        // Deduplicate by normalized phone number
-        return com.phoneintegration.app.utils.MessageDeduplicator.deduplicateByNormalizedAddress(sorted)
+            // Load recent MMS messages
+            try {
+                val mmsCursor = resolver.query(
+                    Uri.parse("content://mms"),
+                    arrayOf("_id", "thread_id", "date", "sub", "sub_cs"),
+                    null,
+                    null,
+                    "date DESC LIMIT 500"  // Reasonable limit
+                )
+
+                mmsCursor?.use { c ->
+                    val subIdx = c.getColumnIndex("sub")
+                    val subCsIdx = c.getColumnIndex("sub_cs")
+
+                    while (c.moveToNext()) {
+                        try {
+                            val mmsId = c.getLong(0)
+                            val threadId = c.getLong(1)
+                            val dateSec = c.getLong(2)
+                            val subjectBytes = if (subIdx >= 0) c.getBlob(subIdx) else null
+                            val subjectRaw = if (subIdx >= 0) c.getString(subIdx) else null
+                            val subjectCharset = if (subCsIdx >= 0) c.getInt(subCsIdx) else null
+                            val subject = MmsHelper.decodeMmsSubject(subjectBytes, subjectRaw, subjectCharset) ?: "(MMS)"
+
+                            val timestamp = dateSec * 1000L
+
+                            if (!map.containsKey(threadId)) {
+                                val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                                if (address.contains("@rbm.goog", ignoreCase = true)) continue
+                                if (isRcsAddress(address)) continue
+
+                                map[threadId] = ConversationInfo(
+                                    threadId = threadId,
+                                    address = address,
+                                    contactName = contactCache[address] ?: address,
+                                    lastMessage = subject,
+                                    timestamp = timestamp,
+                                    unreadCount = unreadCounts[threadId] ?: 0
+                                )
+                            } else {
+                                val existing = map[threadId]!!
+                                if (timestamp > existing.timestamp) {
+                                    map[threadId] = existing.copy(
+                                        lastMessage = subject,
+                                        timestamp = timestamp
+                                    )
+                                }
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error parsing MMS row in fallback", e)
+                            continue // Skip this MMS
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Error loading MMS in fallback", e)
+                // Continue without MMS
+            }
+
+            val sorted = map.values.sortedByDescending { it.timestamp }
+            // Deduplicate by normalized phone number
+            return com.phoneintegration.app.utils.MessageDeduplicator.deduplicateByNormalizedAddress(sorted)
+        } catch (e: Exception) {
+            android.util.Log.e("SmsRepository", "Critical error in getConversationsFallback", e)
+            return emptyList()
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1065,6 +1193,7 @@ class SmsRepository(private val context: Context) {
         resolver.query(
             lookupUri,
             arrayOf(
+                ContactsContract.PhoneLookup.PHOTO_THUMBNAIL_URI,
                 ContactsContract.PhoneLookup.PHOTO_URI
             ),
             null,
@@ -1072,7 +1201,9 @@ class SmsRepository(private val context: Context) {
             null
         )?.use { c ->
             if (c.moveToFirst()) {
-                return c.getString(0) // photo URI
+                val thumb = c.getString(0)
+                val full = if (c.columnCount > 1) c.getString(1) else null
+                return full ?: thumb
             }
         }
         return null
@@ -1082,83 +1213,108 @@ class SmsRepository(private val context: Context) {
         limit: Int,
         offset: Int
     ): List<SmsMessage> = withContext(Dispatchers.IO) {
-        val startTime = System.currentTimeMillis()
+        try {
+            val startTime = System.currentTimeMillis()
 
-        val final = mutableListOf<SmsMessage>()
+            val final = mutableListOf<SmsMessage>()
 
-        // ------------------------------
-        // 1) Load SMS (FAST - no contact lookups)
-        // ------------------------------
-        val smsCursor = resolver.query(
-            Telephony.Sms.CONTENT_URI,
-            arrayOf(
-                Telephony.Sms._ID,
-                Telephony.Sms.ADDRESS,
-                Telephony.Sms.BODY,
-                Telephony.Sms.DATE,
-                Telephony.Sms.TYPE
-            ),
-            "${Telephony.Sms.THREAD_ID} = ?",
-            arrayOf(threadId.toString()),
-            "${Telephony.Sms.DATE} DESC" // Sort in DB for speed
-        )
+            // ------------------------------
+            // 1) Load SMS (FAST - no contact lookups)
+            // ------------------------------
+            val smsCursor = resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE
+                ),
+                "${Telephony.Sms.THREAD_ID} = ?",
+                arrayOf(threadId.toString()),
+                "${Telephony.Sms.DATE} DESC" // Sort in DB for speed
+            )
 
-        var firstAddress: String? = null
+            var firstAddress: String? = null
 
-        smsCursor?.use { c ->
-            while (c.moveToNext()) {
-                val address = c.getString(1) ?: ""
-                if (isRcsAddress(address)) continue
-                if (firstAddress == null) firstAddress = address
-
-                val sms = SmsMessage(
-                    id = c.getLong(0),
-                    address = address,
-                    body = c.getString(2) ?: "",
-                    date = c.getLong(3),
-                    type = c.getInt(4),
-                    contactName = null // Skip contact lookup for speed - resolve later
-                )
-
-                // Only categorize if needed (skip for sent messages)
-                if (sms.type == 1) {
-                    sms.category = MessageCategorizer.categorizeMessage(sms)
-                    sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
+            smsCursor?.use { c ->
+                // Validate column count
+                if (c.columnCount < 5) {
+                    android.util.Log.e("SmsRepository", "Unexpected column count: ${c.columnCount}")
+                    return@withContext emptyList()
                 }
 
-                final.add(sms)
+                while (c.moveToNext()) {
+                    try {
+                        val address = c.getString(1) ?: ""
+                        if (isRcsAddress(address)) continue
+                        if (firstAddress == null) firstAddress = address
+
+                        val sms = SmsMessage(
+                            id = c.getLong(0),
+                            address = address,
+                            body = c.getString(2) ?: "",
+                            date = c.getLong(3),
+                            type = c.getInt(4),
+                            contactName = null // Skip contact lookup for speed - resolve later
+                        )
+
+                        // Only categorize if needed (skip for sent messages)
+                        if (sms.type == 1) {
+                            sms.category = MessageCategorizer.categorizeMessage(sms)
+                            sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
+                        }
+
+                        final.add(sms)
+                    } catch (e: Exception) {
+                        android.util.Log.e("SmsRepository", "Error parsing SMS row", e)
+                        continue // Skip this message
+                    }
+                }
             }
+
+            // ------------------------------
+            // 2) Load MMS (FAST - defer attachment data)
+            // ------------------------------
+            try {
+                val mmsList = loadMmsForThreadFast(threadId)
+                final.addAll(mmsList)
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Error loading MMS", e)
+                // Continue without MMS
+            }
+
+            // ------------------------------
+            // 3) Sort newest -> oldest (already sorted from DB for SMS)
+            // ------------------------------
+            if (final.isNotEmpty()) {
+                final.sortByDescending { it.date }
+            }
+
+            // ------------------------------
+            // 4) Apply limit/offset
+            // ------------------------------
+            val result = final.drop(offset).take(limit)
+
+            // ------------------------------
+            // 5) Resolve contact name once for all messages (from cache)
+            // ------------------------------
+            if (firstAddress != null) {
+                try {
+                    val cachedName = contactCache[firstAddress] ?: firstAddress
+                    result.forEach { it.contactName = cachedName }
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error resolving contact names", e)
+                }
+            }
+
+            android.util.Log.d("SmsRepository", "Loaded ${result.size} messages for thread $threadId in ${System.currentTimeMillis() - startTime}ms")
+
+            return@withContext result
+        } catch (e: Exception) {
+            android.util.Log.e("SmsRepository", "Error in getMessagesByThreadId", e)
+            return@withContext emptyList()
         }
-
-        // ------------------------------
-        // 2) Load MMS (FAST - defer attachment data)
-        // ------------------------------
-        val mmsList = loadMmsForThreadFast(threadId)
-        final.addAll(mmsList)
-
-        // ------------------------------
-        // 3) Sort newest -> oldest (already sorted from DB for SMS)
-        // ------------------------------
-        if (mmsList.isNotEmpty()) {
-            final.sortByDescending { it.date }
-        }
-
-        // ------------------------------
-        // 4) Apply limit/offset
-        // ------------------------------
-        val result = final.drop(offset).take(limit)
-
-        // ------------------------------
-        // 5) Resolve contact name once for all messages (from cache)
-        // ------------------------------
-        if (firstAddress != null) {
-            val cachedName = contactCache[firstAddress] ?: firstAddress
-            result.forEach { it.contactName = cachedName }
-        }
-
-        android.util.Log.d("SmsRepository", "Loaded ${result.size} messages for thread $threadId in ${System.currentTimeMillis() - startTime}ms")
-
-        return@withContext result
     }
 
     /**
@@ -1241,95 +1397,148 @@ class SmsRepository(private val context: Context) {
 
     // Fast MMS loading - defer attachment data loading
     private fun loadMmsForThreadFast(threadId: Long): List<SmsMessage> {
-        val final = mutableListOf<SmsMessage>()
+        try {
+            val final = mutableListOf<SmsMessage>()
 
-        val mmsCursor = resolver.query(
-            Uri.parse("content://mms"),
-            arrayOf("_id", "date", "sub", "sub_cs", "m_type", "msg_box"),
-            "thread_id = ?",
-            arrayOf(threadId.toString()),
-            "date DESC"
-        ) ?: return emptyList()
+            val mmsCursor = resolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id", "date", "sub", "sub_cs", "m_type", "msg_box"),
+                "thread_id = ?",
+                arrayOf(threadId.toString()),
+                "date DESC"
+            ) ?: return emptyList()
 
-        mmsCursor.use { c ->
-            while (c.moveToNext()) {
-                val mmsId = c.getLong(0)
-                val dateSec = c.getLong(1)
-                val subjectBytes = c.getBlob(2)
-                val subjectRaw = c.getString(2)
-                val subjectCharset = c.getInt(3)
-                val subject = MmsHelper.decodeMmsSubject(subjectBytes, subjectRaw, subjectCharset)
-                val msgBox = c.getInt(5)  // 1 = inbox, 2 = sent
+            mmsCursor.use { c ->
+                // Validate column count
+                if (c.columnCount < 6) {
+                    android.util.Log.e("SmsRepository", "Unexpected MMS column count: ${c.columnCount}")
+                    return emptyList()
+                }
 
-                val timestamp = dateSec * 1000L
+                while (c.moveToNext()) {
+                    try {
+                        val mmsId = c.getLong(0)
+                        val dateSec = c.getLong(1)
+                        val subjectBytes = c.getBlob(2)
+                        val subjectRaw = c.getString(2)
+                        val subjectCharset = c.getInt(3)
+                        val subject = MmsHelper.decodeMmsSubject(subjectBytes, subjectRaw, subjectCharset)
+                        val msgBox = c.getInt(5)  // 1 = inbox, 2 = sent
 
-                val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
-                if (isRcsAddress(address)) continue
-                val text = MmsHelper.getMmsText(resolver, mmsId)
-                    ?: mmsCache.loadBody(mmsId)
+                        val timestamp = dateSec * 1000L
 
-                // Load attachments metadata only (defer actual data)
-                val attachments = loadMmsPartsMetadata(mmsId)
+                        val address = try {
+                            MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error getting MMS address", e)
+                            continue
+                        }
 
-                final.add(
-                    SmsMessage(
-                        id = mmsId,
-                        address = address,
-                        body = text ?: "",
-                        date = timestamp,
-                        type = if (msgBox != 1) 2 else 1,  // 1=inbox(received), 2/3/4/5=sent/draft/outbox/failed(outgoing)
-                        contactName = contactCache[address] ?: address,
-                        isMms = true,
-                        mmsAttachments = attachments,
-                        mmsSubject = subject
-                    )
-                )
+                        if (isRcsAddress(address)) continue
+
+                        val text = try {
+                            MmsHelper.getMmsText(resolver, mmsId) ?: mmsCache.loadBody(mmsId)
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error getting MMS text", e)
+                            ""
+                        }
+
+                        // Load attachments metadata only (defer actual data)
+                        val attachments = try {
+                            loadMmsPartsMetadata(mmsId)
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error loading MMS attachments", e)
+                            emptyList()
+                        }
+
+                        final.add(
+                            SmsMessage(
+                                id = mmsId,
+                                address = address,
+                                body = text ?: "",
+                                date = timestamp,
+                                type = if (msgBox != 1) 2 else 1,  // 1=inbox(received), 2/3/4/5=sent/draft/outbox/failed(outgoing)
+                                contactName = contactCache[address] ?: address,
+                                isMms = true,
+                                mmsAttachments = attachments,
+                                mmsSubject = subject
+                            )
+                        )
+                    } catch (e: Exception) {
+                        android.util.Log.e("SmsRepository", "Error parsing MMS row", e)
+                        continue // Skip this MMS
+                    }
+                }
             }
-        }
 
-        return final
+            return final
+        } catch (e: Exception) {
+            android.util.Log.e("SmsRepository", "Critical error in loadMmsForThreadFast", e)
+            return emptyList()
+        }
     }
 
     // Load MMS parts metadata only (no actual data - much faster)
     private fun loadMmsPartsMetadata(mmsId: Long): List<MmsAttachment> {
-        val list = mutableListOf<MmsAttachment>()
+        try {
+            val list = mutableListOf<MmsAttachment>()
 
-        val partCursor = resolver.query(
-            Uri.parse("content://mms/part"),
-            arrayOf("_id", "ct", "name", "fn"),
-            "mid = ?",
-            arrayOf(mmsId.toString()),
-            null
-        ) ?: return emptyList()
+            val partCursor = resolver.query(
+                Uri.parse("content://mms/part"),
+                arrayOf("_id", "ct", "name", "fn"),
+                "mid = ?",
+                arrayOf(mmsId.toString()),
+                null
+            ) ?: return emptyList()
 
-        partCursor.use { pc ->
-            while (pc.moveToNext()) {
-                val partId = pc.getLong(0)
-                val contentType = pc.getString(1) ?: ""
-                val fileName = pc.getString(2) ?: pc.getString(3)
+            partCursor.use { pc ->
+                // Validate column count
+                if (pc.columnCount < 4) {
+                    android.util.Log.e("SmsRepository", "Unexpected MMS part column count: ${pc.columnCount}")
+                    return try { mmsCache.loadAttachments(mmsId) } catch (e: Exception) { emptyList() }
+                }
 
-                // Skip text parts
-                if (contentType == "text/plain" || contentType == "application/smil") continue
+                while (pc.moveToNext()) {
+                    try {
+                        val partId = pc.getLong(0)
+                        val contentType = pc.getString(1) ?: ""
+                        val fileName = pc.getString(2) ?: pc.getString(3)
 
-                val partUri = "content://mms/part/$partId"
+                        // Skip text parts
+                        if (contentType == "text/plain" || contentType == "application/smil") continue
 
-                list.add(
-                    MmsAttachment(
-                        id = partId,
-                        contentType = contentType,
-                        filePath = partUri,
-                        data = null, // Defer loading actual data
-                        fileName = fileName
-                    )
-                )
+                        val partUri = "content://mms/part/$partId"
+
+                        list.add(
+                            MmsAttachment(
+                                id = partId,
+                                contentType = contentType,
+                                filePath = partUri,
+                                data = null, // Defer loading actual data
+                                fileName = fileName
+                            )
+                        )
+                    } catch (e: Exception) {
+                        android.util.Log.e("SmsRepository", "Error parsing MMS part row", e)
+                        continue // Skip this part
+                    }
+                }
             }
-        }
 
-        if (list.isEmpty()) {
-            return mmsCache.loadAttachments(mmsId)
-        }
+            if (list.isEmpty()) {
+                return try {
+                    mmsCache.loadAttachments(mmsId)
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error loading MMS from cache", e)
+                    emptyList()
+                }
+            }
 
-        return list
+            return list
+        } catch (e: Exception) {
+            android.util.Log.e("SmsRepository", "Critical error in loadMmsPartsMetadata", e)
+            return emptyList()
+        }
     }
 
     private fun loadMmsForThread(threadId: Long): List<SmsMessage> {

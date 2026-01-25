@@ -77,22 +77,71 @@ object FirebaseSecurityConfig {
     }
 
     /**
+     * Temporarily go online to perform a write operation, then go back offline.
+     * Use this wrapper for all Firebase write operations on Android.
+     */
+    suspend fun <T> executeFirebaseWrite(block: suspend () -> T): T {
+        val database = FirebaseDatabase.getInstance()
+        try {
+            // Temporarily go online
+            database.goOnline()
+            android.util.Log.d("FirebaseSecurity", "Going online for write operation")
+
+            // Execute the write
+            val result = block()
+
+            // Give it 2 seconds to sync
+            kotlinx.coroutines.delay(2000)
+
+            return result
+        } finally {
+            // Always go back offline to prevent OOM
+            database.goOffline()
+            android.util.Log.d("FirebaseSecurity", "Back offline after write")
+        }
+    }
+
+    /**
+     * For non-suspend write operations
+     */
+    fun executeFirebaseWriteBlocking(block: () -> Unit) {
+        val database = FirebaseDatabase.getInstance()
+        try {
+            database.goOnline()
+            android.util.Log.d("FirebaseSecurity", "Going online for blocking write")
+            block()
+            Thread.sleep(2000) // Give it time to sync
+        } finally {
+            database.goOffline()
+            android.util.Log.d("FirebaseSecurity", "Back offline after blocking write")
+        }
+    }
+
+    /**
      * Configure Firebase Realtime Database security settings.
      */
     private fun configureFirebaseDatabase() {
         try {
-            FirebaseDatabase.getInstance().apply {
-                // Enable offline persistence
-                setPersistenceEnabled(true)
+            val database = FirebaseDatabase.getInstance()
 
-                // Note: Firebase Database uses its own HTTP implementation.
-                // Certificate pinning for Firebase Database would require
-                // modifying the Firebase SDK or using a proxy.
-                // For now, we rely on Android's network security config
-                // and Google's built-in certificate validation.
+            // Memory protection: disable disk persistence and shrink cache
+            try {
+                database.setPersistenceEnabled(false)
+            } catch (_: Exception) {
+                // ignored; may already be initialized
+            }
+            try {
+                database.setPersistenceCacheSizeBytes(512 * 1024) // 512KB cache
+            } catch (_: Exception) {
+                // ignored
             }
 
-            android.util.Log.i("FirebaseSecurity", "Firebase Database configured with security settings")
+            // CRITICAL: Put Firebase Database in OFFLINE mode to prevent OOM
+            // Firebase tries to sync ALL data via WebSocket, causing 79MB+ allocations
+            // Cloud Functions use HTTP (not WebSocket), so they still work in offline mode
+            // Android only needs to WRITE to Firebase - reads go through Cloud Functions
+            database.goOffline()
+            android.util.Log.i("FirebaseSecurity", "Firebase Database set to OFFLINE mode (OOM prevention)")
 
         } catch (e: Exception) {
             android.util.Log.e("FirebaseSecurity", "Failed to configure Firebase Database", e)

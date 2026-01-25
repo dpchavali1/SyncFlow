@@ -164,6 +164,7 @@ export default function AdminCleanupPage() {
   const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false)
   const [orphanCounts, setOrphanCounts] = useState<OrphanCounts | null>(null)
   const [duplicatesList, setDuplicatesList] = useState<any[]>([])
+  const [totalDuplicateAccounts, setTotalDuplicateAccounts] = useState(0)
   const [isDeletingNoDeviceUsers, setIsDeletingNoDeviceUsers] = useState(false)
   const [isDeletingOldMessages, setIsDeletingOldMessages] = useState(false)
   const [isDeletingOldMms, setIsDeletingOldMms] = useState(false)
@@ -462,6 +463,10 @@ export default function AdminCleanupPage() {
       const duplicates = await detectDuplicateUsersByDevice()
       setDuplicatesList(duplicates)
 
+      // Calculate total duplicate accounts that can be deleted
+      const totalDupes = duplicates.reduce((sum, d) => sum + (d.userIds.length - 1), 0)
+      setTotalDuplicateAccounts(totalDupes)
+
       if (duplicates.length === 0) {
         addLog('✅ No duplicate users found!')
       } else {
@@ -477,7 +482,6 @@ export default function AdminCleanupPage() {
           })
         })
 
-        const totalDupes = duplicates.reduce((sum, d) => sum + (d.userIds.length - 1), 0)
         addLog(`\n💡 Total duplicate accounts to delete: ${totalDupes}`)
         addLog(`💰 Cleanup could save: $${(totalDupes * 0.005).toFixed(2)}/month`)
       }
@@ -522,6 +526,7 @@ export default function AdminCleanupPage() {
 
         // Clear duplicates list and reload overview
         setDuplicatesList([])
+        setTotalDuplicateAccounts(0)
         await loadSystemOverview()
         await loadDetailedUsers()
       } else {
@@ -1182,7 +1187,7 @@ export default function AdminCleanupPage() {
                       </div>
                       <div className="text-right">
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                          {duplicatesList.length} Found
+                          {totalDuplicateAccounts} to Delete
                         </span>
                       </div>
                     </div>
@@ -1190,6 +1195,11 @@ export default function AdminCleanupPage() {
                     <h4 className="font-bold text-gray-900 mb-2">Duplicate Users</h4>
                     <p className="text-sm text-gray-600 mb-4 leading-relaxed">
                       Remove accounts created from device disconnect/reconnect cycles
+                      {duplicatesList.length > 0 && (
+                        <span className="block mt-1 text-xs text-gray-500">
+                          Found on {duplicatesList.length} device{duplicatesList.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
                     </p>
 
                     <div className="flex gap-2">
@@ -1202,10 +1212,10 @@ export default function AdminCleanupPage() {
                       </button>
                       <button
                         onClick={handleDeleteDuplicates}
-                        disabled={isDeletingDuplicates || duplicatesList.length === 0}
+                        disabled={isDeletingDuplicates || totalDuplicateAccounts === 0}
                         className="px-4 py-2 bg-red-700 text-white text-sm font-medium rounded-lg hover:bg-red-800 disabled:opacity-50 transition-colors"
                       >
-                        {isDeletingDuplicates ? '...' : `Delete`}
+                        {isDeletingDuplicates ? '...' : `Delete ${totalDuplicateAccounts}`}
                       </button>
                     </div>
                   </div>

@@ -14,6 +14,7 @@ import {
   listenForPairingApproval,
   PairingSession,
 } from '@/lib/firebase'
+import { getDeviceId } from '@/lib/deviceId'
 
 export default function PairingScreen() {
   const router = useRouter()
@@ -195,9 +196,11 @@ export default function PairingScreen() {
               {pairingSession?.qrPayload && (
                 <div
                   id="qr-code-section"
-                  className="bg-white p-4 rounded-xl inline-block mb-4 shadow-inner border border-gray-200"
+                  className="bg-white p-5 rounded-xl inline-block mb-4 shadow-inner border border-gray-200"
                 >
-                  <QRCodeSVG value={pairingSession.qrPayload} size={180} level="M" includeMargin={false} />
+                  {/* Larger QR (220px) with high error correction for better scanning */}
+                  <QRCodeSVG value={pairingSession.qrPayload} size={220} level="H" includeMargin={true} />
+                  <p className="text-xs text-green-600 mt-2 font-medium">Ready to scan</p>
                 </div>
               )}
 

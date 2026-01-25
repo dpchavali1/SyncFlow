@@ -112,6 +112,11 @@ fun DesktopIntegrationScreen(
     var isGeneratingCode by remember { mutableStateOf(false) }
     var pendingPairingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+    // Recovery code entry states
+    var showRecoveryCodeEntry by remember { mutableStateOf(false) }
+    var enteredRecoveryCode by remember { mutableStateOf("") }
+    var isRecoveringAccount by remember { mutableStateOf(false) }
+    var recoveryError by remember { mutableStateOf<String?>(null) }
 
     // Function to check if recovery is needed before pairing
     fun checkRecoveryBeforePairing(onProceed: () -> Unit) {
@@ -660,59 +665,6 @@ fun DesktopIntegrationScreen(
                 )
             }
 
-            // Manual Sync Button (for when data isn't showing on Mac/Web)
-            if (pairedDevices.isNotEmpty()) {
-                item {
-                    var isSyncing by remember { mutableStateOf(false) }
-                    var syncMessage by remember { mutableStateOf<String?>(null) }
-
-                    OutlinedButton(
-                        onClick = {
-                            if (isSyncing) return@OutlinedButton
-                            isSyncing = true
-                            syncMessage = null
-                            scope.launch {
-                                try {
-                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered")
-                                    // Sync call history (contacts are slow due to photos)
-                                    syncInitialCallHistory()
-                                    syncMessage = "Call history synced!"
-                                } catch (e: Exception) {
-                                    android.util.Log.e("DesktopIntegrationScreen", "Sync failed", e)
-                                    syncMessage = "Failed: ${e.message}"
-                                } finally {
-                                    isSyncing = false
-                                }
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isSyncing
-                    ) {
-                        if (isSyncing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Syncing...")
-                        } else {
-                            Icon(Icons.Default.Sync, "Sync")
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Sync Call History")
-                        }
-                    }
-
-                    syncMessage?.let { msg ->
-                        Text(
-                            text = msg,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (msg.startsWith("Sync complete")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
-                }
-            }
-
             // Error Message
             errorMessage?.let { error ->
                 item {
@@ -769,30 +721,6 @@ fun DesktopIntegrationScreen(
                                 )
                             } else {
                                 Icon(Icons.Default.Refresh, "Refresh")
-                            }
-                        }
-                        // Sync button (only if devices exist)
-                        if (pairedDevices.isNotEmpty()) {
-                            OutlinedButton(
-                                onClick = {
-                                    scope.launch {
-                                        try {
-                                            isLoading = true
-                                            unifiedIdentityManager.triggerInitialMessageSync()
-                                            successMessage = "Initial message sync triggered for all devices"
-                                            showSuccessDialog = true
-                                        } catch (e: Exception) {
-                                            errorMessage = "Failed to trigger initial sync: ${e.message}"
-                                        } finally {
-                                            isLoading = false
-                                        }
-                                    }
-                                },
-                                enabled = !isLoading
-                            ) {
-                                Icon(Icons.Default.Sync, "Sync Messages")
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Sync")
                             }
                         }
                     }
@@ -1372,10 +1300,54 @@ fun DesktopIntegrationScreen(
                     modifier = Modifier.size(48.dp)
                 )
             },
-            title = { Text("Save Your Recovery Code") },
+            title = { Text(if (showRecoveryCodeEntry) "Enter Recovery Code" else "Save Your Recovery Code") },
             text = {
                 Column {
-                    if (generatedRecoveryCode == null && !isGeneratingCode) {
+                    if (showRecoveryCodeEntry) {
+                        // Recovery code entry mode
+                        Text(
+                            text = "Enter your recovery code to restore your account:",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedTextField(
+                            value = enteredRecoveryCode,
+                            onValueChange = {
+                                enteredRecoveryCode = it.uppercase().filter { c -> c.isLetterOrDigit() || c == '-' }
+                                recoveryError = null
+                            },
+                            label = { Text("Recovery Code") },
+                            placeholder = { Text("SYNC-XXXX-XXXX-XXXX") },
+                            singleLine = true,
+                            enabled = !isRecoveringAccount,
+                            isError = recoveryError != null,
+                            modifier = Modifier.fillMaxWidth(),
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                letterSpacing = 1.sp
+                            )
+                        )
+                        if (recoveryError != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = recoveryError!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        if (isRecoveringAccount) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Recovering account...")
+                            }
+                        }
+                    } else if (generatedRecoveryCode == null && !isGeneratingCode) {
                         Text(
                             text = "Before pairing with your Mac or Web app, we recommend saving a recovery code.",
                             style = MaterialTheme.typography.bodyMedium
@@ -1473,7 +1445,35 @@ fun DesktopIntegrationScreen(
                 }
             },
             confirmButton = {
-                if (generatedRecoveryCode == null && !isGeneratingCode) {
+                if (showRecoveryCodeEntry) {
+                    // Recovery mode - show "Recover Account" button
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                isRecoveringAccount = true
+                                recoveryError = null
+                                val result = recoveryManager.recoverWithCode(enteredRecoveryCode.trim())
+                                result.onSuccess { userId ->
+                                    successMessage = "Account recovered successfully!"
+                                    showRecoverySetupDialog = false
+                                    showRecoveryCodeEntry = false
+                                    enteredRecoveryCode = ""
+                                    // Proceed with pairing
+                                    pendingPairingAction?.invoke()
+                                    pendingPairingAction = null
+                                }.onFailure { error ->
+                                    recoveryError = error.message ?: "Recovery failed"
+                                }
+                                isRecoveringAccount = false
+                            }
+                        },
+                        enabled = enteredRecoveryCode.length >= 12 && !isRecoveringAccount
+                    ) {
+                        Icon(Icons.Default.Restore, "Recover", modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Recover Account")
+                    }
+                } else if (generatedRecoveryCode == null && !isGeneratingCode) {
                     // Show "Generate Code" button
                     Button(
                         onClick = {
@@ -1513,33 +1513,58 @@ fun DesktopIntegrationScreen(
                 }
             },
             dismissButton = {
-                if (!isGeneratingCode) {
+                if (showRecoveryCodeEntry) {
+                    // Back button in recovery mode
                     TextButton(
                         onClick = {
-                            if (generatedRecoveryCode == null) {
-                                // User is skipping recovery setup
-                                scope.launch {
-                                    recoveryManager.skipSetup()
-                                    showRecoverySetupDialog = false
-                                    // Proceed with pairing anyway
-                                    pendingPairingAction?.invoke()
-                                    pendingPairingAction = null
-                                }
-                            } else {
-                                // User already generated code, just cancel
-                                showRecoverySetupDialog = false
-                                pendingPairingAction = null
-                                generatedRecoveryCode = null
-                            }
-                        }
+                            showRecoveryCodeEntry = false
+                            enteredRecoveryCode = ""
+                            recoveryError = null
+                        },
+                        enabled = !isRecoveringAccount
                     ) {
-                        Text(
-                            if (generatedRecoveryCode == null) "Skip (Not Recommended)" else "Cancel",
-                            color = if (generatedRecoveryCode == null)
-                                MaterialTheme.colorScheme.error
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text("Back")
+                    }
+                } else if (!isGeneratingCode) {
+                    Row {
+                        // "I have a code" button
+                        if (generatedRecoveryCode == null) {
+                            TextButton(
+                                onClick = {
+                                    showRecoveryCodeEntry = true
+                                }
+                            ) {
+                                Text("I have a code")
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        TextButton(
+                            onClick = {
+                                if (generatedRecoveryCode == null) {
+                                    // User is skipping recovery setup
+                                    scope.launch {
+                                        recoveryManager.skipSetup()
+                                        showRecoverySetupDialog = false
+                                        // Proceed with pairing anyway
+                                        pendingPairingAction?.invoke()
+                                        pendingPairingAction = null
+                                    }
+                                } else {
+                                    // User already generated code, just cancel
+                                    showRecoverySetupDialog = false
+                                    pendingPairingAction = null
+                                    generatedRecoveryCode = null
+                                }
+                            }
+                        ) {
+                            Text(
+                                text = if (generatedRecoveryCode == null) "Skip" else "Cancel",
+                                color = if (generatedRecoveryCode == null)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }

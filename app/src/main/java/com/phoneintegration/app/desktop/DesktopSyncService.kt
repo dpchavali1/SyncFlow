@@ -64,23 +64,52 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Get current user ID (restored to working system)
+     * Get current user ID.
+     *
+     * Uses the simple approach of returning currentUser.uid directly.
+     * Validation is only done during pairing to avoid hitting Firebase rate limits.
+     *
+     * NOTE: ensureDeviceKeysPublished() is NOT called here anymore because it can hang
+     * due to Android Keystore operations. It should only be called when needed for E2EE,
+     * not on every user ID request.
      */
     suspend fun getCurrentUserId(): String {
-        // First try to get from AuthManager (real user)
+        // First, check for recovered user ID from RecoveryCodeManager
+        val recoveryManager = com.phoneintegration.app.auth.RecoveryCodeManager.getInstance(context)
+        val recoveredUserId = recoveryManager.getEffectiveUserId()
+        if (recoveredUserId != null) {
+            Log.d(TAG, "getCurrentUserId - Using recovered/effective user: $recoveredUserId")
+            // Ensure we're signed in (anonymous is fine, we just need auth for Firebase access)
+            if (FirebaseAuth.getInstance().currentUser == null) {
+                Log.d(TAG, "getCurrentUserId - Signing in anonymously for Firebase access")
+                FirebaseAuth.getInstance().signInAnonymously().await()
+            }
+            return recoveredUserId
+        }
+
+        val currentUser = FirebaseAuth.getInstance().currentUser
+
+        // If we have a current user, use their UID directly
+        if (currentUser != null) {
+            Log.d(TAG, "getCurrentUserId - Using current user: ${currentUser.uid}")
+            return currentUser.uid
+        }
+
+        // Fallback: try AuthManager
         authManager.getCurrentUserId()?.let { userId ->
-            e2eeManager.ensureDeviceKeysPublished()
+            Log.d(TAG, "getCurrentUserId - Using AuthManager user: $userId")
             return userId
         }
 
-        // If no real user, create anonymous user (restored working behavior)
+        // Last resort: sign in anonymously
+        Log.d(TAG, "getCurrentUserId - No authenticated user found, creating anonymous user")
         val result = authManager.signInAnonymously()
-        return result.getOrNull() ?: run {
+        val userId = result.getOrNull() ?: run {
             Log.e(TAG, "Error signing in anonymously")
             throw Exception("Authentication failed")
-        }.also {
-            e2eeManager.ensureDeviceKeysPublished()
         }
+        Log.d(TAG, "getCurrentUserId - Signed in anonymously as: $userId")
+        return userId
     }
 
     /**
@@ -197,7 +226,7 @@ class DesktopSyncService(context: Context) {
             }
 
             val userId = getCurrentUserId()
-            e2eeManager.ensureDeviceKeysPublished()
+            // E2EE keys are initialized in init{}, no need to call ensureDeviceKeysPublished() here
             val messageKey = getFirebaseMessageKey(message)
             val messageRef = database.reference
                 .child(USERS_PATH)
@@ -275,10 +304,7 @@ class DesktopSyncService(context: Context) {
                 messageData["contactName"] = it
             }
 
-            // Add SIM subscription ID if available
-            message.subId?.let {
-                messageData["subId"] = it
-            }
+            Log.d(TAG, "Syncing message: id=${message.id}, type=${message.type}, address=$conversationAddress")
 
             // Handle MMS attachments
             if (message.isMms) {
@@ -301,10 +327,33 @@ class DesktopSyncService(context: Context) {
                 }
             }
 
-            // Use retry logic for Firebase write operations
-            RetryUtils.withFirebaseRetry("syncMessage ${message.id}") {
-                messageRef.setValue(messageData).await()
+            // Add subId if available
+            message.subId?.let {
+                messageData["subId"] = it
             }
+
+            // Write to Firebase via Cloud Function (prevents OOM from Firebase auto-sync)
+            try {
+                val result = functions
+                    .getHttpsCallable("syncMessage")
+                    .call(mapOf(
+                        "messageId" to messageKey,
+                        "message" to messageData
+                    ))
+                    .await()
+
+                val data = result.data as? Map<*, *>
+                val success = data?.get("success") as? Boolean ?: false
+                if (success) {
+                    Log.d(TAG, "Successfully synced message via Cloud Function: ${message.id}")
+                } else {
+                    Log.w(TAG, "Cloud Function returned success=false for message: ${message.id}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing message via Cloud Function: ${e.message}", e)
+                // Don't throw - message sync failure shouldn't crash the app
+            }
+
             Log.d(
                 TAG,
                 "Message synced successfully: $messageKey with address: $conversationAddress (encrypted: ${messageData["encrypted"] == true}, isMms: ${message.isMms})"
@@ -917,61 +966,34 @@ class DesktopSyncService(context: Context) {
 
     /**
      * Get paired devices
+     *
+     * Uses NonCancellable to prevent the query from being cancelled when
+     * the user navigates away from the screen. This ensures the query completes
+     * and returns actual data instead of empty list due to cancellation.
      */
-    suspend fun getPairedDevices(): List<PairedDevice> {
+    /**
+     * Get paired devices using Cloud Function (no direct Firebase reads to avoid OOM)
+     *
+     * IMPORTANT: Android should NEVER read directly from Firebase Realtime Database
+     * because it tries to sync ALL data and causes OOM with large datasets.
+     * Always use Cloud Functions for reads - they run on server and can paginate.
+     */
+    suspend fun getPairedDevices(): List<PairedDevice> = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
         try {
-            val userId = getCurrentUserId()
-            val devicesRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(DEVICES_PATH)
+            Log.d(TAG, "=== GET PAIRED DEVICES (via Cloud Function) ===")
 
-            val snapshot = devicesRef.get().await()
-            val devices = mutableListOf<PairedDevice>()
-
-            snapshot.children.forEach { deviceSnapshot ->
-                val platform = deviceSnapshot.child("platform").value as? String ?: "web"
-
-                // Skip Android devices - those are for presence/calling, not desktop pairing
-                if (platform == "android") {
-                    return@forEach
-                }
-
-                // Check if device has basic pairing information
-                val hasBasicInfo = deviceSnapshot.child("name").exists() &&
-                                   deviceSnapshot.child("platform").exists()
-
-                // Include devices that have basic info (be more permissive than strict isPaired check)
-                if (hasBasicInfo) {
-                    // Get sync status if available
-                    val syncStatusSnapshot = deviceSnapshot.child("syncStatus")
-                    val syncStatus = if (syncStatusSnapshot.exists()) {
-                        SyncStatus(
-                            status = syncStatusSnapshot.child("status").value as? String ?: "idle",
-                            syncedMessages = syncStatusSnapshot.child("syncedMessages").value as? Int ?: 0,
-                            totalMessages = syncStatusSnapshot.child("totalMessages").value as? Int ?: 0,
-                            lastSyncAttempt = syncStatusSnapshot.child("lastSyncAttempt").value as? Long ?: 0L,
-                            lastSyncCompleted = syncStatusSnapshot.child("lastSyncCompleted").value as? Long,
-                            errorMessage = syncStatusSnapshot.child("errorMessage").value as? String
-                        )
-                    } else null
-
-                    val device = PairedDevice(
-                        id = deviceSnapshot.key ?: return@forEach,
-                        name = deviceSnapshot.child("name").value as? String ?: "Unknown",
-                        platform = platform,
-                        lastSeen = deviceSnapshot.child("lastSeen").value as? Long ?: 0L,
-                        isPaired = deviceSnapshot.child("isPaired").value as? Boolean ?: true, // Default to true for existing devices
-                        syncStatus = syncStatus
-                    )
-                    devices.add(device)
-                }
+            // Use getDeviceInfoV2 Cloud Function which already returns devices list
+            val deviceInfo = getDeviceInfo()
+            if (deviceInfo == null) {
+                Log.w(TAG, "getDeviceInfo returned null, returning empty list")
+                return@withContext emptyList()
             }
 
-            return devices
+            Log.d(TAG, "=== RESULT: Found ${deviceInfo.devices.size} paired devices ===")
+            deviceInfo.devices
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting paired devices", e)
-            return emptyList()
+            Log.e(TAG, "ERROR getting paired devices: ${e.message}", e)
+            emptyList()
         }
     }
 
@@ -1117,9 +1139,116 @@ class DesktopSyncService(context: Context) {
     /**
      * Complete pairing after scanning QR code from Web/macOS
      * Called when Android user approves the pairing request
+     * Supports both V1 and V2 pairing protocols
      */
     suspend fun completePairing(token: String, approved: Boolean): CompletePairingResult {
+        Log.d(TAG, "=== COMPLETE PAIRING START ===")
+        Log.d(TAG, "Token: ${token.take(8)}..., Approved: $approved")
+
+        // Ensure user is authenticated
+        var currentUser = FirebaseAuth.getInstance().currentUser
+        if (currentUser == null) {
+            Log.d(TAG, "No authenticated user, signing in anonymously...")
+            try {
+                val authResult = FirebaseAuth.getInstance().signInAnonymously().await()
+                currentUser = authResult.user
+                Log.d(TAG, "Signed in anonymously as: ${currentUser?.uid}")
+            } catch (authError: Exception) {
+                Log.e(TAG, "Failed to sign in anonymously", authError)
+                return CompletePairingResult.Error("Authentication failed: ${authError.message}")
+            }
+        } else {
+            Log.d(TAG, "Using current user: ${currentUser.uid}")
+        }
+
+        // Try V2 first
+        return try {
+            Log.d(TAG, "Trying V2 pairing...")
+            val result = completePairingV2(token, approved)
+            Log.d(TAG, "V2 pairing result: $result")
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "V2 pairing FAILED with exception: ${e.message}", e)
+            Log.d(TAG, "Falling back to V1 pairing...")
+            try {
+                val v1Result = completePairingV1(token, approved)
+                Log.d(TAG, "V1 pairing result: $v1Result")
+                v1Result
+            } catch (v1Error: Exception) {
+                Log.e(TAG, "V1 pairing also FAILED: ${v1Error.message}", v1Error)
+                CompletePairingResult.Error("Pairing failed: ${e.message ?: v1Error.message}")
+            }
+        }
+    }
+
+    /**
+     * V2 Pairing Completion - Uses approvePairingV2 Cloud Function
+     * Supports device limits and persistent device IDs
+     */
+    private suspend fun completePairingV2(token: String, approved: Boolean): CompletePairingResult {
+        Log.d(TAG, "Completing V2 pairing for token: ${token.take(8)}..., approved: $approved")
+
+        val result = functions
+            .getHttpsCallable("approvePairingV2")
+            .call(mapOf(
+                "token" to token,
+                "approved" to approved
+            ))
+            .await()
+
+        Log.d(TAG, "V2 Pairing completion result: $result")
+
+        val data = result.data as? Map<*, *>
+            ?: return CompletePairingResult.Error("Invalid response from server")
+
+        val success = data["success"] as? Boolean ?: false
+        val status = data["status"] as? String
+        val error = data["error"] as? String
+
+        return when {
+            // Device limit reached - return special error with upgrade info
+            error == "device_limit" -> {
+                val currentDevices = (data["currentDevices"] as? Number)?.toInt() ?: 0
+                val limit = (data["limit"] as? Number)?.toInt() ?: 3
+                val message = data["message"] as? String
+                    ?: "Device limit reached ($currentDevices/$limit). Upgrade to Pro for unlimited devices."
+                Log.w(TAG, "Device limit reached: $message")
+                CompletePairingResult.Error(message)
+            }
+
+            success && status == "approved" -> {
+                val deviceId = data["deviceId"] as? String
+                val userId = data["userId"] as? String
+                val isRePairing = data["isRePairing"] as? Boolean ?: false
+
+                if (isRePairing) {
+                    Log.d(TAG, "V2 Re-pairing approved. Device ID: $deviceId (already existed)")
+                } else {
+                    Log.d(TAG, "V2 Pairing approved. Device ID: $deviceId, UserID: $userId")
+                }
+
+                CompletePairingResult.Approved(deviceId)
+            }
+
+            success && status == "rejected" -> {
+                Log.d(TAG, "V2 Pairing rejected by user")
+                CompletePairingResult.Rejected
+            }
+
+            else -> {
+                val errorMessage = data["message"] as? String ?: "Unexpected status: $status"
+                CompletePairingResult.Error(errorMessage)
+            }
+        }
+    }
+
+    /**
+     * V1 Pairing Completion - Legacy Cloud Function
+     */
+    private suspend fun completePairingV1(token: String, approved: Boolean): CompletePairingResult {
         try {
+            Log.d(TAG, "Completing V1 pairing for token: ${token.take(8)}..., approved: $approved")
+
             val result = functions
                 .getHttpsCallable("completePairing")
                 .call(mapOf(
@@ -1127,6 +1256,8 @@ class DesktopSyncService(context: Context) {
                     "approved" to approved
                 ))
                 .await()
+
+            Log.d(TAG, "V1 Pairing completion result: $result")
 
             val data = result.data as? Map<*, *>
                 ?: return CompletePairingResult.Error("Invalid response from server")
@@ -1137,11 +1268,13 @@ class DesktopSyncService(context: Context) {
             return when {
                 success && status == "approved" -> {
                     val deviceId = data["deviceId"] as? String
-                    Log.d(TAG, "Pairing approved successfully. Device ID: $deviceId")
+                    val userId = data["userId"] as? String
+
+                    Log.d(TAG, "V1 Pairing approved. Device ID: $deviceId, UserID: $userId")
                     CompletePairingResult.Approved(deviceId)
                 }
                 success && status == "rejected" -> {
-                    Log.d(TAG, "Pairing rejected by user")
+                    Log.d(TAG, "V1 Pairing rejected by user")
                     CompletePairingResult.Rejected
                 }
                 else -> {
@@ -1149,8 +1282,86 @@ class DesktopSyncService(context: Context) {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error completing pairing", e)
+            Log.e(TAG, "Error completing V1 pairing", e)
             return CompletePairingResult.Error(e.message ?: "Failed to complete pairing")
+        }
+    }
+
+    /**
+     * Get device info including device count and limits
+     * Uses getDeviceInfoV2 Cloud Function
+     *
+     * Uses NonCancellable to prevent issues when navigating away from screens.
+     */
+    suspend fun getDeviceInfo(): DeviceInfoResult? = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+        try {
+            // Ensure we're signed in before calling cloud function
+            val userId = try {
+                getCurrentUserId()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to get userId for getDeviceInfo: ${e.message}")
+                return@withContext null
+            }
+            Log.d(TAG, "Fetching device info from getDeviceInfoV2 (user: $userId)")
+
+            val result = functions
+                .getHttpsCallable("getDeviceInfoV2")
+                .call(emptyMap<String, Any>())
+                .await()
+
+            val data = result.data as? Map<*, *>
+            if (data == null) {
+                Log.w(TAG, "getDeviceInfoV2 returned null data")
+                return@withContext null
+            }
+
+            val success = data["success"] as? Boolean ?: false
+            if (!success) {
+                Log.w(TAG, "getDeviceInfoV2 returned success=false")
+                return@withContext null
+            }
+
+            val deviceCount = (data["deviceCount"] as? Number)?.toInt() ?: 0
+            val deviceLimit = (data["deviceLimit"] as? Number)?.toInt() ?: 3
+            val plan = data["plan"] as? String ?: "free"
+            val canAddDevice = data["canAddDevice"] as? Boolean ?: (deviceCount < deviceLimit)
+
+            // Parse devices list from Cloud Function response
+            val devicesData = data["devices"] as? List<*> ?: emptyList<Any>()
+            val devices = devicesData.mapNotNull { deviceData ->
+                try {
+                    val device = deviceData as? Map<*, *> ?: return@mapNotNull null
+                    val deviceId = device["deviceId"] as? String ?: return@mapNotNull null
+                    val platform = device["platform"] as? String ?: device["type"] as? String ?: "web"
+
+                    // Skip Android devices - we only want desktop/web devices
+                    if (platform == "android") return@mapNotNull null
+
+                    PairedDevice(
+                        id = deviceId,
+                        name = device["name"] as? String ?: "Unknown Device",
+                        platform = platform,
+                        lastSeen = (device["lastSeen"] as? Number)?.toLong() ?: 0L,
+                        syncStatus = null
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error parsing device: ${e.message}")
+                    null
+                }
+            }
+
+            Log.d(TAG, "Device info: $deviceCount/$deviceLimit devices, plan=$plan, canAdd=$canAddDevice, parsedDevices=${devices.size}")
+
+            DeviceInfoResult(
+                deviceCount = deviceCount,
+                deviceLimit = deviceLimit,
+                plan = plan,
+                canAddDevice = canAddDevice,
+                devices = devices
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching device info", e)
+            null
         }
     }
 
@@ -1430,14 +1641,13 @@ class DesktopSyncService(context: Context) {
 }
 
 /**
- * Data class representing a paired device
+ * Represents a paired device
  */
 data class PairedDevice(
     val id: String,
     val name: String,
     val platform: String,
     val lastSeen: Long,
-    val isPaired: Boolean,
     val syncStatus: SyncStatus? = null
 )
 
@@ -1461,6 +1671,17 @@ sealed class CompletePairingResult {
     data object Rejected : CompletePairingResult()
     data class Error(val message: String) : CompletePairingResult()
 }
+
+/**
+ * Result of getDeviceInfo call
+ */
+data class DeviceInfoResult(
+    val deviceCount: Int,
+    val deviceLimit: Int,
+    val plan: String,
+    val canAddDevice: Boolean,
+    val devices: List<PairedDevice> = emptyList()
+)
 
 /**
  * Data parsed from a pairing QR code

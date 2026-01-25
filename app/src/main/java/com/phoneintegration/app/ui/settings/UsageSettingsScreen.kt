@@ -37,8 +37,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.DataSnapshot
-import com.google.firebase.database.FirebaseDatabase
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
@@ -81,7 +79,6 @@ private sealed class UsageUiState {
 @Composable
 fun UsageSettingsScreen(onBack: () -> Unit) {
     val auth = remember { FirebaseAuth.getInstance() }
-    val database = remember { FirebaseDatabase.getInstance() }
     val scope = rememberCoroutineScope()
     val currentUserId = auth.currentUser?.uid
 
@@ -89,7 +86,9 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
 
     val loadUsage: () -> Unit = {
         scope.launch {
-            val userId = auth.currentUser?.uid
+            val currentUser = auth.currentUser
+            val userId = currentUser?.uid
+
             if (userId.isNullOrBlank()) {
                 state = UsageUiState.Error("Not signed in")
                 return@launch
@@ -97,35 +96,25 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
 
             state = UsageUiState.Loading
             try {
-                // FIRST: Try to load from users/{uid}/usage
-                val snapshot = database.reference
-                    .child("users")
-                    .child(userId)
-                    .child("usage")
-                    .get()
+                // Use Cloud Function for fast loading (avoids Firebase offline mode issues)
+                val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
+                val result = functions
+                    .getHttpsCallable("getUserUsage")
+                    .call(mapOf("userId" to userId))
                     .await()
 
-                // If usage data exists, use it
-                if (snapshot.exists() && snapshot.child("plan").value != null) {
-                    state = UsageUiState.Loaded(parseUsage(snapshot))
-                    return@launch
-                }
+                val data = result.data as? Map<*, *>
+                val success = data?.get("success") as? Boolean ?: false
+                val usageData = data?.get("usage") as? Map<*, *>
 
-                // FALLBACK: Check subscription_records/{uid}/active (persists after user deletion)
-                val subscriptionSnapshot = database.reference
-                    .child("subscription_records")
-                    .child(userId)
-                    .child("active")
-                    .get()
-                    .await()
-
-                // If subscription record exists, use it with empty usage stats
-                if (subscriptionSnapshot.exists()) {
-                    state = UsageUiState.Loaded(parseUsage(snapshot, subscriptionSnapshot))
+                if (success && usageData != null) {
+                    state = UsageUiState.Loaded(parseUsageFromCloud(usageData))
                 } else {
-                    state = UsageUiState.Loaded(parseUsage(snapshot))
+                    // No data - show default trial state
+                    state = UsageUiState.Loaded(defaultUsageSummary())
                 }
             } catch (e: Exception) {
+                android.util.Log.e("UsageSettingsScreen", "Error loading usage: ${e.message}", e)
                 state = UsageUiState.Error(e.message ?: "Failed to load usage")
             }
         }
@@ -305,26 +294,19 @@ private fun UsageBar(label: String, progress: Float) {
     }
 }
 
-private fun parseUsage(snapshot: DataSnapshot, subscriptionSnapshot: DataSnapshot? = null): UsageSummary {
-    // Load plan and expiry data
-    var plan = snapshot.child("plan").getValue(String::class.java)
-    var planExpiresAt = snapshot.child("planExpiresAt").longValue()
+private fun parseUsageFromCloud(data: Map<*, *>): UsageSummary {
+    val plan = data["plan"] as? String
+    val planExpiresAt = (data["planExpiresAt"] as? Number)?.toLong()
+    val trialStartedAt = (data["trialStartedAt"] as? Number)?.toLong()
+    val storageBytes = (data["storageBytes"] as? Number)?.toLong() ?: 0L
+    val lastUpdatedAt = (data["lastUpdatedAt"] as? Number)?.toLong()
 
-    // FALLBACK: If no plan in usage snapshot, check subscription_records
-    if (plan.isNullOrBlank() && subscriptionSnapshot != null && subscriptionSnapshot.exists()) {
-        plan = subscriptionSnapshot.child("plan").getValue(String::class.java)
-        planExpiresAt = subscriptionSnapshot.child("planExpiresAt").longValue()
-    }
-
-    val trialStartedAt = snapshot.child("trialStartedAt").longValue()
-    val storageBytes = snapshot.child("storageBytes").longValue() ?: 0L
-    val lastUpdatedAt = snapshot.child("lastUpdatedAt").longValue()
-
+    val monthly = data["monthly"] as? Map<*, *>
     val periodKey = currentPeriodKey()
-    val monthlySnapshot = snapshot.child("monthly").child(periodKey)
-    val monthlyUploadBytes = monthlySnapshot.child("uploadBytes").longValue() ?: 0L
-    val monthlyMmsBytes = monthlySnapshot.child("mmsBytes").longValue() ?: 0L
-    val monthlyFileBytes = monthlySnapshot.child("fileBytes").longValue() ?: 0L
+    val monthlyData = monthly?.get(periodKey) as? Map<*, *>
+    val monthlyUploadBytes = (monthlyData?.get("uploadBytes") as? Number)?.toLong() ?: 0L
+    val monthlyMmsBytes = (monthlyData?.get("mmsBytes") as? Number)?.toLong() ?: 0L
+    val monthlyFileBytes = (monthlyData?.get("fileBytes") as? Number)?.toLong() ?: 0L
 
     val now = System.currentTimeMillis()
     val isPaid = isPaidPlan(plan, planExpiresAt, now)
@@ -342,15 +324,18 @@ private fun parseUsage(snapshot: DataSnapshot, subscriptionSnapshot: DataSnapsho
     )
 }
 
-private fun DataSnapshot.longValue(): Long? {
-    val value = this.value ?: return null
-    return when (value) {
-        is Long -> value
-        is Double -> value.toLong()
-        is Int -> value.toLong()
-        is String -> value.toLongOrNull()
-        else -> null
-    }
+private fun defaultUsageSummary(): UsageSummary {
+    return UsageSummary(
+        plan = null,
+        planExpiresAt = null,
+        trialStartedAt = null,
+        storageBytes = 0L,
+        monthlyUploadBytes = 0L,
+        monthlyMmsBytes = 0L,
+        monthlyFileBytes = 0L,
+        lastUpdatedAt = null,
+        isPaid = false
+    )
 }
 
 private fun planLabel(plan: String?, isPaid: Boolean): String {

@@ -588,28 +588,36 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
 
     /**
      * Update device online/offline statuses
+     * Uses Cloud Function for fast loading (avoids Firebase offline mode delays)
      */
     private suspend fun updateDeviceStatuses() {
         try {
             val userId = getUnifiedUserId() ?: return
-            val devicesRef = database.getReference("users").child(userId).child("devices")
-            val snapshot = devicesRef.get().await()
 
-            if (snapshot.exists()) {
+            val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
+            val result = functions
+                .getHttpsCallable("getDevices")
+                .call(mapOf("userId" to userId))
+                .await()
+
+            val data = result.data as? Map<*, *>
+            val success = data?.get("success") as? Boolean ?: false
+            val devicesData = data?.get("devices") as? Map<*, *>
+
+            if (success && devicesData != null) {
                 val devices = mutableMapOf<String, DeviceInfo>()
-                val deviceData = snapshot.value as? Map<*, *>
 
-                deviceData?.forEach { (deviceId, data) ->
-                    val deviceMap = data as? Map<*, *>
-                    if (deviceMap != null) {
+                devicesData.forEach { (deviceId, deviceData) ->
+                    val deviceMap = deviceData as? Map<*, *>
+                    if (deviceMap != null && deviceId is String) {
                         val deviceInfo = DeviceInfo(
-                            id = deviceId as String,
+                            id = deviceId,
                             name = deviceMap["name"] as? String ?: "Unknown",
                             type = deviceMap["type"] as? String ?: "unknown",
                             platform = deviceMap["platform"] as? String ?: "unknown",
-                            lastSeen = deviceMap["lastSeen"] as? Long ?: 0L,
+                            lastSeen = (deviceMap["lastSeen"] as? Number)?.toLong() ?: 0L,
                             isOnline = deviceMap["isOnline"] as? Boolean ?: false,
-                            registeredAt = deviceMap["registeredAt"] as? Long ?: 0L
+                            registeredAt = (deviceMap["registeredAt"] as? Number)?.toLong() ?: 0L
                         )
                         devices[deviceId] = deviceInfo
                     }

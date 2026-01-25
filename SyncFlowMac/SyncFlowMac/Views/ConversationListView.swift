@@ -424,6 +424,41 @@ struct ConversationListView: View {
                                 }
                             }
                         }
+
+                        // Load More button for pagination
+                        if messageStore.canLoadMore {
+                            VStack(spacing: 8) {
+                                Divider()
+                                    .padding(.vertical, 8)
+
+                                if messageStore.isLoadingMore {
+                                    HStack {
+                                        ProgressView()
+                                            .scaleEffect(0.8)
+                                        Text("Loading older messages...")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .padding()
+                                } else {
+                                    Button(action: {
+                                        messageStore.loadMoreMessages()
+                                    }) {
+                                        HStack {
+                                            Image(systemName: "arrow.clockwise")
+                                            Text("Load More Conversations (30 days)")
+                                        }
+                                        .font(.callout)
+                                        .padding(.vertical, 10)
+                                        .padding(.horizontal, 16)
+                                        .background(Color.accentColor.opacity(0.1))
+                                        .cornerRadius(10)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding()
+                                }
+                            }
+                        }
                     }
                     .padding(.bottom, 6)
                 }

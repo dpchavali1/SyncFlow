@@ -1,8 +1,11 @@
 package com.phoneintegration.app.desktop
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.provider.CallLog
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.google.firebase.database.ServerValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -66,6 +69,14 @@ class CallHistorySyncService(private val context: Context) {
      */
     suspend fun getCallHistory(limit: Int = MAX_CALLS_TO_SYNC): List<CallLogEntry> = withContext(Dispatchers.IO) {
         val callLogs = mutableListOf<CallLogEntry>()
+
+        // Permission guard
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG)
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "READ_CALL_LOG not granted; skipping call history sync")
+            return@withContext emptyList()
+        }
+
         val uri = CallLog.Calls.CONTENT_URI
 
         val projection = arrayOf(

@@ -3,12 +3,10 @@
 import { useState, useEffect } from 'react'
 import {
   Contact,
-  DesktopContact,
   listenToContacts,
-  listenToDesktopContacts,
-  createDesktopContact,
-  updateDesktopContact,
-  deleteDesktopContact,
+  createContact,
+  updateContact,
+  deleteContact,
 } from '@/lib/firebase'
 
 interface ContactsListProps {
@@ -20,12 +18,11 @@ const PHONE_TYPES = ['Mobile', 'Home', 'Work', 'Main', 'Other']
 
 export default function ContactsList({ userId, onSelectContact }: ContactsListProps) {
   const [contacts, setContacts] = useState<Contact[]>([])
-  const [desktopContacts, setDesktopContacts] = useState<DesktopContact[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [editingContact, setEditingContact] = useState<DesktopContact | null>(null)
-  const [deleteConfirmContact, setDeleteConfirmContact] = useState<DesktopContact | null>(null)
+  const [editingContact, setEditingContact] = useState<Contact | null>(null)
+  const [deleteConfirmContact, setDeleteConfirmContact] = useState<Contact | null>(null)
 
   // Form state
   const [formName, setFormName] = useState('')
@@ -38,33 +35,36 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
   useEffect(() => {
     if (!userId) return
 
-    // Listen to Android contacts
     const unsubContacts = listenToContacts(userId, (androidContacts) => {
       setContacts(androidContacts)
       setIsLoading(false)
     })
 
-    // Listen to desktop contacts
-    const unsubDesktop = listenToDesktopContacts(userId, (webContacts) => {
-      setDesktopContacts(webContacts)
-    })
-
     return () => {
       unsubContacts()
-      unsubDesktop()
     }
   }, [userId])
 
-  const filteredContacts = contacts.filter(
-    (c) =>
-      c.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      c.phoneNumber.includes(searchQuery)
+  const matchesSearch = (contact: Contact) => {
+    const query = searchQuery.toLowerCase()
+    if (!query) return true
+    if (contact.displayName.toLowerCase().includes(query)) return true
+    const phone = contact.phoneNumber ?? ''
+    if (phone.toLowerCase().includes(query)) return true
+    const normalized = contact.normalizedNumber ?? phone
+    if (normalized.includes(query)) return true
+    const digits = query.replace(/\D/g, '')
+    if (!digits) return false
+    const numberDigits = (normalized || phone).replace(/\D/g, '')
+    return numberDigits.includes(digits)
+  }
+
+  const filteredPendingContacts = contacts.filter(
+    (c) => c.sync.pendingAndroidSync && matchesSearch(c)
   )
 
-  const filteredDesktopContacts = desktopContacts.filter(
-    (c) =>
-      c.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      c.phoneNumber.includes(searchQuery)
+  const filteredSyncedContacts = contacts.filter(
+    (c) => !c.sync.pendingAndroidSync && matchesSearch(c)
   )
 
   const getInitials = (name: string) => {
@@ -97,7 +97,7 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
     setShowCreateModal(true)
   }
 
-  const openEditModal = (contact: DesktopContact) => {
+  const openEditModal = (contact: Contact) => {
     setFormName(contact.displayName)
     setFormPhone(contact.phoneNumber)
     setFormPhoneType(contact.phoneType)
@@ -113,7 +113,7 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
     setIsSaving(true)
     try {
       if (editingContact) {
-        await updateDesktopContact(
+        await updateContact(
           userId,
           editingContact.id,
           formName.trim(),
@@ -123,7 +123,7 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
           formNotes.trim() || undefined
         )
       } else {
-        await createDesktopContact(
+        await createContact(
           userId,
           formName.trim(),
           formPhone.trim(),
@@ -142,9 +142,9 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
     }
   }
 
-  const handleDelete = async (contact: DesktopContact) => {
+  const handleDelete = async (contact: Contact) => {
     try {
-      await deleteDesktopContact(userId, contact.id)
+      await deleteContact(userId, contact.id)
       setDeleteConfirmContact(null)
     } catch (error) {
       console.error('Error deleting contact:', error)
@@ -205,7 +205,7 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
           <div className="flex items-center justify-center h-full">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
           </div>
-        ) : filteredContacts.length === 0 && filteredDesktopContacts.length === 0 ? (
+        ) : filteredSyncedContacts.length === 0 && filteredPendingContacts.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-500 dark:text-gray-400">
             <svg className="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
@@ -242,185 +242,95 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
           </div>
         ) : (
           <div className="divide-y divide-gray-200 dark:divide-gray-700">
-            {/* Desktop Contacts Section */}
-            {filteredDesktopContacts.length > 0 && (
-              <>
-                <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/20 sticky top-0 z-10">
-                  <div className="flex items-center gap-2">
-                    <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                    </svg>
-                    <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
-                      Created on Web ({filteredDesktopContacts.length})
-                    </span>
-                  </div>
+            {filteredPendingContacts.length > 0 && (
+              <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/20 sticky top-0 z-10">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                  <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                    Pending web edits ({filteredPendingContacts.length})
+                  </span>
                 </div>
-                {filteredDesktopContacts.map((contact) => (
-                  <div
-                    key={contact.id}
-                    className="flex items-center gap-4 p-4 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors group"
-                  >
-                    {/* Avatar */}
-                    <div className="w-12 h-12 rounded-full bg-blue-100 dark:bg-blue-900 flex items-center justify-center">
-                      <span className="text-blue-600 dark:text-blue-300 font-semibold">
-                        {getInitials(contact.displayName)}
-                      </span>
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="font-medium text-gray-900 dark:text-white truncate">
-                          {contact.displayName}
-                        </p>
-                        {contact.syncedToAndroid ? (
-                          <span className="text-green-500" title="Synced to Android">
-                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                              <path
-                                fillRule="evenodd"
-                                d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                                clipRule="evenodd"
-                              />
-                            </svg>
-                          </span>
-                        ) : (
-                          <span className="text-orange-500" title="Pending sync">
-                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <path
-                                stroke="currentColor"
-                                strokeWidth={2}
-                                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                              />
-                            </svg>
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        {formatPhoneNumber(contact.phoneNumber)} • {contact.phoneType}
-                        {contact.email && ` • ${contact.email}`}
-                      </p>
-                    </div>
-
-                    {/* Actions */}
-                    <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button
-                        onClick={() => openEditModal(contact)}
-                        className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                        title="Edit"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                          />
-                        </svg>
-                      </button>
-                      <button
-                        onClick={() => setDeleteConfirmContact(contact)}
-                        className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                        title="Delete"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                          />
-                        </svg>
-                      </button>
-                      {onSelectContact && (
-                        <button
-                          onClick={() => onSelectContact(contact.phoneNumber, contact.displayName)}
-                          className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-                          title="Message"
-                        >
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-                            />
-                          </svg>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </>
+              </div>
             )}
-
-            {/* Android Contacts Section */}
-            {filteredContacts.length > 0 && (
-              <>
-                <div className="px-4 py-2 bg-green-50 dark:bg-green-900/20 sticky top-0 z-10">
-                  <div className="flex items-center gap-2">
-                    <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                    </svg>
-                    <span className="text-sm font-medium text-green-700 dark:text-green-300">
-                      From Android ({filteredContacts.length})
-                    </span>
-                  </div>
+            {filteredPendingContacts.map((contact) => (
+              <div
+                key={contact.id}
+                className="flex items-center gap-4 p-4 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors group"
+              >
+                <div className="w-12 h-12 rounded-full bg-blue-100 dark:bg-blue-900 flex items-center justify-center">
+                  <span className="text-blue-600 dark:text-blue-300 font-semibold">
+                    {getInitials(contact.displayName)}
+                  </span>
                 </div>
-                {filteredContacts.map((contact) => (
-                  <div
-                    key={contact.id}
-                    className="flex items-center gap-4 p-4 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors group cursor-pointer"
-                    onClick={() => onSelectContact?.(contact.phoneNumber, contact.displayName)}
-                  >
-                    {/* Avatar */}
-                    <div className="w-12 h-12 rounded-full bg-green-100 dark:bg-green-900 flex items-center justify-center overflow-hidden">
-                      {contact.photoBase64 ? (
-                        <img
-                          src={`data:image/jpeg;base64,${contact.photoBase64}`}
-                          alt={contact.displayName}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <span className="text-green-600 dark:text-green-300 font-semibold">
-                          {getInitials(contact.displayName)}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-900 dark:text-white truncate">
-                        {contact.displayName}
-                      </p>
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        {formatPhoneNumber(contact.phoneNumber)} • {contact.phoneType}
-                      </p>
-                    </div>
-
-                    {/* Message button */}
-                    {onSelectContact && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onSelectContact(contact.phoneNumber, contact.displayName)
-                        }}
-                        className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                        title="Message"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-                          />
-                        </svg>
-                      </button>
-                    )}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-gray-900 dark:text-white truncate">
+                      {contact.displayName}
+                    </p>
+                    <span className="text-xs text-orange-500">Pending</span>
                   </div>
-                ))}
-              </>
-            )}
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    {formatPhoneNumber(contact.phoneNumber || '')} • {contact.phoneType}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button
+                    onClick={() => openEditModal(contact)}
+                    className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => setDeleteConfirmContact(contact)}
+                    className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+            {filteredSyncedContacts.map((contact) => (
+              <div
+                key={contact.id}
+                className="flex items-center gap-4 p-4 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors group cursor-pointer"
+                onClick={() => onSelectContact?.(contact.phoneNumber || '', contact.displayName)}
+              >
+                <div className="w-12 h-12 rounded-full bg-green-100 dark:bg-green-900 flex items-center justify-center overflow-hidden">
+                  {contact.photo?.thumbnailBase64 ? (
+                    <img
+                      src={`data:image/jpeg;base64,${contact.photo.thumbnailBase64}`}
+                      alt={contact.displayName}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <span className="text-green-600 dark:text-green-300 font-semibold">
+                      {getInitials(contact.displayName)}
+                    </span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-gray-900 dark:text-white truncate">
+                    {contact.displayName}
+                  </p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    {formatPhoneNumber(contact.phoneNumber || '')} • {contact.phoneType}
+                  </p>
+                </div>
+                {onSelectContact && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onSelectContact(contact.phoneNumber || '', contact.displayName)
+                    }}
+                    className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                  >
+                    Message
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>

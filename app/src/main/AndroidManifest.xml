@@ -16,6 +16,9 @@
     <!-- Contacts - Core functionality -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
 
+    <!-- Call Log - For call history sync -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+
     <!-- Network - Core functionality -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

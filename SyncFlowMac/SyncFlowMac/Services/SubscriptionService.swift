@@ -376,12 +376,17 @@ class SubscriptionService: ObservableObject {
 
                 // Check for plan in usage (new location from Testing tab)
                 if let usageData = userData["usage"] as? [String: Any] {
+                    print("SubscriptionService: usage data found: \(usageData.keys.joined(separator: ", "))")
                     if let usagePlan = usageData["plan"] as? String, !usagePlan.isEmpty {
                         plan = usagePlan
                         planExpiresAt = usageData["planExpiresAt"] as? NSNumber
                         freeTrialExpiresAt = usageData["freeTrialExpiresAt"] as? NSNumber
                         print("SubscriptionService: Found plan in usage: \(plan)")
+                    } else {
+                        print("SubscriptionService: No plan found in usage data")
                     }
+                } else {
+                    print("SubscriptionService: No usage section in user data")
                 }
 
                 let now = Int64(Date().timeIntervalSince1970 * 1000)
@@ -407,14 +412,17 @@ class SubscriptionService: ObservableObject {
                 }
 
                 // If Firebase has active free trial, use it
+                print("SubscriptionService: Checking for active free trial: freeTrialExpiresAt=\(freeTrialExpiresAt?.int64Value ?? 0), now=\(now)")
                 if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
                     updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
 
                     // Update subscriptionStatus to reflect active trial (immediately, not async)
                     let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
                     self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
-                    print("SubscriptionService: Loaded Firebase free trial with \(trialDaysRemaining) days remaining")
+                    print("SubscriptionService: ✅ Loaded Firebase free trial with \(trialDaysRemaining) days remaining")
                     return
+                } else {
+                    print("SubscriptionService: ❌ No active trial found or trial expired")
                 }
             } else {
                 print("SubscriptionService: No usage data found in Firebase")

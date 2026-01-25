@@ -21,8 +21,10 @@ struct PairingView: View {
     @State private var listenerHandle: DatabaseHandle?
     @State private var showManualJoin = false
     @State private var manualSyncGroupId = ""
+    @State private var cachedQRImage: Image?
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private let qrContext = CIContext()
 
     enum PairingStatusState {
         case generating
@@ -118,15 +120,55 @@ struct PairingView: View {
             case .waitingForScan:
                 if let session = pairingSession {
                     VStack(spacing: 20) {
-                        // QR Code
-                        qrCodeImage(for: session.qrPayload)
-                            .interpolation(.none)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 220, height: 220)
-                            .background(Color.white)
-                            .cornerRadius(10)
-                            .shadow(radius: 5)
+                        // QR Code with ready indicator
+                        VStack(spacing: 10) {
+                            if let qrImage = cachedQRImage {
+                                // QR code is ready
+                                VStack(spacing: 12) {
+                                    qrImage
+                                        .interpolation(.none)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 300, height: 300)
+                                        .background(Color.white)
+                                        .cornerRadius(12)
+                                        .shadow(radius: 8)
+
+                                    // Visual indicator that QR is ready
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.green)
+                                            .font(.system(size: 14))
+                                        Text("Ready to scan")
+                                            .font(.caption)
+                                            .foregroundColor(.green)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.green.opacity(0.1))
+                                    .cornerRadius(6)
+                                }
+                            } else {
+                                // Still generating QR code
+                                VStack(spacing: 10) {
+                                    ProgressView()
+                                        .frame(height: 300)
+
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "hourglass")
+                                            .foregroundColor(.blue)
+                                            .font(.system(size: 14))
+                                        Text("Generating QR code...")
+                                            .font(.caption)
+                                            .foregroundColor(.blue)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue.opacity(0.1))
+                                    .cornerRadius(6)
+                                }
+                            }
+                        }
 
                         // Timer
                         HStack(spacing: 8) {
@@ -282,24 +324,32 @@ struct PairingView: View {
         }
     }
 
-    // MARK: - QR Code Generation
+    // MARK: - QR Code Generation (Enhanced for V2)
 
-    private func qrCodeImage(for string: String) -> Image {
-        let context = CIContext()
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(string.utf8)
-        filter.correctionLevel = "M"
+    /// Generate high-quality QR code with maximum error correction
+    /// Size: 300x300 for better scanning reliability
+    private func generateQRCodeImage(for string: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let filter = CIFilter.qrCodeGenerator()
+            filter.message = Data(string.utf8)
+            // Use "H" (high) error correction for maximum reliability
+            filter.correctionLevel = "H"
 
-        if let outputImage = filter.outputImage {
-            let scale = 10.0
-            let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            var resultImage: Image?
+            if let outputImage = filter.outputImage {
+                // Scale to 300x300 for better scanning
+                let scale = 15.0
+                let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
 
-            if let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) {
-                return Image(nsImage: NSImage(cgImage: cgImage, size: NSSize(width: 220, height: 220)))
+                if let cgImage = self.qrContext.createCGImage(scaledImage, from: scaledImage.extent) {
+                    resultImage = Image(nsImage: NSImage(cgImage: cgImage, size: NSSize(width: 300, height: 300)))
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.cachedQRImage = resultImage ?? Image(systemName: "qrcode")
             }
         }
-
-        return Image(systemName: "qrcode")
     }
 
     // MARK: - Timer
@@ -327,6 +377,7 @@ struct PairingView: View {
         cleanupListener()
         pairingStatus = .generating
         pairingSession = nil
+        cachedQRImage = nil
         errorMessage = nil
 
         let firebaseService = FirebaseService.shared
@@ -347,9 +398,11 @@ struct PairingView: View {
                 self.pairingSession = session
                 self.timeRemaining = session.timeRemaining
                 self.pairingStatus = .waitingForScan
+                // Generate QR code on background thread for better performance
+                self.generateQRCodeImage(for: session.qrPayload)
             }
 
-            let handle = firebaseService.listenForPairingApproval(token: session.token) { status in
+            let handle = firebaseService.listenForPairingApproval(token: session.token, version: session.version) { status in
                 handlePairingStatus(status)
             }
             await MainActor.run {
@@ -369,6 +422,7 @@ struct PairingView: View {
         }
 
         pairingStatus = .generating
+        cachedQRImage = nil
         errorMessage = nil
         showManualJoin = false
 
@@ -392,9 +446,11 @@ struct PairingView: View {
                                 self.pairingSession = session
                                 self.timeRemaining = session.timeRemaining
                                 self.pairingStatus = .waitingForScan
+                                // Generate QR code on background thread for better performance
+                                self.generateQRCodeImage(for: session.qrPayload)
                             }
 
-                            let handle = firebaseService.listenForPairingApproval(token: session.token) { status in
+                            let handle = firebaseService.listenForPairingApproval(token: session.token, version: session.version) { status in
                                 handlePairingStatus(status)
                             }
                             await MainActor.run {

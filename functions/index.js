@@ -495,6 +495,131 @@ exports.syncContacts = functions.https.onCall(async (data, context) => {
 });
 
 /**
+ * Recover account using recovery code
+ * This is fast because it uses Cloud Functions instead of direct Firebase access
+ */
+exports.recoverAccount = functions.https.onCall(async (data, context) => {
+    try {
+        const codeHash = data?.codeHash;
+
+        if (!codeHash || typeof codeHash !== 'string') {
+            throw new functions.https.HttpsError("invalid-argument", "codeHash required");
+        }
+
+        console.log(`Recovery attempt with hash: ${codeHash.substring(0, 8)}...`);
+
+        // Look up the recovery code
+        const recoveryRef = admin.database().ref(`recovery_codes/${codeHash}`);
+        const snapshot = await recoveryRef.once('value');
+
+        if (!snapshot.exists()) {
+            console.log('Recovery code not found');
+            throw new functions.https.HttpsError("not-found", "Invalid recovery code");
+        }
+
+        const recoveryData = snapshot.val();
+        const userId = recoveryData.userId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("internal", "Recovery code is corrupted");
+        }
+
+        // Update last used timestamp
+        await recoveryRef.child('lastUsedAt').set(admin.database.ServerValue.TIMESTAMP);
+
+        console.log(`Recovery successful for user: ${userId}`);
+
+        return {
+            success: true,
+            userId: userId
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('recoverAccount failed:', error.message);
+        throw new functions.https.HttpsError("internal", "Recovery failed");
+    }
+});
+
+/**
+ * Get user usage data (fast via Cloud Function)
+ */
+exports.getUserUsage = functions.https.onCall(async (data, context) => {
+    try {
+        const userId = data?.userId || context.auth?.uid;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        // Get usage data
+        const usageRef = admin.database().ref(`users/${userId}/usage`);
+        const usageSnapshot = await usageRef.once('value');
+
+        // Get subscription records as fallback
+        const subscriptionRef = admin.database().ref(`subscription_records/${userId}/active`);
+        const subscriptionSnapshot = await subscriptionRef.once('value');
+
+        const usage = usageSnapshot.val() || {};
+        const subscription = subscriptionSnapshot.val() || {};
+
+        // Merge data, preferring usage but falling back to subscription
+        return {
+            success: true,
+            usage: {
+                plan: usage.plan || subscription.plan || null,
+                planExpiresAt: usage.planExpiresAt || subscription.planExpiresAt || null,
+                trialStartedAt: usage.trialStartedAt || null,
+                storageBytes: usage.storageBytes || 0,
+                lastUpdatedAt: usage.lastUpdatedAt || null,
+                monthly: usage.monthly || {}
+            }
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('getUserUsage failed:', error.message);
+        throw new functions.https.HttpsError("internal", "Failed to get usage data");
+    }
+});
+
+/**
+ * Get user's paired devices (fast via Cloud Function)
+ */
+exports.getDevices = functions.https.onCall(async (data, context) => {
+    try {
+        const userId = data?.userId || context.auth?.uid;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        const devicesRef = admin.database().ref(`users/${userId}/devices`);
+        const snapshot = await devicesRef.once('value');
+
+        const devices = {};
+        if (snapshot.exists()) {
+            snapshot.forEach((child) => {
+                devices[child.key] = child.val();
+            });
+        }
+
+        return {
+            success: true,
+            devices: devices
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('getDevices failed:', error.message);
+        throw new functions.https.HttpsError("internal", "Failed to get devices");
+    }
+});
+
+/**
  * Manual cleanup of old devices (callable function)
  */
 exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) => {

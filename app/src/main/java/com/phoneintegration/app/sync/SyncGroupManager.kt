@@ -86,9 +86,41 @@ class SyncGroupManager(
             val groupData = groupSnapshot.value as? Map<*, *> ?: emptyMap<String, Any>()
             val plan = (groupData["plan"] as? String) ?: "free"
             val deviceLimit = if (plan == "free") 3 else 999
-            val currentDevices = (groupData["devices"] as? Map<*, *>)?.size ?: 0
+            val devicesMap = (groupData["devices"] as? Map<*, *>) ?: emptyMap<String, Any>()
+            val currentDevices = devicesMap.size
 
             Log.d(TAG, "[SyncGroupManager] Group data: plan=$plan, deviceLimit=$deviceLimit, currentDevices=$currentDevices")
+
+            // If this device is already in the group, treat as success and refresh metadata
+            if (devicesMap.containsKey(deviceId)) {
+                Log.d(TAG, "[SyncGroupManager] Device already in sync group, refreshing status")
+                setSyncGroupId(scannedSyncGroupId)
+
+                val now = System.currentTimeMillis()
+                val existingUpdate = mapOf(
+                    "status" to "active",
+                    "deviceName" to deviceName,
+                    "lastSyncedAt" to now
+                )
+                groupRef.child("devices").child(deviceId).updateChildren(existingUpdate).await()
+
+                groupRef.child("history").child(now.toString()).setValue(
+                    mapOf(
+                        "action" to "device_rejoined",
+                        "deviceId" to deviceId,
+                        "deviceType" to "android",
+                        "deviceName" to deviceName
+                    )
+                ).await()
+
+                return Result.success(
+                    JoinResult(
+                        success = true,
+                        deviceCount = currentDevices,
+                        limit = deviceLimit
+                    )
+                )
+            }
 
             // Check device limit
             if (currentDevices >= deviceLimit) {

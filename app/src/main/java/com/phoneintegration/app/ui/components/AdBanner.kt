@@ -18,7 +18,6 @@ import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.LoadAdError
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -102,6 +101,7 @@ fun AdBannerCompact(
 
 /**
  * Check if the current user has a premium subscription
+ * Uses Cloud Function for fast response (avoids Firebase offline mode delays)
  */
 private suspend fun isPremiumUser(context: Context): Boolean {
     val auth = FirebaseAuth.getInstance()
@@ -109,15 +109,16 @@ private suspend fun isPremiumUser(context: Context): Boolean {
     val userId = currentUser.uid
 
     return try {
-        val database = FirebaseDatabase.getInstance()
-        val usageRef = database.reference
-            .child("users")
-            .child(userId)
-            .child("usage")
+        val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
+        val result = functions
+            .getHttpsCallable("getUserUsage")
+            .call(mapOf("userId" to userId))
+            .await()
 
-        val snapshot = usageRef.get().await()
-        val planRaw = snapshot.child("plan").getValue(String::class.java)?.lowercase()
-        val planExpiresAt = snapshot.child("planExpiresAt").getValue(Long::class.java)
+        val data = result.data as? Map<*, *>
+        val usageData = data?.get("usage") as? Map<*, *>
+        val planRaw = (usageData?.get("plan") as? String)?.lowercase()
+        val planExpiresAt = (usageData?.get("planExpiresAt") as? Number)?.toLong()
         val now = System.currentTimeMillis()
 
         when (planRaw) {

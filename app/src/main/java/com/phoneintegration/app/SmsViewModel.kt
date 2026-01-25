@@ -719,38 +719,68 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
             // FAST: Fetch conversations on IO thread (contacts already cached)
             val smsList = withContext(Dispatchers.IO) {
-                val conversations = repo.getConversations()
+                try {
+                    val conversations = repo.getConversations()
 
-                // Load pinned and muted thread IDs
-                val pinnedIds = pinnedDao.getPinnedIds().toSet()
-                val mutedIds = mutedDao.getMutedIds().toSet()
+                    // Load pinned and muted thread IDs (safely)
+                    val pinnedIds = try {
+                        pinnedDao.getPinnedIds().toSet()
+                    } catch (e: Exception) {
+                        Log.e("SmsViewModel", "Error loading pinned IDs", e)
+                        emptySet<Long>()
+                    }
 
-                // Mark pinned/muted conversations and sort (pinned first, then by timestamp)
-                conversations.map { conv ->
-                    conv.copy(
-                        isPinned = conv.threadId in pinnedIds,
-                        isMuted = conv.threadId in mutedIds
+                    val mutedIds = try {
+                        mutedDao.getMutedIds().toSet()
+                    } catch (e: Exception) {
+                        Log.e("SmsViewModel", "Error loading muted IDs", e)
+                        emptySet<Long>()
+                    }
+
+                    // Mark pinned/muted conversations and sort (pinned first, then by timestamp)
+                    conversations.map { conv ->
+                        try {
+                            conv.copy(
+                                isPinned = conv.threadId in pinnedIds,
+                                isMuted = conv.threadId in mutedIds
+                            )
+                        } catch (e: Exception) {
+                            Log.e("SmsViewModel", "Error processing conversation ${conv.threadId}", e)
+                            conv // Return original if copy fails
+                        }
+                    }.sortedWith(
+                        compareByDescending<ConversationInfo> { it.isPinned }
+                            .thenByDescending { it.timestamp }
                     )
-                }.sortedWith(
-                    compareByDescending<ConversationInfo> { it.isPinned }
-                        .thenByDescending { it.timestamp }
-                )
+                } catch (e: Exception) {
+                    Log.e("SmsViewModel", "Error loading conversations", e)
+                    emptyList<ConversationInfo>()
+                }
             }
 
             Log.d("SmsViewModel", "Loaded ${smsList.size} conversations in ${System.currentTimeMillis() - startTime}ms")
 
-            // INSTANT: Update UI immediately
-            cachedConversations = smsList
-            lastLoadTime = System.currentTimeMillis()
-            _conversations.value = listOf(adsConversation) + smsList
-            _isLoading.value = false
-            initialLoadComplete = true
+            // INSTANT: Update UI immediately (safely)
+            try {
+                cachedConversations = smsList
+                lastLoadTime = System.currentTimeMillis()
+                _conversations.value = listOf(adsConversation) + smsList
+                _isLoading.value = false
+                initialLoadComplete = true
+            } catch (e: Exception) {
+                Log.e("SmsViewModel", "Error updating UI with conversations", e)
+                _isLoading.value = false
+            }
 
             Log.d("SmsViewModel", "UI updated in ${System.currentTimeMillis() - startTime}ms")
 
             // Save to persistent cache for instant startup next time
             viewModelScope.launch(Dispatchers.IO) {
-                saveToPersistentCache(smsList)
+                try {
+                    saveToPersistentCache(smsList)
+                } catch (e: Exception) {
+                    Log.e("SmsViewModel", "Error saving to persistent cache", e)
+                }
             }
 
             // DEFERRED: Everything below runs in background without blocking UI
@@ -1674,21 +1704,77 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun resolveContactPhotos(list: List<ConversationInfo>) {
+        if (list.isEmpty()) return
+
         viewModelScope.launch(Dispatchers.IO) {
-            list.forEach { info ->
+            try {
+                list.forEach { info ->
+                    try {
+                        // Skip if address is null or empty
+                        if (info.address.isNullOrEmpty()) return@forEach
 
-                val photo = repo.resolveContactPhoto(info.address)
+                        val photo = repo.resolveContactPhoto(info.address)
 
-                if (photo != null) {
-                    withContext(Dispatchers.Main) {
-                        _conversations.value = _conversations.value.map { c ->
-                            if (c.threadId == info.threadId)
-                                c.copy(photoUri = photo)
-                            else c
+                        // Only update if we got a valid photo and it's different from current
+                        if (!photo.isNullOrEmpty() && photo != info.photoUri) {
+                            // Validate the photo URI by trying to access it
+                            if (isValidPhotoUri(photo)) {
+                                withContext(Dispatchers.Main) {
+                                    try {
+                                        _conversations.value = _conversations.value.map { c ->
+                                            if (c.threadId == info.threadId)
+                                                c.copy(photoUri = photo)
+                                            else c
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("SmsViewModel", "Error updating conversations list", e)
+                                    }
+                                }
+
+                                // Persist the updated conversation to cache (safely)
+                                try {
+                                    val updated = _conversations.value.firstOrNull { it.threadId == info.threadId }
+                                    if (updated != null) {
+                                        cachedConversationDao.insert(updated.toCachedConversation())
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("SmsViewModel", "Error saving to cache for ${info.address}", e)
+                                }
+
+                                Log.d("SmsViewModel", "Updated photo for ${info.address}: $photo")
+                            } else {
+                                Log.w("SmsViewModel", "Invalid photo URI for ${info.address}: $photo")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SmsViewModel", "Error resolving photo for ${info.address}", e)
+                        // Clear invalid photo URI
+                        try {
+                            withContext(Dispatchers.Main) {
+                                _conversations.value = _conversations.value.map { c ->
+                                    if (c.threadId == info.threadId)
+                                        c.copy(photoUri = null)
+                                    else c
+                                }
+                            }
+                        } catch (updateException: Exception) {
+                            Log.e("SmsViewModel", "Error clearing photo URI for ${info.address}", updateException)
                         }
                     }
                 }
+            } catch (e: Exception) {
+                Log.e("SmsViewModel", "Fatal error in resolveContactPhotos", e)
             }
+        }
+    }
+
+    private fun isValidPhotoUri(photoUri: String): Boolean {
+        return try {
+            // Try to parse the URI to ensure it's valid
+            val uri = android.net.Uri.parse(photoUri)
+            uri != null && (uri.scheme == "content" || uri.scheme == "file")
+        } catch (e: Exception) {
+            false
         }
     }
     fun sendMms(address: String, uri: Uri, messageText: String? = null) {

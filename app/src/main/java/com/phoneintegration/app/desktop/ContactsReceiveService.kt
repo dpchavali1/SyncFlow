@@ -9,7 +9,7 @@ import android.util.Log
 import com.google.firebase.database.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
-import java.io.ByteArrayInputStream
+import com.phoneintegration.app.utils.PhoneNumberNormalizer
 
 /**
  * Service to receive contact changes from Firebase (created on macOS/Web)
@@ -23,7 +23,7 @@ class ContactsReceiveService(private val context: Context) {
 
     companion object {
         private const val TAG = "ContactsReceiveService"
-        private const val DESKTOP_CONTACTS_PATH = "desktopContacts"
+        private const val CONTACTS_PATH = "contacts"
     }
 
     private val syncService = DesktopSyncService(context)
@@ -32,38 +32,65 @@ class ContactsReceiveService(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /**
-     * Data class for contacts created on desktop/web
+     * Represents a change to a contact that needs to be applied on Android.
      */
-    data class DesktopContact(
+    data class RemoteContactUpdate(
         val id: String,
         val displayName: String,
         val phoneNumber: String,
-        val phoneType: String = "Mobile",
-        val email: String? = null,
-        val photoBase64: String? = null,
-        val notes: String? = null,
-        val createdAt: Long = 0,
-        val updatedAt: Long = 0,
-        val source: String = "desktop",  // "desktop", "web", "macos"
-        val syncedToAndroid: Boolean = false
+        val normalizedNumber: String,
+        val phoneType: String,
+        val email: String?,
+        val notes: String?,
+        val photoBase64: String?,
+        val lastUpdatedBy: String,
+        val lastUpdatedAt: Long,
+        val version: Long,
+        val androidContactId: Long?
     ) {
         companion object {
-            fun fromMap(id: String, data: Map<String, Any?>): DesktopContact? {
+            fun fromMap(id: String, data: Map<String, Any?>, requirePending: Boolean = true): RemoteContactUpdate? {
                 val displayName = data["displayName"] as? String ?: return null
-                val phoneNumber = data["phoneNumber"] as? String ?: return null
+                val phoneNumbers = data["phoneNumbers"] as? Map<*, *>
+                val firstPhone = phoneNumbers?.values?.firstOrNull() as? Map<*, *> ?: return null
+                val phoneNumber = firstPhone["number"] as? String ?: return null
+                val normalizedNumber = firstPhone["normalizedNumber"] as? String ?: ""
+                val phoneType = firstPhone["type"] as? String ?: "Mobile"
 
-                return DesktopContact(
+                val emails = data["emails"] as? Map<*, *>
+                val firstEmail = emails?.values?.firstOrNull() as? Map<*, *>
+                val email = firstEmail?.get("address") as? String
+
+                val notes = data["notes"] as? String
+
+                val photo = data["photo"] as? Map<*, *>
+                val photoBase64 = photo?.get("thumbnailBase64") as? String
+
+                val androidContactId = (data["androidContactId"] as? Number)?.toLong()
+
+                val sync = data["sync"] as? Map<*, *>
+                val pendingSync = (sync?.get("pendingAndroidSync") as? Boolean) ?: false
+                val lastUpdatedBy = (sync?.get("lastUpdatedBy") as? String) ?: ""
+                if (requirePending && (!pendingSync || lastUpdatedBy.equals("android", ignoreCase = true))) {
+                    return null
+                }
+
+                val version = (sync?.get("version") as? Number)?.toLong() ?: 0L
+                val lastUpdatedAt = (sync?.get("lastUpdatedAt") as? Number)?.toLong() ?: 0L
+
+                return RemoteContactUpdate(
                     id = id,
                     displayName = displayName,
                     phoneNumber = phoneNumber,
-                    phoneType = data["phoneType"] as? String ?: "Mobile",
-                    email = data["email"] as? String,
-                    photoBase64 = data["photoBase64"] as? String,
-                    notes = data["notes"] as? String,
-                    createdAt = (data["createdAt"] as? Long) ?: 0,
-                    updatedAt = (data["updatedAt"] as? Long) ?: 0,
-                    source = data["source"] as? String ?: "desktop",
-                    syncedToAndroid = data["syncedToAndroid"] as? Boolean ?: false
+                    normalizedNumber = normalizedNumber,
+                    phoneType = phoneType,
+                    email = email,
+                    notes = notes,
+                    photoBase64 = photoBase64,
+                    lastUpdatedBy = lastUpdatedBy,
+                    lastUpdatedAt = lastUpdatedAt,
+                    version = version,
+                    androidContactId = androidContactId
                 )
             }
         }
@@ -80,7 +107,7 @@ class ContactsReceiveService(private val context: Context) {
                 databaseRef = FirebaseDatabase.getInstance().reference
                     .child("users")
                     .child(userId)
-                    .child(DESKTOP_CONTACTS_PATH)
+                    .child(CONTACTS_PATH)
 
                 contactsListener = object : ValueEventListener {
                     override fun onDataChange(snapshot: DataSnapshot) {
@@ -95,7 +122,7 @@ class ContactsReceiveService(private val context: Context) {
                 }
 
                 databaseRef?.addValueEventListener(contactsListener!!)
-                Log.d(TAG, "Started listening for desktop contacts")
+                Log.d(TAG, "Started listening for universal contacts")
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting contacts listener", e)
             }
@@ -112,7 +139,7 @@ class ContactsReceiveService(private val context: Context) {
         contactsListener = null
         databaseRef = null
         scope.cancel()
-        Log.d(TAG, "Stopped listening for desktop contacts")
+        Log.d(TAG, "Stopped listening for universal contacts")
     }
 
     /**
@@ -120,29 +147,24 @@ class ContactsReceiveService(private val context: Context) {
      */
     private suspend fun processContactChanges(snapshot: DataSnapshot) {
         try {
-            val contacts = mutableListOf<DesktopContact>()
+            val pendingContacts = mutableListOf<RemoteContactUpdate>()
 
             for (child in snapshot.children) {
                 val contactId = child.key ?: continue
                 val data = child.value as? Map<String, Any?> ?: continue
 
-                DesktopContact.fromMap(contactId, data)?.let { contact ->
-                    // Only process contacts not yet synced to Android
-                    if (!contact.syncedToAndroid) {
-                        contacts.add(contact)
-                    }
+                RemoteContactUpdate.fromMap(contactId, data)?.let { contact ->
+                    pendingContacts.add(contact)
                 }
             }
 
-            Log.d(TAG, "Found ${contacts.size} new contacts to sync to Android")
+            Log.d(TAG, "Found ${pendingContacts.size} pending contacts to sync to Android")
 
-            // Sync each contact to Android
-            for (contact in contacts) {
+            for (contact in pendingContacts) {
                 try {
                     val androidContactId = createOrUpdateAndroidContact(contact)
                     if (androidContactId != null) {
-                        // Mark as synced in Firebase
-                        markAsSyncedToAndroid(contact.id, androidContactId)
+                        markPendingSyncComplete(contact.id, androidContactId, contact.version)
                         Log.d(TAG, "Synced contact ${contact.displayName} to Android (ID: $androidContactId)")
                     }
                 } catch (e: Exception) {
@@ -157,21 +179,16 @@ class ContactsReceiveService(private val context: Context) {
     /**
      * Create or update a contact in Android's contact database
      */
-    private fun createOrUpdateAndroidContact(contact: DesktopContact): Long? {
+    private fun createOrUpdateAndroidContact(contact: RemoteContactUpdate): Long? {
         try {
-            // Check if contact already exists by phone number
-            val existingId = findExistingContact(contact.phoneNumber)
+            val existingId = contact.androidContactId?.let { validateContactId(it) } ?: findExistingContact(contact.phoneNumber)
 
             if (existingId != null) {
-                // Update existing contact
                 updateExistingContact(existingId, contact)
                 return existingId
             }
 
-            // Create new contact
             val ops = ArrayList<ContentProviderOperation>()
-
-            // Insert raw contact
             ops.add(
                 ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
                     .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, null)
@@ -179,7 +196,6 @@ class ContactsReceiveService(private val context: Context) {
                     .build()
             )
 
-            // Insert display name
             ops.add(
                 ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                     .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
@@ -194,15 +210,7 @@ class ContactsReceiveService(private val context: Context) {
                     .build()
             )
 
-            // Insert phone number
-            val phoneType = when (contact.phoneType.lowercase()) {
-                "mobile" -> ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
-                "home" -> ContactsContract.CommonDataKinds.Phone.TYPE_HOME
-                "work" -> ContactsContract.CommonDataKinds.Phone.TYPE_WORK
-                "main" -> ContactsContract.CommonDataKinds.Phone.TYPE_MAIN
-                else -> ContactsContract.CommonDataKinds.Phone.TYPE_OTHER
-            }
-
+            val phoneType = mapPhoneType(contact.phoneType)
             ops.add(
                 ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                     .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
@@ -215,7 +223,6 @@ class ContactsReceiveService(private val context: Context) {
                     .build()
             )
 
-            // Insert email if provided
             contact.email?.let { email ->
                 ops.add(
                     ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
@@ -233,7 +240,6 @@ class ContactsReceiveService(private val context: Context) {
                 )
             }
 
-            // Insert notes if provided
             contact.notes?.let { notes ->
                 ops.add(
                     ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
@@ -247,7 +253,6 @@ class ContactsReceiveService(private val context: Context) {
                 )
             }
 
-            // Insert photo if provided
             contact.photoBase64?.let { photoBase64 ->
                 try {
                     val photoBytes = Base64.decode(photoBase64, Base64.DEFAULT)
@@ -266,13 +271,10 @@ class ContactsReceiveService(private val context: Context) {
                 }
             }
 
-            // Execute batch operation
             val results = context.contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
-
-            // Get the raw contact ID from the result
             val rawContactUri = results.firstOrNull()?.uri
-            return rawContactUri?.lastPathSegment?.toLongOrNull()
-
+            val rawContactId = rawContactUri?.lastPathSegment?.toLongOrNull()
+            return getContactIdFromRawId(rawContactId)
         } catch (e: Exception) {
             Log.e(TAG, "Error creating Android contact", e)
             return null
@@ -302,28 +304,32 @@ class ContactsReceiveService(private val context: Context) {
         return null
     }
 
+    private fun mapPhoneType(type: String): Int {
+        return when (type.lowercase()) {
+            "mobile" -> ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
+            "home" -> ContactsContract.CommonDataKinds.Phone.TYPE_HOME
+            "work" -> ContactsContract.CommonDataKinds.Phone.TYPE_WORK
+            "main" -> ContactsContract.CommonDataKinds.Phone.TYPE_MAIN
+            else -> ContactsContract.CommonDataKinds.Phone.TYPE_OTHER
+        }
+    }
+
     /**
      * Update existing contact with new information
-     * Uses last-write-wins conflict resolution based on updatedAt timestamp
+     * Uses last-write-wins conflict resolution based on sync.lastUpdatedAt timestamp
      */
-    private fun updateExistingContact(contactId: Long, contact: DesktopContact) {
+    private fun updateExistingContact(contactId: Long, contact: RemoteContactUpdate) {
         try {
-            // Conflict Resolution: Check if this update should be applied
-            // The updatedAt timestamp from Firebase is used to determine if this is a newer change
-            val updateTimestamp = contact.updatedAt
-            Log.d(TAG, "Updating contact ${contact.displayName} with timestamp: $updateTimestamp")
+            Log.d(TAG, "Updating contact ${contact.displayName} with timestamp: ${contact.lastUpdatedAt}")
 
-            // Update display name
             val nameValues = ContentValues().apply {
                 put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, contact.displayName)
             }
-
             val nameSelection = "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
             val nameSelectionArgs = arrayOf(
                 contactId.toString(),
                 ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE
             )
-
             context.contentResolver.update(
                 ContactsContract.Data.CONTENT_URI,
                 nameValues,
@@ -331,29 +337,45 @@ class ContactsReceiveService(private val context: Context) {
                 nameSelectionArgs
             )
 
-            // Update email if provided
+            val normalizedNumber = contact.normalizedNumber.ifBlank {
+                PhoneNumberNormalizer.normalize(contact.phoneNumber)
+            }
+            val phoneValues = ContentValues().apply {
+                put(ContactsContract.CommonDataKinds.Phone.NUMBER, contact.phoneNumber)
+                put(ContactsContract.CommonDataKinds.Phone.NORMALIZED_NUMBER, normalizedNumber)
+                put(ContactsContract.CommonDataKinds.Phone.TYPE, mapPhoneType(contact.phoneType))
+            }
+            val phoneSelection = "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
+            val phoneSelectionArgs = arrayOf(
+                contactId.toString(),
+                ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE
+            )
+            val phoneUpdated = context.contentResolver.update(
+                ContactsContract.Data.CONTENT_URI,
+                phoneValues,
+                phoneSelection,
+                phoneSelectionArgs
+            )
+            if (phoneUpdated == 0) {
+                insertPhoneEntry(contactId, contact, normalizedNumber)
+            }
+
             contact.email?.let { email ->
                 val emailValues = ContentValues().apply {
                     put(ContactsContract.CommonDataKinds.Email.ADDRESS, email)
                 }
-
                 val emailSelection = "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
                 val emailSelectionArgs = arrayOf(
                     contactId.toString(),
                     ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE
                 )
-
-                // Try to update, if no rows affected, insert new
                 val updated = context.contentResolver.update(
                     ContactsContract.Data.CONTENT_URI,
                     emailValues,
                     emailSelection,
                     emailSelectionArgs
                 )
-
                 if (updated == 0) {
-                    // Insert new email
-                    // First get raw contact ID
                     val rawContactId = getRawContactId(contactId)
                     if (rawContactId != null) {
                         val insertValues = ContentValues().apply {
@@ -367,25 +389,21 @@ class ContactsReceiveService(private val context: Context) {
                 }
             }
 
-            // Update notes if provided
             contact.notes?.let { notes ->
                 val notesValues = ContentValues().apply {
                     put(ContactsContract.CommonDataKinds.Note.NOTE, notes)
                 }
-
                 val notesSelection = "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
                 val notesSelectionArgs = arrayOf(
                     contactId.toString(),
                     ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE
                 )
-
                 val updated = context.contentResolver.update(
                     ContactsContract.Data.CONTENT_URI,
                     notesValues,
                     notesSelection,
                     notesSelectionArgs
                 )
-
                 if (updated == 0) {
                     val rawContactId = getRawContactId(contactId)
                     if (rawContactId != null) {
@@ -397,6 +415,10 @@ class ContactsReceiveService(private val context: Context) {
                         context.contentResolver.insert(ContactsContract.Data.CONTENT_URI, insertValues)
                     }
                 }
+            }
+
+            contact.photoBase64?.takeIf { it.isNotBlank() }?.let { photo ->
+                updateContactPhoto(contactId, contact.displayName, photo)
             }
 
             Log.d(TAG, "Updated existing contact: ${contact.displayName}")
@@ -426,23 +448,104 @@ class ContactsReceiveService(private val context: Context) {
         return null
     }
 
+    private fun getContactIdFromRawId(rawContactId: Long?): Long? {
+        if (rawContactId == null) return null
+        try {
+            val uri = ContactsContract.RawContacts.CONTENT_URI
+            val projection = arrayOf(ContactsContract.RawContacts.CONTACT_ID)
+            val selection = "${ContactsContract.RawContacts._ID} = ?"
+            val selectionArgs = arrayOf(rawContactId.toString())
+
+            context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getLong(0)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resolving contact ID from raw ID", e)
+        }
+        return null
+    }
+
+    private fun validateContactId(contactId: Long?): Long? {
+        if (contactId == null || contactId <= 0) return null
+        try {
+            val uri = ContactsContract.Contacts.CONTENT_URI
+            val projection = arrayOf(ContactsContract.Contacts._ID)
+            val selection = "${ContactsContract.Contacts._ID} = ?"
+            val selectionArgs = arrayOf(contactId.toString())
+
+            context.contentResolver.query(uri, projection, selection, selectionArgs, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return contactId
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error validating contact ID $contactId", e)
+        }
+        return null
+    }
+
+    private fun insertPhoneEntry(contactId: Long, contact: RemoteContactUpdate, normalizedNumber: String) {
+        val rawContactId = getRawContactId(contactId) ?: return
+        val phoneTypeValue = mapPhoneType(contact.phoneType)
+        val values = ContentValues().apply {
+            put(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
+            put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
+            put(ContactsContract.CommonDataKinds.Phone.NUMBER, contact.phoneNumber)
+            put(ContactsContract.CommonDataKinds.Phone.NORMALIZED_NUMBER, normalizedNumber)
+            put(ContactsContract.CommonDataKinds.Phone.TYPE, phoneTypeValue)
+        }
+        context.contentResolver.insert(ContactsContract.Data.CONTENT_URI, values)
+    }
+
+    private fun updateContactPhoto(contactId: Long, displayName: String, photoBase64: String) {
+        try {
+            val photoSelection = "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
+            val photoSelectionArgs = arrayOf(
+                contactId.toString(),
+                ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE
+            )
+            context.contentResolver.delete(
+                ContactsContract.Data.CONTENT_URI,
+                photoSelection,
+                photoSelectionArgs
+            )
+
+            val rawContactId = getRawContactId(contactId) ?: return
+            val photoBytes = Base64.decode(photoBase64, Base64.DEFAULT)
+
+            val photoValues = ContentValues().apply {
+                put(ContactsContract.Data.RAW_CONTACT_ID, rawContactId)
+                put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Photo.CONTENT_ITEM_TYPE)
+                put(ContactsContract.CommonDataKinds.Photo.PHOTO, photoBytes)
+            }
+            context.contentResolver.insert(ContactsContract.Data.CONTENT_URI, photoValues)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating photo for $displayName", e)
+        }
+    }
+
     /**
-     * Mark contact as synced to Android in Firebase
+     * Mark a pending contact as synced (clear pending flag and bump version).
      */
-    private suspend fun markAsSyncedToAndroid(contactId: String, androidContactId: Long) {
+    private suspend fun markPendingSyncComplete(contactId: String, androidContactId: Long, previousVersion: Long) {
         try {
             val userId = syncService.getCurrentUserId()
 
-            val updates = mapOf(
-                "syncedToAndroid" to true,
-                "androidContactId" to androidContactId,
-                "syncedAt" to ServerValue.TIMESTAMP
+            val updates = mapOf<String, Any?>(
+                "sync/pendingAndroidSync" to false,
+                "sync/desktopOnly" to false,
+                "sync/lastUpdatedBy" to "android",
+                "sync/version" to previousVersion + 1,
+                "sync/lastSyncedAt" to ServerValue.TIMESTAMP,
+                "androidContactId" to androidContactId
             )
 
             FirebaseDatabase.getInstance().reference
                 .child("users")
                 .child(userId)
-                .child(DESKTOP_CONTACTS_PATH)
+                .child(CONTACTS_PATH)
                 .child(contactId)
                 .updateChildren(updates)
                 .await()
@@ -462,17 +565,17 @@ class ContactsReceiveService(private val context: Context) {
             val snapshot = FirebaseDatabase.getInstance().reference
                 .child("users")
                 .child(userId)
-                .child(DESKTOP_CONTACTS_PATH)
+                .child(CONTACTS_PATH)
                 .child(contactId)
                 .get()
                 .await()
 
             val data = snapshot.value as? Map<String, Any?> ?: return false
-            val contact = DesktopContact.fromMap(contactId, data) ?: return false
+            val contact = RemoteContactUpdate.fromMap(contactId, data, requirePending = false) ?: return false
 
             val androidId = createOrUpdateAndroidContact(contact)
             if (androidId != null) {
-                markAsSyncedToAndroid(contactId, androidId)
+                markPendingSyncComplete(contactId, androidId, contact.version)
                 true
             } else {
                 false

@@ -63,9 +63,10 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     private var messageListener: ChildEventListener? = null
     private var callListener: ChildEventListener? = null
     private var notificationListener: ChildEventListener? = null
-    private var messageListenerRef: DatabaseReference? = null
+    private var messageListenerRef: com.google.firebase.database.Query? = null
     private var callListenerRef: DatabaseReference? = null
     private var notificationListenerRef: DatabaseReference? = null
+    private val appContext = context.applicationContext
 
     // Adaptive sync timers
     private var adaptiveSyncJob: Job? = null
@@ -105,18 +106,28 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     }
 
     private suspend fun setupMessageListener(userId: String) {
-        val messagesRef = database.getReference("users").child(userId).child("messages")
+        // Listen only to the last N messages within the last 30 days to avoid OOM
+        val cutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000 // 30 days in ms
+        val messagesRef = database.getReference("users")
+            .child(userId)
+            .child("messages")
+            .orderByChild("date")
+            .startAt(cutoff.toDouble())
+            .limitToLast(200)
 
         val listener = object : ChildEventListener {
             override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                if (!isSnapshotSafe(snapshot)) return
                 handleNewMessage(snapshot)
             }
 
             override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                if (!isSnapshotSafe(snapshot)) return
                 handleMessageUpdate(snapshot)
             }
 
             override fun onChildRemoved(snapshot: DataSnapshot) {
+                if (!isSnapshotSafe(snapshot)) return
                 handleMessageDeletion(snapshot)
             }
 
@@ -451,6 +462,30 @@ class IntelligentSyncManager private constructor(private val context: Context) {
             val currentTimes = _lastSyncTime.value.toMutableMap()
             currentTimes[feature] = System.currentTimeMillis()
             _lastSyncTime.value = currentTimes
+        }
+    }
+
+    /**
+     * Guard against oversized snapshots that can crash the client (OOM).
+     * If the snapshot payload is >1MB, skip processing.
+     */
+    private fun isSnapshotSafe(snapshot: DataSnapshot): Boolean {
+        return try {
+            val raw = snapshot.value ?: return true
+            val bytes = raw.toString().toByteArray(Charsets.UTF_8).size
+            val safe = bytes < 1_000_000 // 1 MB
+            if (!safe) {
+                Log.w(TAG, "Skipping oversized snapshot (${bytes} bytes) at ${snapshot.ref.path}")
+                android.widget.Toast.makeText(
+                    appContext,
+                    "Sync skipped: data too large. Please clear old messages.",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+            safe
+        } catch (e: Exception) {
+            Log.w(TAG, "Snapshot size check failed, allowing", e)
+            true
         }
     }
 

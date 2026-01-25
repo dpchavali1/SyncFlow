@@ -2,20 +2,30 @@
 //  Contact.swift
 //  SyncFlowMac
 //
-//  Contact model for displaying Android contacts on macOS
+//  Contact model for displaying Android and desktop-synced contacts on macOS
 //
 
 import Foundation
 
 struct Contact: Identifiable, Hashable {
+    struct SyncMetadata: Hashable {
+        let lastUpdatedAt: Double
+        let lastSyncedAt: Double?
+        let lastUpdatedBy: String
+        let version: Int
+        let pendingAndroidSync: Bool
+        let desktopOnly: Bool
+    }
+
     let id: String
     let displayName: String
-    let phoneNumber: String
-    let normalizedNumber: String
+    let phoneNumber: String?
+    let normalizedNumber: String?
     let phoneType: String
-    let photoUri: String?
     let photoBase64: String?
-    let syncedAt: Double?
+    let notes: String?
+    let email: String?
+    let sync: SyncMetadata
 
     var initials: String {
         let components = displayName.components(separatedBy: " ")
@@ -29,32 +39,74 @@ struct Contact: Identifiable, Hashable {
     }
 
     var formattedPhoneNumber: String {
-        // Format phone number for display
-        if phoneNumber.starts(with: "+") {
-            return phoneNumber
+        let value = phoneNumber ?? ""
+        if value.starts(with: "+") {
+            return value
         }
-        // Add basic formatting for US numbers
-        let digits = phoneNumber.filter { $0.isNumber }
+        let digits = value.filter { $0.isNumber }
         if digits.count == 10 {
             let areaCode = digits.prefix(3)
             let middle = digits.dropFirst(3).prefix(3)
             let last = digits.suffix(4)
             return "(\(areaCode)) \(middle)-\(last)"
         }
-        return phoneNumber
+        return value
+    }
+
+    var isPendingSync: Bool {
+        sync.pendingAndroidSync && !sync.lastUpdatedBy.lowercased().contains("android")
     }
 
     static func from(_ data: [String: Any], id: String) -> Contact? {
-        guard let displayName = data["displayName"] as? String,
-              let phoneNumber = data["phoneNumber"] as? String,
-              let normalizedNumber = data["normalizedNumber"] as? String,
-              let phoneType = data["phoneType"] as? String else {
+        guard let displayName = data["displayName"] as? String else {
             return nil
         }
 
-        let photoUri = data["photoUri"] as? String
-        let photoBase64 = data["photoBase64"] as? String
-        let syncedAt = data["syncedAt"] as? Double
+        guard let phoneMap = data["phoneNumbers"] as? [String: [String: Any]],
+              let firstEntry = phoneMap.values.first,
+              let phoneNumber = firstEntry["number"] as? String else {
+            return nil
+        }
+
+        let normalizedNumber = firstEntry["normalizedNumber"] as? String
+        let phoneType = firstEntry["type"] as? String ?? "Mobile"
+
+        let photoData = data["photo"] as? [String: Any]
+        let photoBase64 = photoData?["thumbnailBase64"] as? String
+
+        let notes = data["notes"] as? String
+
+        let emails = data["emails"] as? [String: [String: Any]]
+        let email = emails?.values.first?["address"] as? String
+
+        let syncData = data["sync"] as? [String: Any]
+        let lastUpdatedAt = (syncData?["lastUpdatedAt"] as? Double) ??
+            (syncData?["lastUpdatedAt"] as? Int).map(Double.init) ?? 0
+        let lastSyncedAt = (syncData?["lastSyncedAt"] as? Double) ??
+            (syncData?["lastSyncedAt"] as? Int).map(Double.init)
+        let lastUpdatedBy = syncData?["lastUpdatedBy"] as? String ?? ""
+
+        let versionValue = syncData?["version"]
+        let version: Int
+        if let intVersion = versionValue as? Int {
+            version = intVersion
+        } else if let doubleVersion = versionValue as? Double {
+            version = Int(doubleVersion)
+        } else {
+            version = 0
+        }
+
+        let pendingAndroidSync = (syncData?["pendingAndroidSync"] as? Bool) ?? false
+        let desktopOnly = (syncData?["desktopOnly"] as? Bool) ?? false
+
+        let syncMetadata = SyncMetadata(
+            lastUpdatedAt: lastUpdatedAt,
+            lastSyncedAt: lastSyncedAt,
+            lastUpdatedBy: lastUpdatedBy,
+            version: version,
+            pendingAndroidSync: pendingAndroidSync,
+            desktopOnly: desktopOnly
+        )
 
         return Contact(
             id: id,
@@ -62,98 +114,10 @@ struct Contact: Identifiable, Hashable {
             phoneNumber: phoneNumber,
             normalizedNumber: normalizedNumber,
             phoneType: phoneType,
-            photoUri: photoUri,
             photoBase64: photoBase64,
-            syncedAt: syncedAt
+            notes: notes,
+            email: email,
+            sync: syncMetadata
         )
     }
-}
-
-// MARK: - Desktop Contact (Created on macOS/Web, syncs to Android)
-
-/// Contact created on desktop/web that syncs to Android device
-struct DesktopContact: Identifiable, Hashable {
-    let id: String
-    var displayName: String
-    var phoneNumber: String
-    var normalizedNumber: String
-    var phoneType: String
-    var email: String?
-    var notes: String?
-    var photoBase64: String?
-    let createdAt: Double?
-    var updatedAt: Double?
-    let source: String  // "macos", "web", "desktop"
-    var syncedToAndroid: Bool
-    var androidContactId: Int?
-
-    var initials: String {
-        let components = displayName.components(separatedBy: " ")
-        if components.count >= 2 {
-            let first = components.first?.prefix(1).uppercased() ?? ""
-            let last = components.last?.prefix(1).uppercased() ?? ""
-            return "\(first)\(last)"
-        } else {
-            return String(displayName.prefix(2)).uppercased()
-        }
-    }
-
-    var formattedPhoneNumber: String {
-        if phoneNumber.starts(with: "+") {
-            return phoneNumber
-        }
-        let digits = phoneNumber.filter { $0.isNumber }
-        if digits.count == 10 {
-            let areaCode = digits.prefix(3)
-            let middle = digits.dropFirst(3).prefix(3)
-            let last = digits.suffix(4)
-            return "(\(areaCode)) \(middle)-\(last)"
-        }
-        return phoneNumber
-    }
-
-    var syncStatusText: String {
-        if syncedToAndroid {
-            return "Synced to Android"
-        } else {
-            return "Pending sync..."
-        }
-    }
-
-    static func from(_ data: [String: Any], id: String) -> DesktopContact? {
-        guard let displayName = data["displayName"] as? String,
-              let phoneNumber = data["phoneNumber"] as? String else {
-            return nil
-        }
-
-        let normalizedNumber = data["normalizedNumber"] as? String ?? phoneNumber.filter { $0.isNumber }
-
-        return DesktopContact(
-            id: id,
-            displayName: displayName,
-            phoneNumber: phoneNumber,
-            normalizedNumber: normalizedNumber,
-            phoneType: data["phoneType"] as? String ?? "Mobile",
-            email: data["email"] as? String,
-            notes: data["notes"] as? String,
-            photoBase64: data["photoBase64"] as? String,
-            createdAt: data["createdAt"] as? Double,
-            updatedAt: data["updatedAt"] as? Double,
-            source: data["source"] as? String ?? "desktop",
-            syncedToAndroid: data["syncedToAndroid"] as? Bool ?? false,
-            androidContactId: data["androidContactId"] as? Int
-        )
-    }
-}
-
-// MARK: - Phone Type Options
-
-enum PhoneType: String, CaseIterable {
-    case mobile = "Mobile"
-    case home = "Home"
-    case work = "Work"
-    case main = "Main"
-    case other = "Other"
-
-    var displayName: String { rawValue }
 }

@@ -114,6 +114,7 @@ export interface PairingStatus {
 }
 
 // Initiate pairing from Web (generates QR code data)
+// Uses V2 pairing with persistent device IDs when available
 export const initiatePairing = async (deviceName?: string, syncGroupId?: string): Promise<PairingSession> => {
   // Sign in anonymously first if not already authenticated
   // This is needed to listen to Firebase Database for pairing status updates
@@ -121,49 +122,92 @@ export const initiatePairing = async (deviceName?: string, syncGroupId?: string)
     await signInAnonymously(auth)
   }
 
-  // Get existing device ID if available
-  const existingDeviceId = typeof window !== 'undefined' ? localStorage.getItem('syncflow_device_id') : null
+  // Get persistent device ID from IndexedDB/fingerprint
+  let deviceId: string | null = null
+  try {
+    // Dynamic import to avoid SSR issues
+    const { getDeviceId } = await import('./deviceId')
+    deviceId = await getDeviceId()
+    console.log('[Pairing] Using persistent device ID:', deviceId)
+  } catch (error) {
+    console.warn('[Pairing] Failed to get persistent device ID, using fallback')
+    deviceId = typeof window !== 'undefined' ? localStorage.getItem('syncflow_device_id') : null
+  }
 
+  // Try V2 pairing first (supports device limits, persistent IDs)
+  try {
+    const callV2 = httpsCallable(functions, 'initiatePairingV2')
+    const result = await callV2({
+      deviceId: deviceId || `web_${Date.now().toString(16)}`,
+      deviceName: deviceName || getWebDeviceName(),
+      deviceType: 'web',
+      appVersion: '2.0.0',
+    })
+    const data = result.data as { success: boolean; token: string; qrPayload: string; expiresAt: number }
+    if (data.success) {
+      console.log('[Pairing] V2 session created:', data.token?.slice(0, 8) + '...')
+      return {
+        token: data.token,
+        qrPayload: data.qrPayload,
+        expiresAt: data.expiresAt,
+      }
+    }
+    throw new Error('V2 pairing returned unsuccessful')
+  } catch (v2Error) {
+    console.warn('[Pairing] V2 failed, falling back to V1:', v2Error)
+  }
+
+  // Fall back to V1 pairing
   const call = httpsCallable(functions, 'initiatePairing')
   const result = await call({
     deviceName: deviceName || getWebDeviceName(),
     platform: 'web',
     appVersion: '1.0.0',
-    existingDeviceId: existingDeviceId, // Pass existing device ID to allow reuse
+    existingDeviceId: deviceId, // Pass existing device ID to allow reuse
     syncGroupId: syncGroupId || null,
   })
   return result.data as PairingSession
 }
 
 // Listen for pairing approval (after Android user scans and approves)
+// Supports both V1 (pending_pairings) and V2 (pairing_requests) paths
 export const listenForPairingApproval = (
   token: string,
   callback: (status: PairingStatus) => void
 ): (() => void) => {
-  const pairingRef = ref(database, `${PENDING_PAIRINGS_PATH}/${token}`)
-  console.log('[Pairing] Starting listener for token:', token.slice(0, 8) + '...')
+  // V2 path (pairing_requests) - new system
+  const v2Ref = ref(database, `pairing_requests/${token}`)
+  // V1 path (pending_pairings) - legacy system
+  const v1Ref = ref(database, `${PENDING_PAIRINGS_PATH}/${token}`)
 
-  const unsubscribe = onValue(pairingRef, async (snapshot) => {
-    console.log('[Pairing] Received update, exists:', snapshot.exists())
+  console.log('[Pairing] Starting dual listener for token:', token.slice(0, 8) + '...')
+
+  let hasResolved = false
+
+  const handleSnapshot = async (snapshot: any, version: string) => {
+    if (hasResolved) return
+
+    console.log(`[Pairing] ${version} update, exists:`, snapshot.exists())
 
     if (!snapshot.exists()) {
-      console.log('[Pairing] No data found - marking as expired')
-      callback({ status: 'expired' })
+      // Don't mark as expired yet - might be on the other path
       return
     }
 
     const data = snapshot.val()
-    console.log('[Pairing] Data status:', data.status)
+    console.log(`[Pairing] ${version} status:`, data.status)
     const now = Date.now()
 
     if (data.expiresAt && now > data.expiresAt) {
-      console.log('[Pairing] Token expired')
+      console.log(`[Pairing] ${version} token expired`)
+      hasResolved = true
       callback({ status: 'expired' })
       return
     }
 
     if (data.status === 'approved' && data.customToken) {
-      console.log('[Pairing] Approved! Signing in with custom token...')
+      console.log(`[Pairing] ${version} Approved! Signing in with custom token...`)
+      hasResolved = true
       // Sign in with the custom token provided by Android approval
       try {
         await signInWithCustomToken(auth, data.customToken)
@@ -182,19 +226,30 @@ export const listenForPairingApproval = (
     }
 
     if (data.status === 'rejected') {
-      console.log('[Pairing] Pairing was rejected')
+      console.log(`[Pairing] ${version} Pairing was rejected`)
+      hasResolved = true
       callback({ status: 'rejected' })
       return
     }
 
-    console.log('[Pairing] Status is pending')
+    console.log(`[Pairing] ${version} Status is pending`)
     callback({ status: 'pending' })
-  }, (error) => {
-    console.error('[Pairing] Listener error:', error)
-    callback({ status: 'expired' })
+  }
+
+  // Listen on both paths
+  const unsubscribeV2 = onValue(v2Ref, (snapshot) => handleSnapshot(snapshot, 'V2'), (error) => {
+    console.error('[Pairing] V2 Listener error:', error)
   })
 
-  return unsubscribe
+  const unsubscribeV1 = onValue(v1Ref, (snapshot) => handleSnapshot(snapshot, 'V1'), (error) => {
+    console.error('[Pairing] V1 Listener error:', error)
+  })
+
+  // Return combined unsubscribe function
+  return () => {
+    unsubscribeV2()
+    unsubscribeV1()
+  }
 }
 
 // Get current user ID
@@ -219,7 +274,6 @@ const DEVICES_PATH = 'devices'
 // PENDING_PAIRINGS_PATH is defined earlier (needed for pairing functions)
 const OUTGOING_MESSAGES_PATH = 'outgoing_messages'
 const CONTACTS_PATH = 'contacts'
-const DESKTOP_CONTACTS_PATH = 'desktopContacts'
 const USAGE_PATH = 'usage'
 const READ_RECEIPTS_PATH = 'read_receipts'
 
@@ -948,52 +1002,97 @@ export const listenToDeviceStatus = (
 
 // ===== CONTACTS FUNCTIONS =====
 
-// Contact types
+export interface ContactPhoto {
+  thumbnailBase64?: string
+  hash?: string
+  storagePath?: string
+  updatedAt?: number
+}
+
+export interface ContactSources {
+  android?: boolean
+  web?: boolean
+  macos?: boolean
+}
+
+export interface ContactSyncMetadata {
+  lastUpdatedAt: number
+  lastSyncedAt?: number
+  lastUpdatedBy: string
+  version: number
+  pendingAndroidSync: boolean
+  desktopOnly: boolean
+}
+
 export interface Contact {
   id: string
   displayName: string
-  phoneNumber: string
-  normalizedNumber: string
+  phoneNumber?: string
+  normalizedNumber?: string
   phoneType: string
-  photoUri?: string
-  photoBase64?: string
-  syncedAt?: number
-}
-
-export interface DesktopContact {
-  id: string
-  displayName: string
-  phoneNumber: string
-  normalizedNumber: string
-  phoneType: string
-  email?: string
+  photo?: ContactPhoto
   notes?: string
-  photoBase64?: string
-  createdAt?: number
-  updatedAt?: number
-  source: string
-  syncedToAndroid: boolean
+  email?: string
+  sync: ContactSyncMetadata
+  sources: ContactSources
   androidContactId?: number
 }
 
-// Listen for Android contacts
+const contactsFromSnapshot = (data: Record<string, any>): Contact[] => {
+  return Object.entries(data).map(([key, value]) => {
+    const contactData = value || {}
+    const phoneNumbers = contactData.phoneNumbers as Record<string, any> | undefined
+    const firstPhone = phoneNumbers
+      ? (Object.values(phoneNumbers)[0] as Record<string, any> | undefined)
+      : undefined
+    const photoData = contactData.photo as Record<string, any> | undefined
+    const syncData = contactData.sync as Record<string, any> | undefined
+    const sources = contactData.sources as Record<string, boolean> | undefined
+    const emailData = contactData.emails
+      ? (Object.values(contactData.emails)[0] as Record<string, any> | undefined)
+      : undefined
+
+    return {
+      id: key,
+      displayName: contactData.displayName || '',
+      phoneNumber: firstPhone?.number,
+      normalizedNumber: firstPhone?.normalizedNumber,
+      phoneType: firstPhone?.type || 'Mobile',
+      photo: photoData
+        ? {
+            thumbnailBase64: photoData.thumbnailBase64,
+            hash: photoData.hash,
+            storagePath: photoData.storagePath,
+            updatedAt: photoData.updatedAt,
+          }
+        : undefined,
+      notes: contactData.notes,
+      email: emailData?.address,
+      sync: {
+        lastUpdatedAt: Number(syncData?.lastUpdatedAt ?? 0),
+        lastSyncedAt: typeof syncData?.lastSyncedAt === 'number' ? syncData.lastSyncedAt : undefined,
+        lastUpdatedBy: syncData?.lastUpdatedBy ?? '',
+        version: Number(syncData?.version ?? 0),
+        pendingAndroidSync: !!syncData?.pendingAndroidSync,
+        desktopOnly: !!syncData?.desktopOnly,
+      },
+      sources: {
+        android: !!sources?.android,
+        web: !!sources?.web,
+        macos: !!sources?.macos,
+      },
+      androidContactId: contactData.androidContactId,
+    }
+  })
+}
+
 export const listenToContacts = (userId: string, callback: (contacts: Contact[]) => void) => {
   const contactsRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}`)
 
   return onValue(contactsRef, (snapshot) => {
     const data = snapshot.val()
     if (data) {
-      const contacts: Contact[] = Object.entries(data).map(([key, value]: [string, any]) => ({
-        id: key,
-        displayName: value.displayName || '',
-        phoneNumber: value.phoneNumber || '',
-        normalizedNumber: value.normalizedNumber || '',
-        phoneType: value.phoneType || 'Mobile',
-        photoUri: value.photoUri,
-        photoBase64: value.photoBase64,
-        syncedAt: value.syncedAt,
-      }))
-      // Sort by display name
+      const contacts = contactsFromSnapshot(data as Record<string, any>)
       contacts.sort((a, b) => a.displayName.localeCompare(b.displayName))
       callback(contacts)
     } else {
@@ -1002,102 +1101,154 @@ export const listenToContacts = (userId: string, callback: (contacts: Contact[])
   })
 }
 
-// Listen for desktop-created contacts
-export const listenToDesktopContacts = (userId: string, callback: (contacts: DesktopContact[]) => void) => {
-  const contactsRef = ref(database, `${USERS_PATH}/${userId}/${DESKTOP_CONTACTS_PATH}`)
+const buildContactPayload = async (
+  existingData: Record<string, any> | null,
+  displayName: string,
+  phoneNumber: string,
+  phoneType: string,
+  email?: string,
+  notes?: string,
+  photoBase64?: string,
+  source: 'web' | 'macos' = 'web'
+): Promise<Record<string, any>> => {
+  const payload = existingData ? { ...existingData } : {}
 
-  return onValue(contactsRef, (snapshot) => {
-    const data = snapshot.val()
-    if (data) {
-      const contacts: DesktopContact[] = Object.entries(data).map(([key, value]: [string, any]) => ({
-        id: key,
-        displayName: value.displayName || '',
-        phoneNumber: value.phoneNumber || '',
-        normalizedNumber: value.normalizedNumber || '',
-        phoneType: value.phoneType || 'Mobile',
-        email: value.email,
-        notes: value.notes,
-        photoBase64: value.photoBase64,
-        createdAt: value.createdAt,
-        updatedAt: value.updatedAt,
-        source: value.source || 'web',
-        syncedToAndroid: value.syncedToAndroid || false,
-        androidContactId: value.androidContactId,
-      }))
-      // Sort by display name
-      contacts.sort((a, b) => a.displayName.localeCompare(b.displayName))
-      callback(contacts)
-    } else {
-      callback([])
+  payload.displayName = displayName
+
+  if (notes && notes.trim().length > 0) {
+    payload.notes = notes.trim()
+  } else {
+    delete payload.notes
+  }
+
+  if (email && email.trim().length > 0) {
+    const normalizedEmail = email.trim().toLowerCase()
+    payload.emails = {
+      [normalizedEmail]: {
+        address: email.trim(),
+        type: 'primary',
+        isPrimary: true,
+      },
     }
-  })
+  } else {
+    delete payload.emails
+  }
+
+  const normalizedNumber = PhoneNumberNormalizer.normalize(phoneNumber)
+  const phoneKey = normalizedNumber || phoneNumber
+  payload.phoneNumbers = {
+    [phoneKey]: {
+      number: phoneNumber,
+      normalizedNumber,
+      type: phoneType,
+      label: phoneType,
+      isPrimary: true,
+    },
+  }
+
+  const existingPhoto = payload.photo as Record<string, any> | undefined
+  const photoMap = existingPhoto ? { ...existingPhoto } : {}
+  if (photoBase64 !== undefined) {
+    const trimmedPhoto = photoBase64.trim()
+    if (trimmedPhoto.length > 0) {
+      photoMap.thumbnailBase64 = trimmedPhoto
+    } else {
+      delete photoMap.thumbnailBase64
+      delete photoMap.hash
+    }
+    photoMap.updatedAt = serverTimestamp()
+  }
+  if (existingPhoto?.storagePath) {
+    photoMap.storagePath = existingPhoto.storagePath
+  }
+  payload.photo = photoMap
+
+  const existingSources = payload.sources as Record<string, boolean> | undefined
+  const sources: ContactSources = {
+    android: existingSources?.android ?? false,
+    web: existingSources?.web ?? false,
+    macos: existingSources?.macos ?? false,
+  }
+  sources[source] = true
+  payload.sources = sources
+
+  const existingSync = payload.sync as Record<string, any> | undefined
+  const existingVersion = Number(existingSync?.version ?? 0)
+  const version = existingVersion + 1
+  const syncMeta: Record<string, any> = {
+    lastUpdatedAt: serverTimestamp(),
+    lastUpdatedBy: source,
+    version,
+    pendingAndroidSync: true,
+    desktopOnly: true,
+  }
+  if (existingSync?.lastSyncedAt) {
+    syncMeta.lastSyncedAt = existingSync.lastSyncedAt
+  }
+  payload.sync = syncMeta
+
+  return payload
 }
 
-// Create a new desktop contact
-export const createDesktopContact = async (
+export const createContact = async (
   userId: string,
   displayName: string,
   phoneNumber: string,
   phoneType: string = 'Mobile',
   email?: string,
-  notes?: string
+  notes?: string,
+  photoBase64?: string,
+  source: 'web' | 'macos' = 'web'
 ) => {
-  const contactsRef = ref(database, `${USERS_PATH}/${userId}/${DESKTOP_CONTACTS_PATH}`)
-  const newContactRef = push(contactsRef)
-
-  // Normalize phone number using consistent cross-platform logic
-  const normalizedNumber = PhoneNumberNormalizer.normalize(phoneNumber)
-
-  await set(newContactRef, {
+  const contactId = PhoneNumberNormalizer.getDeduplicationKey(phoneNumber, displayName)
+  const contactRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}/${contactId}`)
+  const payload = await buildContactPayload(
+    null,
     displayName,
     phoneNumber,
-    normalizedNumber,
     phoneType,
-    email: email || null,
-    notes: notes || null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    source: 'web',
-    syncedToAndroid: false,
-  })
-
-  return newContactRef.key
+    email,
+    notes,
+    photoBase64,
+    source
+  )
+  await set(contactRef, payload)
+  return contactId
 }
 
-// Update a desktop contact
-export const updateDesktopContact = async (
+export const updateContact = async (
   userId: string,
   contactId: string,
   displayName: string,
   phoneNumber: string,
   phoneType: string = 'Mobile',
   email?: string,
-  notes?: string
+  notes?: string,
+  photoBase64?: string,
+  source: 'web' | 'macos' = 'web'
 ) => {
-  const contactRef = ref(database, `${USERS_PATH}/${userId}/${DESKTOP_CONTACTS_PATH}/${contactId}`)
-
-  // Normalize phone number using consistent cross-platform logic
-  const normalizedNumber = PhoneNumberNormalizer.normalize(phoneNumber)
-
-  await set(contactRef, {
+  const contactRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}/${contactId}`)
+  const snapshot = await get(contactRef)
+  const existingData = snapshot.val() as Record<string, any> | null
+  const payload = await buildContactPayload(
+    existingData,
     displayName,
     phoneNumber,
-    normalizedNumber,
     phoneType,
-    email: email || null,
-    notes: notes || null,
-    updatedAt: serverTimestamp(),
-    source: 'web',
-    syncedToAndroid: false, // Reset to trigger re-sync
-  })
+    email,
+    notes,
+    photoBase64,
+    source
+  )
+  await set(contactRef, payload)
 }
 
-// Delete a desktop contact
-export const deleteDesktopContact = async (userId: string, contactId: string) => {
-  const contactRef = ref(database, `${USERS_PATH}/${userId}/${DESKTOP_CONTACTS_PATH}/${contactId}`)
+export const deleteContact = async (userId: string, contactId: string) => {
+  const contactRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}/${contactId}`)
   await remove(contactRef)
 }
 
+// ============================================
 // ============================================
 // ADMIN CLEANUP FUNCTIONS
 // ============================================
@@ -1161,13 +1312,28 @@ export const getOrphanCounts = async (): Promise<OrphanCounts> => {
     const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000)
     const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000)
 
-    // Check pending pairings
-    const pairingsRef = ref(database, PENDING_PAIRINGS_PATH)
-    const pairingsSnapshot = await get(pairingsRef)
-    if (pairingsSnapshot.exists()) {
-      pairingsSnapshot.forEach((child) => {
+    // Check pending pairings - V1 path
+    const v1PairingsRef = ref(database, PENDING_PAIRINGS_PATH)
+    const v1PairingsSnapshot = await get(v1PairingsRef)
+    if (v1PairingsSnapshot.exists()) {
+      v1PairingsSnapshot.forEach((child) => {
         const data = child.val()
         if (data.expiresAt && now > data.expiresAt) {
+          counts.expiredPairings++
+        }
+      })
+    }
+
+    // Check pairing requests - V2 path
+    const v2PairingsRef = ref(database, 'pairing_requests')
+    const v2PairingsSnapshot = await get(v2PairingsRef)
+    if (v2PairingsSnapshot.exists()) {
+      v2PairingsSnapshot.forEach((child) => {
+        const data = child.val()
+        const isExpired = data.expiresAt && now > data.expiresAt
+        const isOldCompleted = data.status !== 'pending' &&
+          data.createdAt && (now - data.createdAt > 10 * 60 * 1000)
+        if (isExpired || isOldCompleted) {
           counts.expiredPairings++
         }
       })
@@ -1341,20 +1507,42 @@ export const cleanupStaleOutgoingMessages = async (userId: string, olderThanHour
   return deletedCount
 }
 
-// Clean up expired pending pairings
+// Clean up expired pending pairings (V1 and V2 paths)
 export const cleanupExpiredPairings = async (): Promise<number> => {
   const now = Date.now()
   let deletedCount = 0
 
   try {
-    const pairingsRef = ref(database, PENDING_PAIRINGS_PATH)
-    const snapshot = await get(pairingsRef)
+    // Clean up V1 path (pending_pairings)
+    const v1PairingsRef = ref(database, PENDING_PAIRINGS_PATH)
+    const v1Snapshot = await get(v1PairingsRef)
 
-    if (snapshot.exists()) {
+    if (v1Snapshot.exists()) {
       const deletePromises: Promise<void>[] = []
-      snapshot.forEach((child) => {
+      v1Snapshot.forEach((child) => {
         const data = child.val()
         if (data.expiresAt && now > data.expiresAt) {
+          deletePromises.push(remove(child.ref))
+          deletedCount++
+        }
+      })
+      await Promise.all(deletePromises)
+    }
+
+    // Clean up V2 path (pairing_requests)
+    const v2PairingsRef = ref(database, 'pairing_requests')
+    const v2Snapshot = await get(v2PairingsRef)
+
+    if (v2Snapshot.exists()) {
+      const deletePromises: Promise<void>[] = []
+      v2Snapshot.forEach((child) => {
+        const data = child.val()
+        // Delete if expired or if it's an old completed/rejected request
+        const isExpired = data.expiresAt && now > data.expiresAt
+        const isOldCompleted = data.status !== 'pending' &&
+          data.createdAt && (now - data.createdAt > 10 * 60 * 1000) // 10 minutes
+
+        if (isExpired || isOldCompleted) {
           deletePromises.push(remove(child.ref))
           deletedCount++
         }

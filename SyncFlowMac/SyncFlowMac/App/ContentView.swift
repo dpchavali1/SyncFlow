@@ -198,6 +198,17 @@ struct MainView: View {
                 }
             }
         }
+        .onChange(of: appState.userId) { newUserId in
+            // Start listening when user is paired (userId becomes available)
+            if let userId = newUserId {
+                print("[ContentView] User paired, starting message listener for userId: \(userId)")
+                messageStore.startListening(userId: userId)
+                // Fetch usage stats
+                Task {
+                    await usageTracker.fetchUsageStats(userId: userId)
+                }
+            }
+        }
         // Keyboard shortcuts help overlay
         .overlay(
             Group {

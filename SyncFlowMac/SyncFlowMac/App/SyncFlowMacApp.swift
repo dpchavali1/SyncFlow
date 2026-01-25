@@ -536,6 +536,17 @@ class AppState: ObservableObject {
         self.userId = userId
         self.isPaired = true
         UserDefaults.standard.set(userId, forKey: "syncflow_user_id")
+
+        // Update subscription status with the newly paired user's plan from Firebase
+        print("AppState.setPaired: Setting user \(userId), updating subscription status")
+        Task {
+            print("AppState.setPaired: Calling updateSubscriptionStatus...")
+            await SubscriptionService.shared.updateSubscriptionStatus()
+            print("AppState.setPaired: updateSubscriptionStatus completed")
+            print("AppState.setPaired: Current subscriptionStatus = \(SubscriptionService.shared.subscriptionStatus.displayText)")
+            print("AppState.setPaired: isPremium = \(SubscriptionService.shared.isPremium)")
+        }
+
         fileTransferService.configure(userId: userId)
         continuityService.configure(userId: userId)
         continuityService.startListening()

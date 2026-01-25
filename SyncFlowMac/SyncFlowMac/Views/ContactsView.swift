@@ -9,39 +9,36 @@ import SwiftUI
 import FirebaseDatabase
 import Combine
 
+enum PhoneType: String, CaseIterable {
+    case mobile = "Mobile"
+    case home = "Home"
+    case work = "Work"
+    case main = "Main"
+    case other = "Other"
+    
+    var displayName: String {
+        return rawValue
+    }
+}
+
 struct ContactsView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var contactsStore = ContactsStore()
     @State private var searchText = ""
     @State private var selectedContact: Contact?
     @State private var showNewContactSheet = false
-    @State private var editingDesktopContact: DesktopContact? = nil
-    @State private var showDesktopContacts = true
+    @State private var editingContact: Contact? = nil
 
-    var filteredContacts: [Contact] {
-        if searchText.isEmpty {
-            return contactsStore.contacts
-        }
-        return contactsStore.contacts.filter { contact in
-            matchesSearch(
-                name: contact.displayName,
-                phoneNumber: contact.phoneNumber,
-                normalizedNumber: contact.normalizedNumber
-            )
-        }
+    var filteredSyncedContacts: [Contact] {
+        let source = contactsStore.syncedContacts
+        guard !searchText.isEmpty else { return source }
+        return source.filter { matchesSearch(contact: $0) }
     }
 
-    var filteredDesktopContacts: [DesktopContact] {
-        if searchText.isEmpty {
-            return contactsStore.desktopContacts
-        }
-        return contactsStore.desktopContacts.filter { contact in
-            matchesSearch(
-                name: contact.displayName,
-                phoneNumber: contact.phoneNumber,
-                normalizedNumber: contact.normalizedNumber
-            )
-        }
+    var filteredPendingContacts: [Contact] {
+        let source = contactsStore.pendingContacts
+        guard !searchText.isEmpty else { return source }
+        return source.filter { matchesSearch(contact: $0) }
     }
 
     var body: some View {
@@ -85,7 +82,7 @@ struct ContactsView: View {
                         .padding(.top)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if filteredContacts.isEmpty && filteredDesktopContacts.isEmpty {
+            } else if filteredSyncedContacts.isEmpty && filteredPendingContacts.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: searchText.isEmpty ? "person.2.slash" : "magnifyingglass")
                         .font(.system(size: 48))
@@ -109,67 +106,83 @@ struct ContactsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                        // Desktop-created contacts section (syncs to Android)
-                        if !filteredDesktopContacts.isEmpty {
+                    LazyVStack(spacing: 12, pinnedViews: [.sectionHeaders]) {
+                        if !filteredPendingContacts.isEmpty {
                             Section {
-                                ForEach(filteredDesktopContacts) { contact in
-                                    DesktopContactRow(
+                                ForEach(filteredPendingContacts) { contact in
+                                    PendingContactRow(
                                         contact: contact,
-                                        onEdit: { editingDesktopContact = contact },
-                                        onDelete: { deleteDesktopContact(contact) }
+                                        onEdit: { editingContact = contact },
+                                        onDelete: { deleteContact(contact) }
                                     )
                                     .environmentObject(appState)
                                 }
                             } header: {
-                                HStack {
-                                    Image(systemName: "laptopcomputer")
-                                        .foregroundColor(.blue)
-                                    Text("Created on Mac")
-                                        .font(.headline)
+                                HStack(spacing: 12) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "laptopcomputer")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundColor(.blue)
+                                        Text("Pending changes")
+                                            .font(.system(.headline, design: .default))
+                                            .foregroundColor(.primary)
+                                    }
                                     Spacer()
-                                    Text("\(filteredDesktopContacts.count)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 2)
-                                        .background(Color.secondary.opacity(0.2))
-                                        .cornerRadius(8)
+                                    VStack(alignment: .trailing) {
+                                        Text("\(filteredPendingContacts.count)")
+                                            .font(.system(.caption, design: .rounded))
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.white)
+                                            .frame(minWidth: 24)
+                                            .padding(.vertical, 2)
+                                            .padding(.horizontal, 8)
+                                            .background(Color.blue)
+                                            .cornerRadius(6)
+                                    }
                                 }
                                 .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
+                                .padding(.vertical, 10)
                                 .background(Color(nsColor: .windowBackgroundColor))
                             }
                         }
 
-                        // Android contacts section
-                        if !filteredContacts.isEmpty {
+                        if !filteredSyncedContacts.isEmpty {
                             Section {
-                                ForEach(filteredContacts) { contact in
+                                ForEach(filteredSyncedContacts) { contact in
                                     ContactRow(contact: contact, selectedContact: $selectedContact)
                                         .environmentObject(appState)
                                 }
                             } header: {
-                                HStack {
-                                    Image(systemName: "iphone")
-                                        .foregroundColor(.green)
-                                    Text("From Android")
-                                        .font(.headline)
+                                HStack(spacing: 12) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "iphone")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundColor(.green)
+                                        Text("From Android")
+                                            .font(.system(.headline, design: .default))
+                                            .foregroundColor(.primary)
+                                    }
                                     Spacer()
-                                    Text("\(filteredContacts.count)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 2)
-                                        .background(Color.secondary.opacity(0.2))
-                                        .cornerRadius(8)
+                                    VStack(alignment: .trailing) {
+                                        Text("\(filteredSyncedContacts.count)")
+                                            .font(.system(.caption, design: .rounded))
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.white)
+                                            .frame(minWidth: 24)
+                                            .padding(.vertical, 2)
+                                            .padding(.horizontal, 8)
+                                            .background(Color.green)
+                                            .cornerRadius(6)
+                                    }
                                 }
                                 .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
+                                .padding(.vertical, 10)
                                 .background(Color(nsColor: .windowBackgroundColor))
                             }
                         }
                     }
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 4)
                 }
             }
         }
@@ -180,22 +193,30 @@ struct ContactsView: View {
                 contactsStore.startListening(userId: userId)
             }
         }
+        .onChange(of: appState.userId) { newUserId in
+            // Start listener when userId becomes available (e.g., after pairing)
+            if let userId = newUserId {
+                contactsStore.startListening(userId: userId)
+            } else {
+                contactsStore.stopListening()
+            }
+        }
         .sheet(isPresented: $showNewContactSheet) {
             ContactEditSheet(
                 mode: .create,
-                onSave: { name, phone, phoneType, email, notes in
+                onSave: { _, name, phone, phoneType, email, notes in
                     Task {
                         await createContact(name: name, phone: phone, phoneType: phoneType, email: email, notes: notes)
                     }
                 }
             )
         }
-        .sheet(item: $editingDesktopContact) { contact in
+        .sheet(item: $editingContact) { contact in
             ContactEditSheet(
                 mode: .edit(contact),
-                onSave: { name, phone, phoneType, email, notes in
+                onSave: { contactId, name, phone, phoneType, email, notes in
                     Task {
-                        await updateContact(contact: contact, name: name, phone: phone, phoneType: phoneType, email: email, notes: notes)
+                        await updateContact(contactId: contactId ?? contact.id, name: name, phone: phone, phoneType: phoneType, email: email, notes: notes)
                     }
                 }
             )
@@ -206,59 +227,64 @@ struct ContactsView: View {
         guard let userId = appState.userId else { return }
 
         do {
-            _ = try await FirebaseService.shared.createDesktopContact(
+            _ = try await FirebaseService.shared.createContact(
                 userId: userId,
                 displayName: name,
                 phoneNumber: phone,
                 phoneType: phoneType,
                 email: email,
-                notes: notes
+                notes: notes,
+                photoBase64: nil,
+                source: "macos"
             )
         } catch {
             print("Error creating contact: \(error)")
         }
     }
 
-    private func updateContact(contact: DesktopContact, name: String, phone: String, phoneType: String, email: String?, notes: String?) async {
+    private func updateContact(contactId: String, name: String, phone: String, phoneType: String, email: String?, notes: String?) async {
         guard let userId = appState.userId else { return }
 
         do {
-            try await FirebaseService.shared.updateDesktopContact(
+            try await FirebaseService.shared.updateContact(
                 userId: userId,
-                contactId: contact.id,
+                contactId: contactId,
                 displayName: name,
                 phoneNumber: phone,
                 phoneType: phoneType,
                 email: email,
-                notes: notes
+                notes: notes,
+                photoBase64: nil,
+                source: "macos"
             )
         } catch {
             print("Error updating contact: \(error)")
         }
     }
 
-    private func deleteDesktopContact(_ contact: DesktopContact) {
+    private func deleteContact(_ contact: Contact) {
         guard let userId = appState.userId else { return }
 
         Task {
             do {
-                try await FirebaseService.shared.deleteDesktopContact(userId: userId, contactId: contact.id)
+                try await FirebaseService.shared.deleteContact(userId: userId, contactId: contact.id)
             } catch {
                 print("Error deleting contact: \(error)")
             }
         }
     }
 
-    private func matchesSearch(name: String, phoneNumber: String, normalizedNumber: String) -> Bool {
+    private func matchesSearch(contact: Contact) -> Bool {
         if searchText.isEmpty {
             return true
         }
 
-        if name.localizedCaseInsensitiveContains(searchText) {
+        if contact.displayName.localizedCaseInsensitiveContains(searchText) {
             return true
         }
 
-        if phoneNumber.localizedCaseInsensitiveContains(searchText) {
+        let phone = contact.phoneNumber ?? ""
+        if phone.localizedCaseInsensitiveContains(searchText) {
             return true
         }
 
@@ -267,8 +293,8 @@ struct ContactsView: View {
             return false
         }
 
-        let numberDigitsSource = normalizedNumber.isEmpty ? phoneNumber : normalizedNumber
-        let numberDigits = numberDigitsSource.filter { $0.isNumber }
+        let normalized = contact.normalizedNumber ?? phone
+        let numberDigits = normalized.filter { $0.isNumber }
         if numberDigits.contains(queryDigits) {
             return true
         }
@@ -295,8 +321,8 @@ struct ContactRow: View {
     @State private var hasLoadedDevices = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Avatar with photo or initials
+        HStack(spacing: 16) {
+            // Avatar with photo or initials - larger size
             Group {
                 if let photoBase64 = contact.photoBase64,
                    let imageData = Data(base64Encoded: photoBase64, options: .ignoreUnknownCharacters),
@@ -304,104 +330,120 @@ struct ContactRow: View {
                     Image(nsImage: nsImage)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 56, height: 56)
                         .clipShape(Circle())
+                        .shadow(radius: 2)
                 } else {
                     Circle()
-                        .fill(Color.blue.opacity(0.2))
-                        .frame(width: 44, height: 44)
+                        .fill(
+                            LinearGradient(
+                                gradient: Gradient(colors: [
+                                    Color.blue.opacity(0.3),
+                                    Color.cyan.opacity(0.2)
+                                ]),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 56, height: 56)
                         .overlay(
                             Text(contact.initials)
-                                .font(.headline)
+                                .font(.system(size: 18, weight: .semibold))
                                 .foregroundColor(.blue)
                         )
                 }
             }
 
-            // Contact info
-            VStack(alignment: .leading, spacing: 4) {
+            // Contact info - improved layout
+            VStack(alignment: .leading, spacing: 6) {
                 Text(contact.displayName)
-                    .font(.body)
-                    .fontWeight(.medium)
-                HStack(spacing: 6) {
-                    Text(contact.formattedPhoneNumber)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("•")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text(contact.phoneType)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    .font(.system(.body, design: .default))
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                        Text(contact.formattedPhoneNumber)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if !contact.phoneType.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "tag.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                            Text(contact.phoneType)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
 
             Spacer()
 
-            // Call button
+            // Action buttons - redesigned
             if isHovered {
-                if availableSims.count > 1 {
-                    Menu {
-                        ForEach(availableSims) { sim in
-                            Button(action: {
-                                selectedSim = sim
-                                initiateCall()
-                            }) {
-                                HStack {
+                HStack(spacing: 8) {
+                    if availableSims.count > 1 {
+                        Menu {
+                            ForEach(availableSims) { sim in
+                                Button(action: {
+                                    selectedSim = sim
+                                    initiateCall()
+                                }) {
                                     Text(sim.formattedDisplayName)
-                                    if selectedSim?.id == sim.id {
-                                        Image(systemName: "checkmark")
-                                    }
                                 }
                             }
+                        } label: {
+                            Image(systemName: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill")
+                                .foregroundColor(isCallInProgress ? .green : .blue)
                         }
-                    } label: {
-                        Image(systemName: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill")
-                            .foregroundColor(isCallInProgress ? .green : .blue)
-                            .frame(width: 32, height: 32)
+                        .buttonStyle(.bordered)
+                        .help("Choose SIM card to call from")
+                        .disabled(isCallInProgress)
+                    } else {
+                        Button(action: {
+                            initiateCall()
+                        }) {
+                            Image(systemName: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill")
+                                .foregroundColor(isCallInProgress ? .green : .blue)
+                        }
+                        .buttonStyle(.bordered)
+                        .help("Call via Android phone")
+                        .disabled(isCallInProgress)
                     }
-                    .buttonStyle(.borderless)
-                    .help("Choose SIM card to call from")
-                    .disabled(isCallInProgress)
-                } else {
+
+                    // SyncFlow Video Call button
                     Button(action: {
-                        initiateCall()
+                        initiateSyncFlowCall(isVideo: true)
                     }) {
-                        Image(systemName: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill")
-                            .foregroundColor(isCallInProgress ? .green : .blue)
-                            .frame(width: 32, height: 32)
+                        Image(systemName: "video.fill")
+                            .foregroundColor(.green)
                     }
-                    .buttonStyle(.borderless)
-                    .help("Call via Android phone")
-                    .disabled(isCallInProgress)
-                }
+                    .buttonStyle(.bordered)
+                    .help("SyncFlow video call to Android device")
 
-                // SyncFlow Video Call button
-                Button(action: {
-                    initiateSyncFlowCall(isVideo: true)
-                }) {
-                    Image(systemName: "video.fill")
-                        .foregroundColor(.green)
-                        .frame(width: 32, height: 32)
+                    // Message button
+                    Button(action: {
+                        startConversation()
+                    }) {
+                        Image(systemName: "message.fill")
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Send message")
                 }
-                .buttonStyle(.borderless)
-                .help("SyncFlow video call to Android device")
-
-                // Message button
-                Button(action: {
-                    startConversation()
-                }) {
-                    Image(systemName: "message.fill")
-                        .foregroundColor(.blue)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.borderless)
-                .help("Send message")
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(isHovered ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+        .background(isHovered ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear)
+        .cornerRadius(8)
         .onHover { hovering in
             isHovered = hovering
             if hovering && !hasLoadedSims {
@@ -447,7 +489,7 @@ struct ContactRow: View {
 
     private func initiateCall() {
         isCallInProgress = true
-        appState.makeCall(to: contact.phoneNumber)
+        appState.makeCall(to: contact.phoneNumber ?? "")
 
         callStatus = .completed
         showCallAlert = true
@@ -461,13 +503,13 @@ struct ContactRow: View {
     private func startConversation() {
         // Create a conversation object for this contact
         let conversation = Conversation(
-            id: contact.normalizedNumber,
-            address: contact.phoneNumber,
+            id: contact.normalizedNumber ?? "",
+            address: contact.phoneNumber ?? "",
             contactName: contact.displayName,
             lastMessage: "",
             timestamp: Date(),
             unreadCount: 0,
-            allAddresses: [contact.phoneNumber],
+            allAddresses: [contact.phoneNumber ?? ""],
             isPinned: false,
             isArchived: false,
             isBlocked: false,
@@ -506,7 +548,7 @@ struct ContactRow: View {
         Task {
             do {
                 let callId = try await appState.syncFlowCallManager.startCallToUser(
-                    recipientPhoneNumber: phoneNumber,
+                    recipientPhoneNumber: phoneNumber ?? "",
                     recipientName: recipientName,
                     isVideo: isVideo
                 )
@@ -523,10 +565,10 @@ struct ContactRow: View {
     }
 }
 
-// MARK: - Desktop Contact Row
+// MARK: - Pending Contact Row
 
-struct DesktopContactRow: View {
-    let contact: DesktopContact
+struct PendingContactRow: View {
+    let contact: Contact
     let onEdit: () -> Void
     let onDelete: () -> Void
     @EnvironmentObject var appState: AppState
@@ -536,7 +578,6 @@ struct DesktopContactRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Avatar with initials
             Circle()
                 .fill(Color.blue.opacity(0.2))
                 .frame(width: 44, height: 44)
@@ -546,26 +587,18 @@ struct DesktopContactRow: View {
                         .foregroundColor(.blue)
                 )
 
-            // Contact info
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(contact.displayName)
                         .font(.body)
                         .fontWeight(.medium)
 
-                    // Sync status indicator
-                    if contact.syncedToAndroid {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                            .font(.caption)
-                            .help("Synced to Android")
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .foregroundColor(.orange)
-                            .font(.caption)
-                            .help("Pending sync to Android")
-                    }
+                    Image(systemName: contact.isPendingSync ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill")
+                        .foregroundColor(contact.isPendingSync ? .orange : .green)
+                        .font(.caption)
+                        .help(contact.isPendingSync ? "Pending sync to Android" : "Synced to Android")
                 }
+
                 HStack(spacing: 6) {
                     Text(contact.formattedPhoneNumber)
                         .font(.caption)
@@ -590,7 +623,6 @@ struct DesktopContactRow: View {
 
             Spacer()
 
-            // Action buttons on hover
             if isHovered {
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
@@ -608,9 +640,10 @@ struct DesktopContactRow: View {
                 .buttonStyle(.borderless)
                 .help("Delete contact")
 
-                // Call button
                 Button(action: {
-                    appState.makeCall(to: contact.phoneNumber)
+                    if let phone = contact.phoneNumber {
+                        appState.makeCall(to: phone)
+                    }
                 }) {
                     Image(systemName: "phone.fill")
                         .foregroundColor(.green)
@@ -619,16 +652,15 @@ struct DesktopContactRow: View {
                 .buttonStyle(.borderless)
                 .help("Call contact")
 
-                // Message button
                 Button(action: {
                     let conversation = Conversation(
-                        id: contact.normalizedNumber,
-                        address: contact.phoneNumber,
+                        id: contact.normalizedNumber ?? (contact.phoneNumber ?? ""),
+                        address: contact.phoneNumber ?? "",
                         contactName: contact.displayName,
                         lastMessage: "",
                         timestamp: Date(),
                         unreadCount: 0,
-                        allAddresses: [contact.phoneNumber],
+                        allAddresses: [contact.phoneNumber ?? ""],
                         isPinned: false,
                         isArchived: false,
                         isBlocked: false,
@@ -666,12 +698,12 @@ struct DesktopContactRow: View {
 
 enum ContactEditMode {
     case create
-    case edit(DesktopContact)
+    case edit(Contact)
 }
 
 struct ContactEditSheet: View {
     let mode: ContactEditMode
-    let onSave: (String, String, String, String?, String?) -> Void
+    let onSave: (_ contactId: String?, _ name: String, _ phone: String, _ phoneType: String, _ email: String?, _ notes: String?) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -761,7 +793,7 @@ struct ContactEditSheet: View {
         .onAppear {
             if case .edit(let contact) = mode {
                 name = contact.displayName
-                phoneNumber = contact.phoneNumber
+                phoneNumber = contact.phoneNumber ?? ""
                 phoneType = PhoneType(rawValue: contact.phoneType) ?? .mobile
                 email = contact.email ?? ""
                 notes = contact.notes ?? ""
@@ -777,7 +809,16 @@ struct ContactEditSheet: View {
         let trimmedEmail = email.trimmingCharacters(in: .whitespaces)
         let trimmedNotes = notes.trimmingCharacters(in: .whitespaces)
 
+        let contactId: String?
+        switch mode {
+        case .create:
+            contactId = nil
+        case .edit(let contact):
+            contactId = contact.id
+        }
+
         onSave(
+            contactId,
             trimmedName,
             trimmedPhone,
             phoneType.rawValue,
@@ -793,39 +834,34 @@ struct ContactEditSheet: View {
 
 class ContactsStore: ObservableObject {
     @Published var contacts: [Contact] = []
-    @Published var desktopContacts: [DesktopContact] = []
     @Published var isLoading = true
 
     private var contactsListenerHandle: DatabaseHandle?
-    private var desktopContactsListenerHandle: DatabaseHandle?
     private var currentUserId: String?
+
+    var pendingContacts: [Contact] {
+        contacts.filter { $0.isPendingSync }
+    }
+
+    var syncedContacts: [Contact] {
+        contacts.filter { !$0.isPendingSync }
+    }
 
     func startListening(userId: String) {
         currentUserId = userId
         isLoading = true
 
-        // Remove existing listeners if any
         stopListening()
 
-        // Start listening for Android contacts
         contactsListenerHandle = FirebaseService.shared.listenToContacts(userId: userId) { [weak self] contacts in
             DispatchQueue.main.async {
                 self?.contacts = contacts
                 self?.updateLoadingState()
             }
         }
-
-        // Start listening for desktop-created contacts
-        desktopContactsListenerHandle = FirebaseService.shared.listenToDesktopContacts(userId: userId) { [weak self] contacts in
-            DispatchQueue.main.async {
-                self?.desktopContacts = contacts
-                self?.updateLoadingState()
-            }
-        }
     }
 
     private func updateLoadingState() {
-        // Consider loading complete once we've received at least one update
         isLoading = false
     }
 
@@ -833,11 +869,7 @@ class ContactsStore: ObservableObject {
         if let handle = contactsListenerHandle, let userId = currentUserId {
             FirebaseService.shared.removeContactsListener(userId: userId, handle: handle)
         }
-        if let handle = desktopContactsListenerHandle, let userId = currentUserId {
-            FirebaseService.shared.removeDesktopContactsListener(userId: userId, handle: handle)
-        }
         contactsListenerHandle = nil
-        desktopContactsListenerHandle = nil
     }
 
     deinit {

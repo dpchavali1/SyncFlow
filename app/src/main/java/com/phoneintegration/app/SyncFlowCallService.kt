@@ -286,6 +286,14 @@ class SyncFlowCallService : Service() {
     }
 
     private fun startForegroundNotification() {
+        // On Android 14+ starting foreground while app is backgrounded will crash.
+        val inForeground = androidx.lifecycle.ProcessLifecycleOwner.get()
+            .lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        if (!inForeground) {
+            Log.w(TAG, "Skipping startForegroundNotification because app is backgrounded")
+            return
+        }
+
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID_SERVICE)
             .setContentTitle("SyncFlow")
             .setContentText("Processing call...")

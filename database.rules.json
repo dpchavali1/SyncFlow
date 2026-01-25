@@ -6,6 +6,44 @@
       "$uid": {
         ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid || auth.token.admin === true || auth.uid == 'durgaprasad.chavali@gmail.com' || auth.uid == 'admin')",
         ".write": "auth != null && auth.uid == $uid",
+        "profile": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && auth.uid == $uid",
+          "phone": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 20)"
+          },
+          "phoneHash": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 64)"
+          },
+          "phoneVerifiedAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "platform": {
+            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'android' || newData.val() == 'ios'))"
+          },
+          "email": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+          },
+          "displayName": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+          }
+        },
+        "subscription": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid || auth.token.admin === true)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
+          "plan": {
+            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime'))"
+          },
+          "deviceLimit": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "createdAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "planExpiresAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
+        },
         "devices": {
           ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           "$deviceId": {
@@ -517,41 +555,98 @@
         },
         "contacts": {
           "$contactId": {
-            ".validate": "newData.hasChildren(['displayName'])",
+            ".validate": "newData.hasChildren(['displayName','phoneNumbers','sync'])",
             "displayName": {
               ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200"
+            },
+            "notes": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 1000)"
+            },
+            "company": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 200)"
             },
             "phoneNumbers": {
               "$phoneId": {
                 "number": {
-                  ".validate": "newData.isString() && newData.val().length > 0"
+                  ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 50"
+                },
+                "normalizedNumber": {
+                  ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 20)"
                 },
                 "type": {
-                  ".validate": "!newData.exists() || newData.isString()"
+                  ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 20)"
                 },
                 "label": {
-                  ".validate": "!newData.exists() || newData.isString()"
+                  ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 20)"
+                },
+                "isPrimary": {
+                  ".validate": "newData.isBoolean()"
                 }
               }
             },
             "emails": {
               "$emailId": {
                 "address": {
-                  ".validate": "newData.isString()"
+                  ".validate": "newData.isString() && newData.val().length <= 200"
                 },
                 "type": {
-                  ".validate": "!newData.exists() || newData.isString()"
+                  ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 50)"
+                },
+                "isPrimary": {
+                  ".validate": "!newData.exists() || newData.isBoolean()"
                 }
               }
             },
-            "photoUri": {
-              ".validate": "!newData.exists() || newData.isString()"
+            "photo": {
+              "thumbnailBase64": {
+                ".validate": "newData.isString() && newData.val().length <= 150000"
+              },
+              "hash": {
+                ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 64)"
+              },
+              "storagePath": {
+                ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 255)"
+              },
+              "updatedAt": {
+                ".validate": "!newData.exists() || newData.isNumber()"
+              }
             },
-            "lastUpdated": {
+            "sources": {
+              "android": {
+                ".validate": "newData.isBoolean()"
+              },
+              "web": {
+                ".validate": "!newData.exists() || newData.isBoolean()"
+              },
+              "macos": {
+                ".validate": "!newData.exists() || newData.isBoolean()"
+              }
+            },
+            "sync": {
+              "lastUpdatedAt": {
+                ".validate": "newData.isNumber()"
+              },
+              "lastSyncedAt": {
+                ".validate": "!newData.exists() || newData.isNumber()"
+              },
+              "lastUpdatedBy": {
+                ".validate": "newData.isString() && newData.val().length <= 50"
+              },
+              "version": {
+                ".validate": "newData.isNumber()"
+              },
+              "pendingAndroidSync": {
+                ".validate": "newData.isBoolean()"
+              },
+              "desktopOnly": {
+                ".validate": "newData.isBoolean()"
+              }
+            },
+            "androidContactId": {
               ".validate": "!newData.exists() || newData.isNumber()"
             }
           },
-          ".indexOn": ["displayName", "lastUpdated"]
+          ".indexOn": ["displayName"]
         },
         "webrtc_signaling": {
           "$callId": {
@@ -667,6 +762,38 @@
           "timestamp": {
             ".validate": "!newData.exists() || newData.isNumber()"
           }
+        },
+        "recovery_info": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid",
+          "code": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+          },
+          "createdAt": {
+            ".validate": "newData.isNumber()"
+          },
+          "codeHash": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 64)"
+          }
+        }
+      }
+    },
+    "recovery_codes": {
+      "$codeHash": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        ".validate": "newData.hasChildren(['userId', 'createdAt'])",
+        "userId": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "createdAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "platform": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "lastUsedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
         }
       }
     },
@@ -783,6 +910,74 @@
     "pairing_tokens": {
       ".read": false,
       ".write": false
+    },
+    "pairing_requests": {
+      ".read": "auth != null",
+      ".write": false,
+      "$token": {
+        ".write": false,
+        ".validate": "newData.hasChildren(['expiresAt', 'deviceId', 'status'])",
+        "deviceId": {
+          ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 50"
+        },
+        "deviceName": {
+          ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 100)"
+        },
+        "deviceType": {
+          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'macos' || newData.val() == 'web'))"
+        },
+        "appVersion": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "status": {
+          ".validate": "newData.isString() && (newData.val() == 'pending' || newData.val() == 'approved' || newData.val() == 'rejected' || newData.val() == 'expired')"
+        },
+        "createdAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "expiresAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "approvedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "approvedBy": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "rejectedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "rejectedBy": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "pairedUid": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "customToken": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "version": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        }
+      }
+    },
+    "phone_users": {
+      ".read": false,
+      ".write": false,
+      "$phoneHash": {
+        ".read": "auth != null",
+        ".write": false,
+        ".validate": "newData.hasChildren(['uid'])",
+        "uid": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "createdAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "lastLogin": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        }
+      }
     },
     "fcm_tokens": {
       "$uid": {

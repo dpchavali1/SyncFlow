@@ -17,6 +17,9 @@ import java.util.concurrent.TimeUnit
 /**
  * Enhanced Authentication Manager with secure session management.
  * Provides centralized authentication state management and security features.
+ *
+ * Now integrates with PhoneAuthManager for stable user identity.
+ * Phone-verified users get persistent identity across reinstalls.
  */
 class AuthManager private constructor(private val context: Context) {
 
@@ -36,6 +39,7 @@ class AuthManager private constructor(private val context: Context) {
     }
 
     private val auth = FirebaseAuth.getInstance()
+    private val phoneAuthManager: PhoneAuthManager by lazy { PhoneAuthManager.getInstance(context) }
     private val securityMonitor: SecurityMonitor? = try {
         SecurityMonitor.getInstance(context)
     } catch (e: Exception) {
@@ -110,22 +114,28 @@ class AuthManager private constructor(private val context: Context) {
                 val currentTime = System.currentTimeMillis()
                 val timeSinceLastActivity = currentTime - lastActivityTime
 
-                if (_authState.value is AuthState.Authenticated &&
-                    timeSinceLastActivity > TimeUnit.MINUTES.toMillis(SESSION_TIMEOUT_MINUTES)) {
+                val authState = _authState.value
+                if (authState is AuthState.Authenticated) {
+                    // Never auto-logout anonymous users; this keeps device pairing stable.
+                    if (authState.user.isAnonymous) {
+                        continue
+                    }
 
-                    // Log session timeout
-                    securityMonitor?.logEvent(SecurityEvent(
-                        type = SecurityEventType.SESSION_TIMEOUT,
-                        message = "Session timed out due to inactivity",
-                        metadata = mapOf(
-                            "timeoutMinutes" to SESSION_TIMEOUT_MINUTES.toString(),
-                            "inactiveMinutes" to (timeSinceLastActivity / (1000 * 60)).toString()
-                        )
-                    ))
+                    if (timeSinceLastActivity > TimeUnit.MINUTES.toMillis(SESSION_TIMEOUT_MINUTES)) {
+                        // Log session timeout
+                        securityMonitor?.logEvent(SecurityEvent(
+                            type = SecurityEventType.SESSION_TIMEOUT,
+                            message = "Session timed out due to inactivity",
+                            metadata = mapOf(
+                                "timeoutMinutes" to SESSION_TIMEOUT_MINUTES.toString(),
+                                "inactiveMinutes" to (timeSinceLastActivity / (1000 * 60)).toString()
+                            )
+                        ))
 
-                    Log.w(TAG, "Session timeout - logging out due to inactivity")
-                    logout()
-                    break
+                        Log.w(TAG, "Session timeout - logging out due to inactivity")
+                        logout()
+                        break
+                    }
                 }
             }
         }
@@ -214,12 +224,117 @@ class AuthManager private constructor(private val context: Context) {
      */
     fun getCurrentUserId(): String? {
         val user = auth.currentUser
-        return if (user != null && isSessionValid()) {
+        if (user == null) {
+            return null
+        }
+
+        // Anonymous sessions should remain stable across background usage.
+        if (user.isAnonymous) {
+            updateActivity()
+            return user.uid
+        }
+
+        return if (isSessionValid()) {
             updateActivity()
             user.uid
         } else {
             null
         }
+    }
+
+    /**
+     * Validate that Firebase Auth state is consistent.
+     *
+     * CRITICAL: Firebase Auth can get into a corrupted state where:
+     * - currentUser.uid returns one value (e.g., "SsBZRzinAchM2iEX9rmWY5isshR2")
+     * - But the actual ID token contains a different user_id (e.g., "lT8TI15UIYS4zQZKaxRvQDoz7n72")
+     *
+     * This causes Cloud Functions (which use the token's user_id) to operate on
+     * different data than the Android client (which uses currentUser.uid).
+     *
+     * IMPORTANT: We DO NOT sign out when corruption is detected, because:
+     * - Anonymous users can't be recovered after sign-out
+     * - Signing out would lose access to all user data
+     * - Instead, we return the TOKEN's user_id which is what Cloud Functions use
+     *
+     * @return The token's user_id (which Cloud Functions use), ensuring consistency
+     */
+    suspend fun validateAndFixAuthState(): String? {
+        val currentUser = auth.currentUser
+        if (currentUser == null) {
+            Log.d(TAG, "validateAuthState: No current user")
+            return null
+        }
+
+        try {
+            // Force refresh the token to get the latest state
+            val tokenResult = currentUser.getIdToken(true).await()
+            val idToken = tokenResult.token
+
+            if (idToken == null) {
+                Log.w(TAG, "validateAuthState: ID token is null, using currentUser.uid")
+                return currentUser.uid
+            }
+
+            // Decode JWT payload to extract actual user_id
+            val parts = idToken.split(".")
+            if (parts.size < 2) {
+                Log.w(TAG, "validateAuthState: Invalid JWT format, using currentUser.uid")
+                return currentUser.uid
+            }
+
+            val payload = String(android.util.Base64.decode(parts[1], android.util.Base64.URL_SAFE))
+            val userIdMatch = Regex("\"user_id\":\"([^\"]+)\"").find(payload)
+            val tokenUserId = userIdMatch?.groupValues?.get(1)
+
+            if (tokenUserId == null) {
+                Log.w(TAG, "validateAuthState: Could not extract user_id from token, using currentUser.uid")
+                return currentUser.uid
+            }
+
+            // Check for mismatch: currentUser.uid != token's user_id
+            if (tokenUserId != currentUser.uid) {
+                Log.w(TAG, "AUTH STATE MISMATCH DETECTED!")
+                Log.w(TAG, "  currentUser.uid = ${currentUser.uid}")
+                Log.w(TAG, "  token.user_id   = $tokenUserId")
+                Log.w(TAG, "  Using token.user_id to match Cloud Functions behavior")
+
+                // Log security event for monitoring
+                securityMonitor?.logEvent(SecurityEvent(
+                    type = SecurityEventType.AUTH_SUCCESS,
+                    message = "Auth state mismatch - using token user_id for consistency",
+                    metadata = mapOf(
+                        "currentUserUid" to currentUser.uid,
+                        "tokenUserId" to tokenUserId
+                    )
+                ))
+
+                // IMPORTANT: Return the TOKEN's user_id, NOT currentUser.uid
+                // This ensures Android uses the same user ID as Cloud Functions
+                // DO NOT sign out - that would create a new user and lose all data
+                return tokenUserId
+            }
+
+            // Auth state is consistent
+            Log.d(TAG, "validateAuthState: Auth state is valid (${currentUser.uid})")
+            return currentUser.uid
+
+        } catch (e: Exception) {
+            Log.e(TAG, "validateAuthState: Error validating auth state", e)
+            // Return current user ID as fallback - better than nothing
+            return currentUser.uid
+        }
+    }
+
+    /**
+     * Get current user ID with validation (suspend version).
+     * This should be used for critical operations that interact with Cloud Functions.
+     *
+     * Unlike getCurrentUserId(), this method validates that the auth state is consistent
+     * before returning the user ID.
+     */
+    suspend fun getValidatedUserId(): String? {
+        return validateAndFixAuthState()
     }
 
     /**
@@ -297,6 +412,82 @@ class AuthManager private constructor(private val context: Context) {
         tokenRefreshJob?.cancel()
         scope.cancel()
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // PHONE AUTHENTICATION INTEGRATION
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Check if user has verified their phone number.
+     * Phone verification provides a stable identity across reinstalls.
+     */
+    fun isPhoneVerified(): Boolean {
+        return phoneAuthManager.isPhoneVerified()
+    }
+
+    /**
+     * Get the verified phone number (if available)
+     */
+    fun getVerifiedPhoneNumber(): String? {
+        return phoneAuthManager.getVerifiedPhoneNumber()
+    }
+
+    /**
+     * Get the phone hash for Firebase lookups (privacy-preserving)
+     */
+    fun getPhoneHash(): String? {
+        return phoneAuthManager.getPhoneHash()
+    }
+
+    /**
+     * Check if user needs phone verification.
+     * Returns true if:
+     * - User is not authenticated, OR
+     * - User is authenticated anonymously but hasn't verified phone
+     */
+    fun needsPhoneVerification(): Boolean {
+        val user = auth.currentUser ?: return true
+        // If authenticated with phone (not anonymous), no verification needed
+        if (!user.isAnonymous && user.phoneNumber != null) {
+            return false
+        }
+        // If anonymous, check if they've verified phone through our system
+        return !phoneAuthManager.isPhoneVerified()
+    }
+
+    /**
+     * Get the authentication method used
+     */
+    fun getAuthMethod(): AuthMethod {
+        val user = auth.currentUser ?: return AuthMethod.NONE
+        return when {
+            user.phoneNumber != null -> AuthMethod.PHONE
+            user.isAnonymous -> AuthMethod.ANONYMOUS
+            else -> AuthMethod.OTHER
+        }
+    }
+
+    /**
+     * Ensure user is authenticated (anonymously if needed, phone-verified preferred)
+     * Call this before any Firebase operations that require auth.
+     */
+    suspend fun ensureAuthenticated(): Result<String> {
+        // If already authenticated, return current user
+        auth.currentUser?.let { return Result.success(it.uid) }
+
+        // Otherwise, sign in anonymously as fallback
+        return signInAnonymously()
+    }
+}
+
+/**
+ * Authentication method enum
+ */
+enum class AuthMethod {
+    NONE,
+    ANONYMOUS,
+    PHONE,
+    OTHER
 }
 
 /**
