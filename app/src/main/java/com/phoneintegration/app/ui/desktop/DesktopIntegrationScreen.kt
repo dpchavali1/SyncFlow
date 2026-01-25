@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.tasks.await
 import androidx.compose.material3.Switch
 
 /**
@@ -652,16 +653,51 @@ fun DesktopIntegrationScreen(
                             syncMessage = null
                             scope.launch {
                                 try {
-                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered - contacts & call history only")
-                                    // Skip messages - they sync in background and take too long (2000+ messages)
-                                    // Just sync contacts and call history which are much faster
-                                    syncInitialContacts()
-                                    syncInitialCallHistory()
-                                    syncMessage = "Contacts & call history synced! Messages sync in background."
-                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync completed")
+                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered")
+
+                                    // Quick direct Firebase write test
+                                    val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+                                    val userId = auth.currentUser?.uid
+                                    android.util.Log.d("DesktopIntegrationScreen", "Current userId: $userId")
+
+                                    if (userId == null) {
+                                        syncMessage = "Not authenticated - userId is null"
+                                        isSyncing = false
+                                        return@launch
+                                    }
+
+                                    // Write test call history entry directly
+                                    android.util.Log.d("DesktopIntegrationScreen", "Writing test call history entry...")
+                                    val db = com.google.firebase.database.FirebaseDatabase.getInstance()
+                                    val testRef = db.reference
+                                        .child("users")
+                                        .child(userId)
+                                        .child("call_history")
+                                        .child("test_${System.currentTimeMillis()}")
+
+                                    val testData = mapOf(
+                                        "phoneNumber" to "+1234567890",
+                                        "contactName" to "Test Contact",
+                                        "callType" to "Incoming",
+                                        "callDate" to System.currentTimeMillis(),
+                                        "duration" to 60L,
+                                        "formattedDuration" to "1:00",
+                                        "formattedDate" to "Test",
+                                        "simId" to 0
+                                    )
+
+                                    withTimeout(10000L) {
+                                        testRef.setValue(testData).await()
+                                    }
+
+                                    android.util.Log.d("DesktopIntegrationScreen", "Test entry written successfully!")
+                                    syncMessage = "Test entry synced! Check Mac app Call History."
+                                } catch (e: TimeoutCancellationException) {
+                                    android.util.Log.e("DesktopIntegrationScreen", "Sync timeout after 10 seconds")
+                                    syncMessage = "Timeout - check network connection"
                                 } catch (e: Exception) {
-                                    android.util.Log.e("DesktopIntegrationScreen", "Manual sync failed", e)
-                                    syncMessage = "Sync failed: ${e.message}"
+                                    android.util.Log.e("DesktopIntegrationScreen", "Sync failed", e)
+                                    syncMessage = "Failed: ${e.message}"
                                 } finally {
                                     isSyncing = false
                                 }
@@ -680,7 +716,7 @@ fun DesktopIntegrationScreen(
                         } else {
                             Icon(Icons.Default.Sync, "Sync")
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Sync Contacts & Call History")
+                            Text("Test Sync (10s timeout)")
                         }
                     }
 
