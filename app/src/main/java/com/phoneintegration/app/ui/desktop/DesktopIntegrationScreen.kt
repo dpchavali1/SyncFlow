@@ -655,7 +655,6 @@ fun DesktopIntegrationScreen(
                                 try {
                                     android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered")
 
-                                    // Quick direct Firebase write test
                                     val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
                                     val userId = auth.currentUser?.uid
                                     android.util.Log.d("DesktopIntegrationScreen", "Current userId: $userId")
@@ -666,35 +665,47 @@ fun DesktopIntegrationScreen(
                                         return@launch
                                     }
 
-                                    // Write test call history entry directly
-                                    android.util.Log.d("DesktopIntegrationScreen", "Writing test call history entry...")
+                                    // CRITICAL: Firebase is in OFFLINE mode to prevent OOM
+                                    // Must go online temporarily for writes
                                     val db = com.google.firebase.database.FirebaseDatabase.getInstance()
-                                    val testRef = db.reference
-                                        .child("users")
-                                        .child(userId)
-                                        .child("call_history")
-                                        .child("test_${System.currentTimeMillis()}")
+                                    android.util.Log.d("DesktopIntegrationScreen", "Going ONLINE for sync...")
+                                    db.goOnline()
 
-                                    val testData = mapOf(
-                                        "phoneNumber" to "+1234567890",
-                                        "contactName" to "Test Contact",
-                                        "callType" to "Incoming",
-                                        "callDate" to System.currentTimeMillis(),
-                                        "duration" to 60L,
-                                        "formattedDuration" to "1:00",
-                                        "formattedDate" to "Test",
-                                        "simId" to 0
-                                    )
+                                    try {
+                                        val testRef = db.reference
+                                            .child("users")
+                                            .child(userId)
+                                            .child("call_history")
+                                            .child("test_${System.currentTimeMillis()}")
 
-                                    withTimeout(10000L) {
-                                        testRef.setValue(testData).await()
+                                        val testData = mapOf(
+                                            "phoneNumber" to "+1234567890",
+                                            "contactName" to "Test Contact",
+                                            "callType" to "Incoming",
+                                            "callDate" to System.currentTimeMillis(),
+                                            "duration" to 60L,
+                                            "formattedDuration" to "1:00",
+                                            "formattedDate" to "Test",
+                                            "simId" to 0
+                                        )
+
+                                        withTimeout(10000L) {
+                                            testRef.setValue(testData).await()
+                                        }
+
+                                        // Give Firebase time to sync
+                                        kotlinx.coroutines.delay(1000)
+
+                                        android.util.Log.d("DesktopIntegrationScreen", "Test entry written!")
+                                        syncMessage = "Test synced! Check Mac Call History."
+                                    } finally {
+                                        // CRITICAL: Go back offline to prevent OOM
+                                        db.goOffline()
+                                        android.util.Log.d("DesktopIntegrationScreen", "Back OFFLINE")
                                     }
-
-                                    android.util.Log.d("DesktopIntegrationScreen", "Test entry written successfully!")
-                                    syncMessage = "Test entry synced! Check Mac app Call History."
                                 } catch (e: TimeoutCancellationException) {
-                                    android.util.Log.e("DesktopIntegrationScreen", "Sync timeout after 10 seconds")
-                                    syncMessage = "Timeout - check network connection"
+                                    android.util.Log.e("DesktopIntegrationScreen", "Sync timeout")
+                                    syncMessage = "Timeout - network issue"
                                 } catch (e: Exception) {
                                     android.util.Log.e("DesktopIntegrationScreen", "Sync failed", e)
                                     syncMessage = "Failed: ${e.message}"

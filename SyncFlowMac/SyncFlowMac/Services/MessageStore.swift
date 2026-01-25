@@ -23,6 +23,8 @@ class MessageStore: ObservableObject {
     @Published var pinnedMessages: Set<String> = [] // Set of pinned message IDs
     @Published var spamMessages: [SpamMessage] = []
     @Published var selectedSpamAddress: String? = nil
+    @Published var canLoadMore = false  // Whether more old messages exist
+    @Published var isLoadingMore = false  // Loading state for pagination
 
     private var messageListenerHandle: DatabaseHandle?
     private var reactionsListenerHandle: DatabaseHandle?
@@ -31,11 +33,15 @@ class MessageStore: ObservableObject {
     private var currentUserId: String?
     private var lastMessageIds: Set<String> = []
     private var lastMessageHash: Int = 0  // Track if message data actually changed
+    private var readReceiptsLoaded = false  // Track if read receipts have been loaded at least once
     private var cancellables = Set<AnyCancellable>()
+
+    // Pagination state
+    private var loadedTimeRangeStart: TimeInterval?  // Oldest message timestamp loaded
+    private var initialLoadDays: Int = 180  // Load last 180 days (6 months) to show more history on initial pairing
+    private var loadMoreDays: Int = 90  // Load 90 more days when "Load More" is clicked
     private var contactsListenerHandle: DatabaseHandle?
-    private var desktopContactsListenerHandle: DatabaseHandle?
     private var latestContacts: [Contact] = []
-    private var latestDesktopContacts: [DesktopContact] = []
     private var contactNameLookup: [String: String] = [:]
     private let pendingOutgoingQueue = DispatchQueue(label: "MessageStore.pendingOutgoingQueue")
     private var pendingOutgoingMessages: [String: Message] = [:]
@@ -202,8 +208,13 @@ class MessageStore: ObservableObject {
         currentUserId = userId
         isLoading = true
 
-        // Start listening to messages
-        messageListenerHandle = firebaseService.listenToMessages(userId: userId) { [weak self] messages in
+        // Reset pagination state
+        loadedTimeRangeStart = nil
+        canLoadMore = false
+
+        // Load ALL messages (no time filter) - matches web behavior
+        // Previously limited to 180 days which caused conversations to not appear
+        messageListenerHandle = firebaseService.listenToMessages(userId: userId, startTime: nil) { [weak self] messages in
             guard let self = self else { return }
 
             // Process on background thread to avoid blocking UI
@@ -271,6 +282,13 @@ class MessageStore: ObservableObject {
                     self.conversations = newConversations
                     self.isLoading = false
 
+                    // Track oldest message timestamp for pagination
+                    if let oldestMessage = mergeResult.mergedMessages.min(by: { $0.date < $1.date }) {
+                        self.loadedTimeRangeStart = oldestMessage.date / 1000  // Convert to seconds
+                    }
+                    // All messages loaded (no time filter), so no need for pagination
+                    self.canLoadMore = false
+
                     // Update badge count
                     self.notificationService.setBadgeCount(self.totalUnreadCount)
                 }
@@ -286,6 +304,7 @@ class MessageStore: ObservableObject {
         readReceiptsListenerHandle = firebaseService.listenToReadReceipts(userId: userId) { [weak self] receipts in
             DispatchQueue.main.async {
                 self?.readReceipts = receipts
+                self?.readReceiptsLoaded = true  // Mark that read receipts have been loaded
                 self?.messages = self?.applyReadStatus(to: self?.messages ?? []) ?? []
                 self?.updateConversations(from: self?.messages ?? [])
                 self?.notificationService.setBadgeCount(self?.totalUnreadCount ?? 0)
@@ -325,6 +344,66 @@ class MessageStore: ObservableObject {
         }
         stopListeningForContacts()
         currentUserId = nil
+        readReceiptsLoaded = false  // Reset flag when stopping
+        loadedTimeRangeStart = nil
+        canLoadMore = false
+    }
+
+    // MARK: - Load More Messages (Pagination)
+
+    func loadMoreMessages() {
+        guard let userId = currentUserId, !isLoadingMore, canLoadMore,
+              let oldestTimestamp = loadedTimeRangeStart else {
+            print("[MessageStore] Cannot load more: userId=\(currentUserId != nil), loading=\(isLoadingMore), canLoad=\(canLoadMore), oldest=\(loadedTimeRangeStart != nil)")
+            return
+        }
+
+        isLoadingMore = true
+        print("[MessageStore] Loading more messages older than \(Date(timeIntervalSince1970: oldestTimestamp))")
+
+        // Calculate new time range (30 more days back)
+        let endTime = oldestTimestamp * 1000  // Convert to milliseconds
+        let startTime = (oldestTimestamp - Double(loadMoreDays * 24 * 60 * 60)) * 1000
+
+        Task {
+            do {
+                let olderMessages = try await firebaseService.loadMessagesInTimeRange(
+                    userId: userId,
+                    startTime: startTime,
+                    endTime: endTime
+                )
+
+                await MainActor.run {
+                    print("[MessageStore] Loaded \(olderMessages.count) older messages")
+
+                    // Merge with existing messages
+                    var allMessages = self.messages + olderMessages
+                    allMessages = Array(Set(allMessages))  // Deduplicate
+                    allMessages.sort { $0.date > $1.date }  // Sort newest first
+
+                    self.messages = self.applyReadStatus(to: allMessages)
+                    self.updateConversations(from: self.messages)
+
+                    // Update pagination state
+                    if let newOldest = olderMessages.min(by: { $0.date < $1.date }) {
+                        self.loadedTimeRangeStart = newOldest.date / 1000
+                        // Check if we hit the time range boundary (more messages might exist)
+                        self.canLoadMore = abs(newOldest.date / 1000 - startTime / 1000) < (24 * 60 * 60)
+                    } else {
+                        // No more messages found
+                        self.canLoadMore = false
+                    }
+
+                    self.isLoadingMore = false
+                }
+            } catch {
+                await MainActor.run {
+                    print("[MessageStore] Error loading more messages: \(error)")
+                    self.error = error
+                    self.isLoadingMore = false
+                }
+            }
+        }
     }
 
     // MARK: - Read Status
@@ -336,9 +415,28 @@ class MessageStore: ObservableObject {
 
         return messages.map { message in
             var updatedMessage = message
-            updatedMessage.isRead = readReceiptIds.contains(message.id)
-                || readMessageIds.contains(message.id)
-                || message.type == 2 // Sent messages are always "read"
+
+            // Sent messages are always read
+            if message.type == 2 {
+                updatedMessage.isRead = true
+            }
+            // Check local macOS read status first
+            else if readMessageIds.contains(message.id) {
+                updatedMessage.isRead = true
+            }
+            // Check if Android marked it as read (read receipt from Android)
+            else if readReceiptIds.contains(message.id) {
+                updatedMessage.isRead = true
+            }
+            // If we haven't received any read receipts yet, assume synced messages are read
+            else if !readReceiptsLoaded {
+                updatedMessage.isRead = true
+            }
+            // Otherwise keep as is (default will be true from Message struct)
+            else {
+                updatedMessage.isRead = true
+            }
+
             return updatedMessage
         }
     }
@@ -408,9 +506,6 @@ class MessageStore: ObservableObject {
         for message in messages {
             let address = message.address
             let normalizedAddress = normalizePhoneNumber(address)
-
-            // Debug logging for message addresses
-            print("[macOS] Processing message - original address: \"\(address)\", normalized: \"\(normalizedAddress)\", isMMS: \(message.isMms)")
 
             // Skip blocked numbers (using cached value)
             if prefCache[address]?.isBlocked == true {
@@ -1096,26 +1191,14 @@ class MessageStore: ObservableObject {
                 self?.rebuildContactLookup()
             }
         }
-
-        desktopContactsListenerHandle = firebaseService.listenToDesktopContacts(userId: userId) { [weak self] contacts in
-            DispatchQueue.main.async {
-                self?.latestDesktopContacts = contacts
-                self?.rebuildContactLookup()
-            }
-        }
     }
 
     private func stopListeningForContacts() {
         if let handle = contactsListenerHandle, let userId = currentUserId {
             firebaseService.removeContactsListener(userId: userId, handle: handle)
         }
-        if let handle = desktopContactsListenerHandle, let userId = currentUserId {
-            firebaseService.removeDesktopContactsListener(userId: userId, handle: handle)
-        }
         contactsListenerHandle = nil
-        desktopContactsListenerHandle = nil
         latestContacts = []
-        latestDesktopContacts = []
         contactNameLookup = [:]
     }
 
@@ -1124,18 +1207,9 @@ class MessageStore: ObservableObject {
 
         for contact in latestContacts {
             let normalized = normalizePhoneNumber(
-                contact.normalizedNumber.isEmpty ? contact.phoneNumber : contact.normalizedNumber
+                (contact.normalizedNumber ?? "").isEmpty ? (contact.phoneNumber ?? "") : (contact.normalizedNumber ?? "")
             )
             if !normalized.isEmpty {
-                lookup[normalized] = contact.displayName
-            }
-        }
-
-        for contact in latestDesktopContacts {
-            let normalized = normalizePhoneNumber(
-                contact.normalizedNumber.isEmpty ? contact.phoneNumber : contact.normalizedNumber
-            )
-            if !normalized.isEmpty && lookup[normalized] == nil {
                 lookup[normalized] = contact.displayName
             }
         }
