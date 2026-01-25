@@ -231,43 +231,45 @@ fun DesktopIntegrationScreen(
 
     // Sync contacts after successful pairing
     suspend fun syncInitialContacts() {
-        try {
-            android.util.Log.d("DesktopIntegrationScreen", "Starting initial contact sync")
+        withContext(Dispatchers.IO) {
+            try {
+                android.util.Log.d("DesktopIntegrationScreen", "Starting initial contact sync")
 
-            // Use auth.currentUser?.uid directly (same as working test)
-            val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
-            if (userId == null) {
-                android.util.Log.e("DesktopIntegrationScreen", "Cannot sync contacts - no authenticated user")
-                return
+                val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+                if (userId == null) {
+                    android.util.Log.e("DesktopIntegrationScreen", "Cannot sync contacts - no authenticated user")
+                    return@withContext
+                }
+                android.util.Log.d("DesktopIntegrationScreen", "Syncing contacts for userId: $userId")
+
+                val contactsSyncService = com.phoneintegration.app.desktop.ContactsSyncService(appContext)
+                contactsSyncService.syncContactsForUser(userId)
+                android.util.Log.d("DesktopIntegrationScreen", "Initial contact sync completed")
+            } catch (e: Exception) {
+                android.util.Log.e("DesktopIntegrationScreen", "Error during initial contact sync", e)
             }
-            android.util.Log.d("DesktopIntegrationScreen", "Syncing contacts for userId: $userId")
-
-            val contactsSyncService = com.phoneintegration.app.desktop.ContactsSyncService(appContext)
-            contactsSyncService.syncContactsForUser(userId)
-            android.util.Log.d("DesktopIntegrationScreen", "Initial contact sync completed")
-        } catch (e: Exception) {
-            android.util.Log.e("DesktopIntegrationScreen", "Error during initial contact sync", e)
         }
     }
 
     // Sync call history after successful pairing
     suspend fun syncInitialCallHistory() {
-        try {
-            android.util.Log.d("DesktopIntegrationScreen", "Starting initial call history sync")
+        withContext(Dispatchers.IO) {
+            try {
+                android.util.Log.d("DesktopIntegrationScreen", "Starting initial call history sync")
 
-            // Use auth.currentUser?.uid directly (same as working test)
-            val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
-            if (userId == null) {
-                android.util.Log.e("DesktopIntegrationScreen", "Cannot sync - no authenticated user")
-                return
+                val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+                if (userId == null) {
+                    android.util.Log.e("DesktopIntegrationScreen", "Cannot sync - no authenticated user")
+                    return@withContext
+                }
+                android.util.Log.d("DesktopIntegrationScreen", "Syncing call history for userId: $userId")
+
+                val callHistorySyncService = com.phoneintegration.app.desktop.CallHistorySyncService(appContext)
+                callHistorySyncService.syncCallHistoryForUser(userId)
+                android.util.Log.d("DesktopIntegrationScreen", "Initial call history sync completed")
+            } catch (e: Exception) {
+                android.util.Log.e("DesktopIntegrationScreen", "Error during initial call history sync", e)
             }
-            android.util.Log.d("DesktopIntegrationScreen", "Syncing call history for userId: $userId")
-
-            val callHistorySyncService = com.phoneintegration.app.desktop.CallHistorySyncService(appContext)
-            callHistorySyncService.syncCallHistoryForUser(userId)
-            android.util.Log.d("DesktopIntegrationScreen", "Initial call history sync completed")
-        } catch (e: Exception) {
-            android.util.Log.e("DesktopIntegrationScreen", "Error during initial call history sync", e)
         }
     }
 
