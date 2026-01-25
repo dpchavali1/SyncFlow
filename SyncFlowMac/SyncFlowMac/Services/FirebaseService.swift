@@ -150,18 +150,94 @@ class FirebaseService {
         }
     }
 
-    // MARK: - QR Code Pairing (New Flow: macOS generates QR, Android scans)
+    // MARK: - QR Code Pairing V2 (Uses persistent device IDs)
 
-    /// Initiate a pairing session and get QR code data
+    /// Initiate a pairing session using V2 protocol with persistent device ID
+    /// Uses DeviceIdentifier for hardware-based ID that survives reinstalls
     func initiatePairing(deviceName: String? = nil, syncGroupId: String? = nil) async throws -> PairingSession {
+        // Get persistent device ID from DeviceIdentifier (Keychain-backed)
+        let deviceId = DeviceIdentifier.shared.getDeviceId()
+        let macDeviceName = deviceName ?? Host.current().localizedName ?? "Mac"
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0.0"
+
+        // Try V2 pairing first (new system with device limit enforcement)
+        do {
+            return try await initiatePairingV2(
+                deviceId: deviceId,
+                deviceName: macDeviceName,
+                appVersion: appVersion
+            )
+        } catch {
+            print("[Firebase] V2 pairing failed, falling back to V1: \(error)")
+            // Fall back to V1 for backwards compatibility
+            return try await initiatePairingV1(
+                deviceName: macDeviceName,
+                syncGroupId: syncGroupId
+            )
+        }
+    }
+
+    /// V2 Pairing - Uses new Cloud Function with device limit enforcement
+    private func initiatePairingV2(deviceId: String, deviceName: String, appVersion: String) async throws -> PairingSession {
+        // For pairing, we need a fresh anonymous session to listen for approval
+        // Custom tokens from previous pairings may have expired, causing permission errors
+        // So we sign out and sign in fresh to ensure we have valid credentials
+        if let currentUser = auth.currentUser {
+            // If signed in with a device token (from previous pairing), sign out first
+            // Device tokens expire and cause permission_denied errors
+            if currentUser.uid.hasPrefix("device_") {
+                print("[Firebase] V2: Current user \(currentUser.uid) is a device token - signing out to get fresh auth")
+                try? auth.signOut()
+            }
+        }
+
+        // Sign in anonymously to get fresh credentials for listening
+        if auth.currentUser == nil {
+            print("[Firebase] V2: Signing in anonymously for pairing listener")
+            _ = try await auth.signInAnonymously()
+        }
+
+        let payload: [String: Any] = [
+            "deviceId": deviceId,
+            "deviceName": deviceName,
+            "deviceType": "macos",
+            "appVersion": appVersion
+        ]
+
+        print("[Firebase] Initiating V2 pairing with deviceId: \(deviceId), user: \(auth.currentUser?.uid ?? "none")")
+
+        let result = try await functions
+            .httpsCallable("initiatePairingV2")
+            .call(payload)
+
+        guard let data = result.data as? [String: Any],
+              let success = data["success"] as? Bool, success,
+              let token = data["token"] as? String,
+              let qrPayload = data["qrPayload"] as? String,
+              let expiresAt = data["expiresAt"] as? Double else {
+            print("[Firebase] V2 pairing invalid response: \(result.data)")
+            throw FirebaseError.invalidTokenData
+        }
+
+        print("[Firebase] V2 pairing session created, token: \(token.prefix(8))...")
+
+        return PairingSession(
+            token: token,
+            qrPayload: qrPayload,
+            expiresAt: expiresAt,
+            version: 2
+        )
+    }
+
+    /// V1 Pairing - Legacy system for backwards compatibility
+    private func initiatePairingV1(deviceName: String, syncGroupId: String?) async throws -> PairingSession {
         // Ensure we are authenticated so the pairing session is scoped to this requester.
         if auth.currentUser == nil {
             _ = try await auth.signInAnonymously()
         }
-        let macDeviceName = deviceName ?? Host.current().localizedName ?? "Mac"
 
         var payload: [String: Any] = [
-            "deviceName": macDeviceName,
+            "deviceName": deviceName,
             "platform": "macos",
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
         ]
@@ -169,38 +245,59 @@ class FirebaseService {
             payload["syncGroupId"] = syncGroupId
         }
 
+        print("[Firebase] Initiating V1 pairing with payload: \(payload)")
+
         let result = try await functions
             .httpsCallable("initiatePairing")
             .call(payload)
+
+        print("[Firebase] V1 pairing result: \(result.data)")
 
         guard let data = result.data as? [String: Any],
               let token = data["token"] as? String,
               let qrPayload = data["qrPayload"] as? String,
               let expiresAt = data["expiresAt"] as? Double else {
+            print("[Firebase] Invalid token data received: \(result.data)")
             throw FirebaseError.invalidTokenData
         }
 
         return PairingSession(
             token: token,
             qrPayload: qrPayload,
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            version: 1
         )
     }
 
     /// Listen for pairing approval after Android user scans QR and approves
-    func listenForPairingApproval(token: String, completion: @escaping (PairingStatus) -> Void) -> DatabaseHandle {
+    /// Uses the pairing version to listen on the correct path:
+    /// - Version 2: pairing_requests (new system)
+    /// - Version 1: pending_pairings (legacy system)
+    func listenForPairingApproval(token: String, version: Int = 2, completion: @escaping (PairingStatus) -> Void) -> DatabaseHandle {
+        let path = version == 2 ? "pairing_requests" : "pending_pairings"
+        print("[Firebase] Setting up pairing listener on path: \(path)/\(token.prefix(8))... (version: \(version))")
+        return listenForPairingApprovalOnPath(token: token, path: path, completion: completion)
+    }
+
+    /// Pairing listener - listens on the specified path
+    private func listenForPairingApprovalOnPath(token: String, path: String, completion: @escaping (PairingStatus) -> Void) -> DatabaseHandle {
         let pairingRef = database.reference()
-            .child("pending_pairings")
+            .child(path)
             .child(token)
 
         let handle = pairingRef.observe(.value) { [weak self] snapshot in
             guard let self = self else { return }
 
+            print("[Firebase] Pairing status update for token \(token.prefix(8)): exists=\(snapshot.exists()), path=\(path)")
+
             guard snapshot.exists(),
                   let data = snapshot.value as? [String: Any] else {
-                completion(.expired)
+                // No data yet - still pending or expired
+                print("[Firebase] No pairing data found at \(path)/\(token.prefix(8))")
                 return
             }
+
+            print("[Firebase] Pairing data received: \(data)")
 
             let now = Date().timeIntervalSince1970 * 1000
             if let expiresAt = data["expiresAt"] as? Double, now > expiresAt {
@@ -225,13 +322,15 @@ class FirebaseService {
                 Task {
                     do {
                         _ = try await self.auth.signIn(withCustomToken: customToken)
-                        if let deviceId = data["deviceId"] as? String {
-                            UserDefaults.standard.set(deviceId, forKey: "syncflow_device_id")
-                        }
+
+                        // Save device ID from DeviceIdentifier (persistent)
+                        let deviceId = data["deviceId"] as? String ?? DeviceIdentifier.shared.getDeviceId()
+                        UserDefaults.standard.set(deviceId, forKey: "syncflow_device_id")
+
                         try? await E2EEManager.shared.initializeKeys()
 
                         await MainActor.run {
-                            completion(.approved(pairedUid: pairedUid, deviceId: data["deviceId"] as? String))
+                            completion(.approved(pairedUid: pairedUid, deviceId: deviceId))
                         }
                     } catch {
                         print("[Firebase] Failed to sign in with custom token: \(error)")
@@ -252,13 +351,83 @@ class FirebaseService {
         return handle
     }
 
-    /// Remove pairing approval listener
-    func removePairingApprovalListener(token: String, handle: DatabaseHandle) {
-        let pairingRef = database.reference()
+    /// Check V1 pairing path as fallback
+    private func checkV1PairingPath(token: String, completion: @escaping (PairingStatus) -> Void) {
+        let v1Ref = database.reference()
             .child("pending_pairings")
             .child(token)
 
-        pairingRef.removeObserver(withHandle: handle)
+        v1Ref.observeSingleEvent(of: .value) { [weak self] snapshot in
+            guard let self = self else { return }
+
+            guard snapshot.exists(),
+                  let data = snapshot.value as? [String: Any] else {
+                print("[Firebase] Token not found in V1 or V2 paths")
+                completion(.expired)
+                return
+            }
+
+            // Handle V1 format
+            let now = Date().timeIntervalSince1970 * 1000
+            if let expiresAt = data["expiresAt"] as? Double, now > expiresAt {
+                completion(.expired)
+                return
+            }
+
+            guard let status = data["status"] as? String else {
+                completion(.pending)
+                return
+            }
+
+            switch status {
+            case "approved":
+                guard let customToken = data["customToken"] as? String,
+                      let pairedUid = data["pairedUid"] as? String else {
+                    completion(.expired)
+                    return
+                }
+
+                Task {
+                    do {
+                        _ = try await self.auth.signIn(withCustomToken: customToken)
+                        if let deviceId = data["deviceId"] as? String {
+                            UserDefaults.standard.set(deviceId, forKey: "syncflow_device_id")
+                        }
+                        try? await E2EEManager.shared.initializeKeys()
+
+                        await MainActor.run {
+                            completion(.approved(pairedUid: pairedUid, deviceId: data["deviceId"] as? String))
+                        }
+                    } catch {
+                        print("[Firebase] V1 Failed to sign in: \(error)")
+                        await MainActor.run {
+                            completion(.expired)
+                        }
+                    }
+                }
+
+            case "rejected":
+                completion(.rejected)
+
+            default:
+                completion(.pending)
+            }
+        }
+    }
+
+    /// Remove pairing approval listener (handles both V1 and V2 paths)
+    func removePairingApprovalListener(token: String, handle: DatabaseHandle) {
+        // Remove from V2 path
+        database.reference()
+            .child("pairing_requests")
+            .child(token)
+            .removeObserver(withHandle: handle)
+
+        // Also try to remove from V1 path (in case it exists there)
+        database.reference()
+            .child("pending_pairings")
+            .child(token)
+            .removeObserver(withHandle: handle)
     }
 
     func unregisterDevice(deviceId: String, completion: @escaping (Error?) -> Void) {
@@ -351,13 +520,20 @@ class FirebaseService {
 
     // MARK: - Messages
 
-    func listenToMessages(userId: String, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
+    func listenToMessages(userId: String, startTime: Double? = nil, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
         let messagesRef = database.reference()
             .child("users")
             .child(userId)
             .child("messages")
 
-        let handle = messagesRef.queryOrdered(byChild: "date").observe(.value) { [weak self] snapshot in
+        // Apply time filter if provided (for pagination - load last N days)
+        var query = messagesRef.queryOrdered(byChild: "date")
+        if let startTime = startTime {
+            query = query.queryStarting(atValue: startTime)
+            print("[Firebase] Listening to messages from \(Date(timeIntervalSince1970: startTime/1000)) onwards")
+        }
+
+        let handle = query.observe(.value) { [weak self] snapshot in
             guard let self = self else { return }
 
             guard snapshot.exists(),
@@ -389,6 +565,7 @@ class FirebaseService {
                     let contactName = messageData["contactName"] as? String
                     let isEncrypted = messageData["encrypted"] as? Bool ?? false
                     let isMms = messageData["isMms"] as? Bool ?? false
+                    let isReadFromSync = messageData["read"] as? Bool
 
                     // Decrypt message body if encrypted
                     var decryptedBody = body
@@ -453,7 +630,7 @@ class FirebaseService {
                         }
                     }
 
-                    let message = Message(
+                    var message = Message(
                         id: key,
                         address: address,
                         body: decryptedBody,
@@ -463,6 +640,11 @@ class FirebaseService {
                         isMms: isMms,
                         attachments: attachments
                     )
+
+                    // Set read status from Android sync data (if available)
+                    if let isReadFromSync = isReadFromSync {
+                        message.isRead = isReadFromSync
+                    }
 
                     messages.append(message)
                 }
@@ -533,6 +715,131 @@ class FirebaseService {
             .child("messages")
 
         messagesRef.removeObserver(withHandle: handle)
+    }
+
+    // Load messages in a specific time range (for pagination)
+    func loadMessagesInTimeRange(userId: String, startTime: Double, endTime: Double) async throws -> [Message] {
+        let messagesRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("messages")
+
+        print("[Firebase] Loading messages from \(Date(timeIntervalSince1970: startTime/1000)) to \(Date(timeIntervalSince1970: endTime/1000))")
+
+        let snapshot = try await messagesRef
+            .queryOrdered(byChild: "date")
+            .queryStarting(atValue: startTime)
+            .queryEnding(atValue: endTime)
+            .getData()
+
+        guard snapshot.exists(),
+              let messagesDict = snapshot.value as? [String: Any] else {
+            return []
+        }
+
+        var messages: [Message] = []
+        let deviceId = getDeviceId()
+
+        for (key, value) in messagesDict {
+            guard let messageData = value as? [String: Any],
+                  let address = messageData["address"] as? String,
+                  let body = messageData["body"] as? String,
+                  let date = messageData["date"] as? Double,
+                  let type = messageData["type"] as? Int else {
+                continue
+            }
+
+            if isRcsAddress(address) {
+                continue
+            }
+
+            let contactName = messageData["contactName"] as? String
+            let isEncrypted = messageData["encrypted"] as? Bool ?? false
+            let isMms = messageData["isMms"] as? Bool ?? false
+            let isReadFromSync = messageData["read"] as? Bool
+
+            // Decrypt message body if encrypted
+            var decryptedBody = body
+            var decryptionFailed = false
+            if isEncrypted {
+                if let keyMap = messageData["keyMap"] as? [String: Any],
+                   let nonceBase64 = messageData["nonce"] as? String,
+                   let deviceEnvelope = keyMap[deviceId] as? String,
+                   let nonceData = Data(base64Encoded: nonceBase64),
+                   let ciphertextData = Data(base64Encoded: body) {
+                    do {
+                        let dataKey = try E2EEManager.shared.decryptDataKey(from: deviceEnvelope)
+                        decryptedBody = try E2EEManager.shared.decryptMessageBody(
+                            dataKey: dataKey,
+                            ciphertextWithTag: ciphertextData,
+                            nonce: nonceData
+                        )
+                    } catch {
+                        decryptionFailed = true
+                    }
+                } else {
+                    do {
+                        decryptedBody = try E2EEManager.shared.decryptMessage(body)
+                    } catch {
+                        decryptionFailed = true
+                    }
+                }
+
+                if decryptionFailed {
+                    decryptedBody = "[🔒 Encrypted message - re-pair device to decrypt]"
+                }
+            }
+
+            // Parse MMS attachments if present
+            var attachments: [MmsAttachment]? = nil
+            if isMms, let attachmentsData = extractAttachmentList(from: messageData["attachments"]) {
+                attachments = attachmentsData.compactMap { attachData in
+                    guard let id = parseAttachmentId(attachData["id"]),
+                          let contentType = attachData["contentType"] as? String else {
+                        return nil
+                    }
+                    let attachType = (attachData["type"] as? String) ?? inferAttachmentType(from: contentType)
+                    let encrypted: Bool?
+                    if let encryptedBool = attachData["encrypted"] as? Bool {
+                        encrypted = encryptedBool
+                    } else if let encryptedString = attachData["encrypted"] as? String {
+                        encrypted = (encryptedString as NSString).boolValue
+                    } else {
+                        encrypted = nil
+                    }
+                    return MmsAttachment(
+                        id: id,
+                        contentType: contentType,
+                        fileName: attachData["fileName"] as? String,
+                        url: attachData["url"] as? String,
+                        type: attachType,
+                        encrypted: encrypted,
+                        inlineData: attachData["inlineData"] as? String,
+                        isInline: attachData["isInline"] as? Bool
+                    )
+                }
+            }
+
+            var message = Message(
+                id: key,
+                address: address,
+                body: decryptedBody,
+                date: date,
+                type: type,
+                contactName: contactName,
+                isMms: isMms,
+                attachments: attachments
+            )
+
+            if let isReadFromSync = isReadFromSync {
+                message.isRead = isReadFromSync
+            }
+
+            messages.append(message)
+        }
+
+        print("[Firebase] Loaded \(messages.count) messages in time range")
+        return messages
     }
 
     // MARK: - Spam Messages
@@ -1182,20 +1489,36 @@ class FirebaseService {
             .child(userId)
             .child("contacts")
 
+        print("[Firebase] Starting contacts listener for user: \(userId)")
+
         let handle = contactsRef.observe(.value) { snapshot in
-            guard snapshot.exists(),
-                  let contactsDict = snapshot.value as? [String: [String: Any]] else {
+            print("[Firebase] Contacts snapshot received: exists=\(snapshot.exists()), childrenCount=\(snapshot.childrenCount)")
+
+            guard snapshot.exists() else {
+                print("[Firebase] No contacts data found for user: \(userId)")
+                completion([])
+                return
+            }
+
+            guard let contactsDict = snapshot.value as? [String: [String: Any]] else {
+                print("[Firebase] Failed to parse contacts as dictionary. Raw value type: \(type(of: snapshot.value))")
                 completion([])
                 return
             }
 
             var contacts: [Contact] = []
+            var parseFailCount = 0
 
             for (contactId, contactData) in contactsDict {
                 if let contact = Contact.from(contactData, id: contactId) {
                     contacts.append(contact)
+                } else {
+                    parseFailCount += 1
+                    print("[Firebase] Failed to parse contact: \(contactId), keys: \(contactData.keys.sorted())")
                 }
             }
+
+            print("[Firebase] Parsed \(contacts.count) contacts, \(parseFailCount) failed")
 
             // Sort by display name
             contacts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -1216,62 +1539,44 @@ class FirebaseService {
         contactsRef.removeObserver(withHandle: handle)
     }
 
-    // MARK: - Desktop Contact Creation (Two-Way Sync)
+    // MARK: - Contact Management (macOS / Web edits)
 
-    /// Create a new contact from macOS/web that will sync to Android
-    func createDesktopContact(
+    /// Create or overwrite a contact entry on behalf of the macOS client.
+    func createContact(
         userId: String,
         displayName: String,
         phoneNumber: String,
         phoneType: String = "Mobile",
         email: String? = nil,
         notes: String? = nil,
-        photoBase64: String? = nil
+        photoBase64: String? = nil,
+        source: String = "macos"
     ) async throws -> String {
-        let desktopContactsRef = database.reference()
+        let contactId = PhoneNumberNormalizer.shared.getDeduplicationKey(phoneNumber: phoneNumber, displayName: displayName)
+        let contactRef = database.reference()
             .child("users")
             .child(userId)
-            .child("desktopContacts")
-            .childByAutoId()
+            .child("contacts")
+            .child(contactId)
 
-        guard let contactId = desktopContactsRef.key else {
-            throw FirebaseError.sendFailed
-        }
+        let payload = buildContactPayload(
+            existingData: nil,
+            displayName: displayName,
+            phoneNumber: phoneNumber,
+            phoneType: phoneType,
+            email: email,
+            notes: notes,
+            photoBase64: photoBase64,
+            source: source
+        )
 
-        // Normalize phone number
-        let normalizedNumber = phoneNumber.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
-
-        var contactData: [String: Any] = [
-            "displayName": displayName,
-            "phoneNumber": phoneNumber,
-            "normalizedNumber": normalizedNumber,
-            "phoneType": phoneType,
-            "createdAt": ServerValue.timestamp(),
-            "updatedAt": ServerValue.timestamp(),
-            "source": "macos",
-            "syncedToAndroid": false
-        ]
-
-        if let email = email, !email.isEmpty {
-            contactData["email"] = email
-        }
-
-        if let notes = notes, !notes.isEmpty {
-            contactData["notes"] = notes
-        }
-
-        if let photoBase64 = photoBase64, !photoBase64.isEmpty {
-            contactData["photoBase64"] = photoBase64
-        }
-
-        try await desktopContactsRef.setValue(contactData)
-        print("[Firebase] Desktop contact created: \(displayName) with ID: \(contactId)")
-
+        try await contactRef.setValue(payload)
+        print("[Firebase] Contact created from \(source): \(displayName) (\(contactId))")
         return contactId
     }
 
-    /// Update an existing desktop-created contact
-    func updateDesktopContact(
+    /// Update an existing contact entry (from macOS/web)
+    func updateContact(
         userId: String,
         contactId: String,
         displayName: String,
@@ -1279,93 +1584,130 @@ class FirebaseService {
         phoneType: String = "Mobile",
         email: String? = nil,
         notes: String? = nil,
-        photoBase64: String? = nil
+        photoBase64: String? = nil,
+        source: String = "macos"
     ) async throws {
         let contactRef = database.reference()
             .child("users")
             .child(userId)
-            .child("desktopContacts")
+            .child("contacts")
             .child(contactId)
 
-        // Normalize phone number
-        let normalizedNumber = phoneNumber.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+        let snapshot = try await contactRef.getData()
+        let existingData = snapshot.value as? [String: Any]
 
-        var updates: [String: Any] = [
-            "displayName": displayName,
-            "phoneNumber": phoneNumber,
-            "normalizedNumber": normalizedNumber,
-            "phoneType": phoneType,
-            "updatedAt": ServerValue.timestamp(),
-            "syncedToAndroid": false  // Reset to trigger re-sync to Android
-        ]
+        let payload = buildContactPayload(
+            existingData: existingData,
+            displayName: displayName,
+            phoneNumber: phoneNumber,
+            phoneType: phoneType,
+            email: email,
+            notes: notes,
+            photoBase64: photoBase64,
+            source: source
+        )
 
-        if let email = email {
-            updates["email"] = email
-        }
-
-        if let notes = notes {
-            updates["notes"] = notes
-        }
-
-        if let photoBase64 = photoBase64 {
-            updates["photoBase64"] = photoBase64
-        }
-
-        try await contactRef.updateChildValues(updates)
-        print("[Firebase] Desktop contact updated: \(displayName)")
+        try await contactRef.setValue(payload)
+        print("[Firebase] Contact updated from \(source): \(displayName) (\(contactId))")
     }
 
-    /// Delete a desktop-created contact
-    func deleteDesktopContact(userId: String, contactId: String) async throws {
+    /// Delete a contact from the universal contacts list
+    func deleteContact(userId: String, contactId: String) async throws {
         let contactRef = database.reference()
             .child("users")
             .child(userId)
-            .child("desktopContacts")
+            .child("contacts")
             .child(contactId)
 
         try await contactRef.removeValue()
-        print("[Firebase] Desktop contact deleted: \(contactId)")
+        print("[Firebase] Contact deleted: \(contactId)")
     }
 
-    /// Listen for desktop contacts (created on macOS/web)
-    func listenToDesktopContacts(userId: String, completion: @escaping ([DesktopContact]) -> Void) -> DatabaseHandle {
-        let contactsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("desktopContacts")
+    private func buildContactPayload(
+        existingData: [String: Any]?,
+        displayName: String,
+        phoneNumber: String,
+        phoneType: String,
+        email: String?,
+        notes: String?,
+        photoBase64: String?,
+        source: String
+    ) -> [String: Any] {
+        var payload = existingData ?? [:]
+        payload["displayName"] = displayName
 
-        let handle = contactsRef.observe(.value) { snapshot in
-            guard snapshot.exists(),
-                  let contactsDict = snapshot.value as? [String: [String: Any]] else {
-                completion([])
-                return
-            }
-
-            var contacts: [DesktopContact] = []
-
-            for (contactId, contactData) in contactsDict {
-                if let contact = DesktopContact.from(contactData, id: contactId) {
-                    contacts.append(contact)
-                }
-            }
-
-            // Sort by display name
-            contacts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
-            completion(contacts)
+        if let notes = notes, !notes.isEmpty {
+            payload["notes"] = notes
+        } else {
+            payload.removeValue(forKey: "notes")
         }
 
-        return handle
+        if let email = email, !email.isEmpty {
+            let normalizedEmail = email.lowercased()
+            payload["emails"] = [
+                normalizedEmail: [
+                    "address": email,
+                    "type": "primary",
+                    "isPrimary": true
+                ]
+            ]
+        } else if payload["emails"] != nil {
+            payload.removeValue(forKey: "emails")
+        }
+
+        let normalizedNumber = PhoneNumberNormalizer.shared.normalize(phoneNumber)
+        let phoneKey = normalizedNumber.isEmpty ? phoneNumber : normalizedNumber
+        payload["phoneNumbers"] = [
+            phoneKey: [
+                "number": phoneNumber,
+                "normalizedNumber": normalizedNumber,
+                "type": phoneType,
+                "label": phoneType,
+                "isPrimary": true
+            ]
+        ]
+
+        var photoMap = payload["photo"] as? [String: Any] ?? [:]
+        if let photoBase64 = photoBase64 {
+            if photoBase64.isEmpty {
+                photoMap.removeValue(forKey: "thumbnailBase64")
+                photoMap.removeValue(forKey: "hash")
+            } else {
+                photoMap["thumbnailBase64"] = photoBase64
+                photoMap["hash"] = sha1(photoBase64)
+            }
+            photoMap["updatedAt"] = ServerValue.timestamp()
+        }
+        payload["photo"] = photoMap
+
+        var sources = payload["sources"] as? [String: Bool] ?? [:]
+        if sources["android"] == nil {
+            sources["android"] = false
+        }
+        sources[source] = true
+        payload["sources"] = sources
+
+        let existingSync = payload["sync"] as? [String: Any]
+        let existingVersion = (existingSync?["version"] as? Int) ?? Int((existingSync?["version"] as? Double) ?? 0)
+        let version = existingVersion + 1
+        var sync: [String: Any] = [
+            "lastUpdatedAt": ServerValue.timestamp(),
+            "lastUpdatedBy": source,
+            "version": version,
+            "pendingAndroidSync": true,
+            "desktopOnly": true
+        ]
+        if let lastSyncedAt = existingSync?["lastSyncedAt"] {
+            sync["lastSyncedAt"] = lastSyncedAt
+        }
+        payload["sync"] = sync
+
+        return payload
     }
 
-    /// Remove desktop contacts listener
-    func removeDesktopContactsListener(userId: String, handle: DatabaseHandle) {
-        let contactsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("desktopContacts")
-
-        contactsRef.removeObserver(withHandle: handle)
+    private func sha1(_ string: String) -> String {
+        let digest = Insecure.SHA1.hash(data: Data(string.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Call History
@@ -1377,20 +1719,36 @@ class FirebaseService {
             .child(userId)
             .child("call_history")
 
+        print("[Firebase] Starting call history listener for user: \(userId)")
+
         let handle = callHistoryRef.observe(.value) { snapshot in
-            guard snapshot.exists(),
-                  let callsDict = snapshot.value as? [String: [String: Any]] else {
+            print("[Firebase] Call history snapshot received: exists=\(snapshot.exists()), childrenCount=\(snapshot.childrenCount)")
+
+            guard snapshot.exists() else {
+                print("[Firebase] No call history data found for user: \(userId)")
+                completion([])
+                return
+            }
+
+            guard let callsDict = snapshot.value as? [String: [String: Any]] else {
+                print("[Firebase] Failed to parse call history as dictionary. Raw value type: \(type(of: snapshot.value))")
                 completion([])
                 return
             }
 
             var calls: [CallHistoryEntry] = []
+            var parseFailCount = 0
 
             for (callId, callData) in callsDict {
                 if let call = CallHistoryEntry.from(callData, id: callId) {
                     calls.append(call)
+                } else {
+                    parseFailCount += 1
+                    print("[Firebase] Failed to parse call entry: \(callId), keys: \(callData.keys.sorted())")
                 }
             }
+
+            print("[Firebase] Parsed \(calls.count) call history entries, \(parseFailCount) failed")
 
             // Sort by date (newest first)
             calls.sort { $0.callDate > $1.callDate }
@@ -1845,6 +2203,14 @@ struct PairingSession {
     let token: String
     let qrPayload: String
     let expiresAt: Double
+    let version: Int  // 1 = legacy, 2 = new V2 with device limits
+
+    init(token: String, qrPayload: String, expiresAt: Double, version: Int = 1) {
+        self.token = token
+        self.qrPayload = qrPayload
+        self.expiresAt = expiresAt
+        self.version = version
+    }
 
     var expiresAtDate: Date {
         Date(timeIntervalSince1970: expiresAt / 1000)
@@ -1856,6 +2222,16 @@ struct PairingSession {
 
     var isExpired: Bool {
         timeRemaining <= 0
+    }
+
+    /// Firebase path where this pairing session is stored
+    var databasePath: String {
+        switch version {
+        case 2:
+            return "pairing_requests/\(token)"
+        default:
+            return "pending_pairings/\(token)"
+        }
     }
 }
 

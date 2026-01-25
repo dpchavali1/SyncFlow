@@ -639,7 +639,60 @@ fun DesktopIntegrationScreen(
                 )
             }
 
+            // Manual Sync Button (for when data isn't showing on Mac/Web)
+            if (pairedDevices.isNotEmpty()) {
+                item {
+                    var isSyncing by remember { mutableStateOf(false) }
+                    var syncMessage by remember { mutableStateOf<String?>(null) }
 
+                    OutlinedButton(
+                        onClick = {
+                            if (isSyncing) return@OutlinedButton
+                            isSyncing = true
+                            syncMessage = null
+                            scope.launch {
+                                try {
+                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered")
+                                    syncInitialMessages()
+                                    syncInitialContacts()
+                                    syncInitialCallHistory()
+                                    syncMessage = "Sync complete! Check your Mac/Web app."
+                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync completed")
+                                } catch (e: Exception) {
+                                    android.util.Log.e("DesktopIntegrationScreen", "Manual sync failed", e)
+                                    syncMessage = "Sync failed: ${e.message}"
+                                } finally {
+                                    isSyncing = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isSyncing
+                    ) {
+                        if (isSyncing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Syncing...")
+                        } else {
+                            Icon(Icons.Default.Sync, "Sync")
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Sync All Data to Desktop")
+                        }
+                    }
+
+                    syncMessage?.let { msg ->
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (msg.startsWith("Sync complete")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+            }
 
             // Error Message
             errorMessage?.let { error ->

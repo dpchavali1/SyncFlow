@@ -68,16 +68,48 @@ struct CallHistoryEntry: Identifiable, Hashable {
     static func from(_ data: [String: Any], id: String) -> CallHistoryEntry? {
         guard let phoneNumber = data["phoneNumber"] as? String,
               let callTypeString = data["callType"] as? String,
-              let callType = CallType(rawValue: callTypeString),
-              let callDate = data["callDate"] as? Double else {
+              let callType = CallType(rawValue: callTypeString) else {
+            return nil
+        }
+
+        // Handle callDate - Firebase stores Long as Double
+        let callDate: Double
+        if let dateDouble = data["callDate"] as? Double {
+            callDate = dateDouble
+        } else if let dateInt = data["callDate"] as? Int {
+            callDate = Double(dateInt)
+        } else if let dateInt64 = data["callDate"] as? Int64 {
+            callDate = Double(dateInt64)
+        } else {
             return nil
         }
 
         let contactName = data["contactName"] as? String
-        let duration = data["duration"] as? Int ?? 0
+
+        // Handle duration - Firebase stores Long as Double
+        let duration: Int
+        if let durationInt = data["duration"] as? Int {
+            duration = durationInt
+        } else if let durationDouble = data["duration"] as? Double {
+            duration = Int(durationDouble)
+        } else if let durationInt64 = data["duration"] as? Int64 {
+            duration = Int(durationInt64)
+        } else {
+            duration = 0
+        }
+
         let formattedDuration = data["formattedDuration"] as? String ?? "0:00"
         let formattedDate = data["formattedDate"] as? String ?? ""
-        let simId = data["simId"] as? Int ?? 0
+
+        // Handle simId - Firebase stores Long as Double
+        let simId: Int
+        if let simIdInt = data["simId"] as? Int {
+            simId = simIdInt
+        } else if let simIdDouble = data["simId"] as? Double {
+            simId = Int(simIdDouble)
+        } else {
+            simId = 0
+        }
 
         return CallHistoryEntry(
             id: id,
