@@ -652,11 +652,12 @@ fun DesktopIntegrationScreen(
                             syncMessage = null
                             scope.launch {
                                 try {
-                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered")
-                                    syncInitialMessages()
+                                    android.util.Log.d("DesktopIntegrationScreen", "Manual sync triggered - contacts & call history only")
+                                    // Skip messages - they sync in background and take too long (2000+ messages)
+                                    // Just sync contacts and call history which are much faster
                                     syncInitialContacts()
                                     syncInitialCallHistory()
-                                    syncMessage = "Sync complete! Check your Mac/Web app."
+                                    syncMessage = "Contacts & call history synced! Messages sync in background."
                                     android.util.Log.d("DesktopIntegrationScreen", "Manual sync completed")
                                 } catch (e: Exception) {
                                     android.util.Log.e("DesktopIntegrationScreen", "Manual sync failed", e)
@@ -679,7 +680,7 @@ fun DesktopIntegrationScreen(
                         } else {
                             Icon(Icons.Default.Sync, "Sync")
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Sync All Data to Desktop")
+                            Text("Sync Contacts & Call History")
                         }
                     }
 
