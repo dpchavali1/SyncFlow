@@ -89,9 +89,24 @@ class RecoveryCodeManager private constructor(private val context: Context) {
             code.append(CODE_CHARS[random.nextInt(CODE_CHARS.length)])
         }
 
+        return formatRecoveryCode(code.toString())
+    }
+
+    /**
+     * Format a raw recovery code as SYNC-XXXX-XXXX-XXXX
+     */
+    fun formatRecoveryCode(rawCode: String): String {
+        // Remove any existing formatting and normalize
+        val clean = rawCode.uppercase().replace("-", "").replace(" ", "")
+
+        // Remove SYNC prefix if present
+        val codeOnly = if (clean.startsWith("SYNC")) clean.substring(4) else clean
+
+        // Ensure we have exactly 12 characters
+        if (codeOnly.length < 12) return rawCode // Can't format, return as-is
+
         // Format as SYNC-XXXX-XXXX-XXXX
-        val rawCode = code.toString()
-        return "SYNC-${rawCode.substring(0, 4)}-${rawCode.substring(4, 8)}-${rawCode.substring(8, 12)}"
+        return "SYNC-${codeOnly.substring(0, 4)}-${codeOnly.substring(4, 8)}-${codeOnly.substring(8, 12)}"
     }
 
     /**
@@ -218,8 +233,10 @@ class RecoveryCodeManager private constructor(private val context: Context) {
             }
 
             // Store the recovered userId - the app will use this for data access
+            // Format the code properly before storing (SYNC-XXXX-XXXX-XXXX)
+            val formattedCode = formatRecoveryCode(normalizedCode)
             prefs.edit()
-                .putString(KEY_RECOVERY_CODE, normalizedCode)
+                .putString(KEY_RECOVERY_CODE, formattedCode)
                 .putString(KEY_USER_ID, userId)
                 .putBoolean(KEY_SETUP_COMPLETE, true)
                 .putBoolean(KEY_SKIPPED, false)
@@ -308,15 +325,18 @@ class RecoveryCodeManager private constructor(private val context: Context) {
 
     /**
      * Get recovery code (from local cache or Firebase)
+     * Always returns formatted code (SYNC-XXXX-XXXX-XXXX)
      */
     suspend fun getRecoveryCode(): String? {
         // First try local cache
         val localCode = getStoredRecoveryCode()
         if (localCode != null) {
-            return localCode
+            // Ensure proper formatting when returning
+            return formatRecoveryCode(localCode)
         }
         // Try fetching from Firebase
-        return fetchRecoveryCodeFromFirebase()
+        val firebaseCode = fetchRecoveryCodeFromFirebase()
+        return firebaseCode?.let { formatRecoveryCode(it) }
     }
 
     /**
