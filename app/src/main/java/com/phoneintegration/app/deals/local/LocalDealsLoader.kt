@@ -37,7 +37,6 @@ class LocalDealsLoader(private val context: Context) {
             }
 
         } catch (e: Exception) {
-            println("DEBUG: Local deals failed: $e")
             emptyList()
         }
     }

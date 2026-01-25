@@ -94,7 +94,6 @@ class CloudDealsService {
             }
 
         } catch (e: Exception) {
-            println("DEBUG: Cloud load failed: $e")
             emptyList()
         }
     }

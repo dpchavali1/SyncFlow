@@ -136,7 +136,7 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
         const existingDeviceId = data && data.existingDeviceId ? String(data.existingDeviceId) : null;
         const syncGroupId = data && data.syncGroupId ? String(data.syncGroupId) : null;
 
-        console.log(`initiatePairing: Creating pairing session for ${deviceName} (${platform}), existingDeviceId: ${existingDeviceId}`);
+        // Pairing session created
 
         // Generate a secure random token
         const token = crypto.randomUUID().replace(/-/g, "");
@@ -168,12 +168,10 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
             syncGroupId,
         });
 
-        console.log(`initiatePairing: Session created with token ${token.slice(0, 8)}...`);
-
         return { token, qrPayload, expiresAt };
     } catch (error) {
-        console.error("initiatePairing error:", error);
-        throw new functions.https.HttpsError("internal", error.message || "Failed to initiate pairing");
+        console.error("initiatePairing failed");
+        throw new functions.https.HttpsError("internal", "Failed to initiate pairing");
     }
 });
 
@@ -183,6 +181,9 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
  *
  * Called by: Android app after scanning QR and user confirms
  * Returns: { success: true } or throws error
+ *
+ * Note: This function checks BOTH V1 (pending_pairings) and V2 (pairing_requests) paths
+ * to handle cases where Mac initiated with V2 but Android fallback to V1.
  */
 exports.completePairing = functions.https.onCall(async (data, context) => {
     try {
@@ -195,13 +196,20 @@ exports.completePairing = functions.https.onCall(async (data, context) => {
             throw new functions.https.HttpsError("invalid-argument", "Missing token");
         }
 
-        console.log(`completePairing: Processing token ${token.slice(0, 8)}... approved=${approved}`);
-
-        const pairingRef = admin.database().ref(`/pending_pairings/${token}`);
-        const snapshot = await pairingRef.once("value");
+        // Try V1 path first, then V2 path
+        let pairingRef = admin.database().ref(`/pending_pairings/${token}`);
+        let snapshot = await pairingRef.once("value");
+        let isV2Path = false;
 
         if (!snapshot.exists()) {
-            throw new functions.https.HttpsError("not-found", "Pairing request not found or expired");
+            // Try V2 path as fallback (for when Mac initiated with V2)
+            pairingRef = admin.database().ref(`/pairing_requests/${token}`);
+            snapshot = await pairingRef.once("value");
+            isV2Path = true;
+
+            if (!snapshot.exists()) {
+                throw new functions.https.HttpsError("not-found", "Pairing request not found or expired");
+            }
         }
 
         const pairingData = snapshot.val();
@@ -226,34 +234,38 @@ exports.completePairing = functions.https.onCall(async (data, context) => {
                 rejectedAt: admin.database.ServerValue.TIMESTAMP,
                 rejectedBy: pairedUid,
             });
-            console.log(`completePairing: Pairing rejected by ${pairedUid}`);
             return { success: true, status: "rejected" };
         }
 
         // User approved - create device and custom token
-        // Use existing device ID if provided, otherwise generate new one
-        const deviceId = pairingData.existingDeviceId || `dev_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        // For V2: deviceId is the persistent device ID (mac_xxxx, web_xxxx)
+        // For V1: use existingDeviceId or generate new one
+        const deviceId = pairingData.deviceId || pairingData.existingDeviceId || `dev_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
         const deviceUid = `device_${deviceId}`;
 
-        console.log(`completePairing: Using device ${deviceId} for user ${pairedUid} (existing: ${!!pairingData.existingDeviceId})`);
+        // Handle V2 vs V1 field naming (V2 uses deviceType, V1 uses platform)
+        const platform = pairingData.deviceType || pairingData.platform || "web";
+        const deviceName = pairingData.deviceName || "Desktop";
 
         // Create or update device entry
         await admin.database()
             .ref(`/users/${pairedUid}/devices/${deviceId}`)
             .set({
-                name: pairingData.deviceName,
-                type: pairingData.platform,
-                platform: pairingData.platform,
+                name: deviceName,
+                type: platform,
+                platform: platform,
                 isPaired: true,
                 pairedAt: admin.database.ServerValue.TIMESTAMP,
                 lastSeen: admin.database.ServerValue.TIMESTAMP,
+                pairingVersion: isV2Path ? 2 : 1,
             });
 
         // Generate custom auth token for Web/macOS device
         const customToken = await admin.auth().createCustomToken(deviceUid, {
             pairedUid,
             deviceId,
-            deviceType: pairingData.platform,
+            deviceType: platform,
+            pairingVersion: isV2Path ? 2 : 1,
         });
 
         // Update pairing status with the auth token
@@ -266,35 +278,34 @@ exports.completePairing = functions.https.onCall(async (data, context) => {
             customToken, // Web/macOS will read this to complete auth
         });
 
-        console.log(`completePairing: Pairing approved, deviceId=${deviceId}`);
-
-        return { success: true, status: "approved", deviceId };
+        return {
+            success: true,
+            status: "approved",
+            deviceId,
+            customToken,
+            userId: pairedUid
+        };
     } catch (error) {
-        console.error("completePairing error:", error);
         if (error instanceof functions.https.HttpsError) {
             throw error;
         }
-        throw new functions.https.HttpsError("internal", error.message || "Failed to complete pairing");
+        console.error("completePairing failed");
+        throw new functions.https.HttpsError("internal", "Failed to complete pairing");
     }
 });
 
 /**
  * Cleanup old/unused device entries (runs daily)
  */
-exports.cleanupOldDevices = functions.pubsub.schedule('every 24 hours').onRun(async (context) => {
+exports.cleanupOldDevices = functions.pubsub.schedule('every 24 hours').onRun(async () => {
     try {
-        console.log('cleanupOldDevices: Starting device cleanup');
-
         const usersRef = admin.database().ref('users');
         const usersSnapshot = await usersRef.once('value');
 
-        if (!usersSnapshot.exists()) {
-            console.log('cleanupOldDevices: No users found');
-            return;
-        }
+        if (!usersSnapshot.exists()) return;
 
         const now = Date.now();
-        const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000); // 30 days ago
+        const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
         let totalCleaned = 0;
 
         const users = usersSnapshot.val();
@@ -303,55 +314,36 @@ exports.cleanupOldDevices = functions.pubsub.schedule('every 24 hours').onRun(as
 
             const devices = userData.devices;
             const devicesToClean = [];
-
-            // Group devices by platform
             const devicesByPlatform = new Map();
 
             for (const [deviceId, deviceData] of Object.entries(devices)) {
                 const platform = deviceData.platform || 'unknown';
                 const lastSeen = deviceData.lastSeen || 0;
-                const registeredAt = deviceData.registeredAt || 0;
 
                 if (!devicesByPlatform.has(platform)) {
                     devicesByPlatform.set(platform, []);
                 }
-                devicesByPlatform.get(platform).push({
-                    deviceId,
-                    lastSeen,
-                    registeredAt,
-                    isOnline: deviceData.isOnline || false
-                });
+                devicesByPlatform.get(platform).push({ deviceId, lastSeen });
             }
 
-            // For each platform, keep only the most recent device, clean others
             for (const [platform, deviceList] of devicesByPlatform) {
                 if (deviceList.length > 1) {
-                    // Sort by lastSeen descending (most recent first)
                     deviceList.sort((a, b) => b.lastSeen - a.lastSeen);
-
-                    // Keep the first (most recent), mark others for cleanup
                     for (let i = 1; i < deviceList.length; i++) {
-                        const device = deviceList[i];
-                        // Only clean if device hasn't been seen in 30 days
-                        if (device.lastSeen < thirtyDaysAgo) {
-                            devicesToClean.push(device.deviceId);
+                        if (deviceList[i].lastSeen < thirtyDaysAgo) {
+                            devicesToClean.push(deviceList[i].deviceId);
                         }
                     }
                 }
             }
 
-            // Clean up identified devices
             for (const deviceId of devicesToClean) {
                 await usersRef.child(userId).child('devices').child(deviceId).remove();
-                console.log(`cleanupOldDevices: Cleaned up old device ${deviceId} for user ${userId}`);
                 totalCleaned++;
             }
         }
-
-        console.log(`cleanupOldDevices: Completed, cleaned up ${totalCleaned} old devices`);
     } catch (error) {
-        console.error('cleanupOldDevices error:', error);
-        throw error;
+        console.error('cleanupOldDevices failed');
     }
 });
 
@@ -360,62 +352,42 @@ exports.cleanupOldDevices = functions.pubsub.schedule('every 24 hours').onRun(as
  */
 exports.unregisterDevice = functions.https.onCall(async (data, context) => {
     try {
-        console.log('unregisterDevice: Called with data:', data);
-
         if (!context.auth) {
-            console.log('unregisterDevice: No authentication');
             throw new functions.https.HttpsError("unauthenticated", "Authentication required");
         }
 
         const deviceId = data && data.deviceId ? String(data.deviceId) : "";
-        console.log(`unregisterDevice: deviceId from data: "${deviceId}"`);
-
         if (!deviceId) {
-            console.log('unregisterDevice: No deviceId provided');
             throw new functions.https.HttpsError("invalid-argument", "Device ID required");
         }
 
         const userId = context.auth.token?.pairedUid || context.auth.uid;
-        console.log(`unregisterDevice: Processing for user ${userId}, device ${deviceId}`);
-
-        // Check if device exists before removing
         const deviceRef = admin.database().ref(`/users/${userId}/devices/${deviceId}`);
         const deviceSnapshot = await deviceRef.once('value');
 
         if (!deviceSnapshot.exists()) {
-            console.log(`unregisterDevice: Device ${deviceId} does not exist for user ${userId}`);
-            return { success: true, deviceId: deviceId, message: "Device not found (already removed)" };
+            return { success: true, deviceId, message: "Device not found (already removed)" };
         }
 
-        console.log(`unregisterDevice: Removing device ${deviceId} for user ${userId}`);
-
-        // Remove device from Firebase
         await deviceRef.remove();
 
-        // Also clean up any device-specific data
-        const cleanupPaths = [
-            'device_cache',
-            'device_temp',
-            'device_sessions'
-        ];
-
+        // Clean up device-specific data
+        const cleanupPaths = ['device_cache', 'device_temp', 'device_sessions'];
         for (const path of cleanupPaths) {
             try {
                 await admin.database().ref(`/users/${userId}/${path}/${deviceId}`).remove();
             } catch (e) {
-                // Ignore errors for cleanup paths that may not exist
+                // Ignore - paths may not exist
             }
         }
 
-        console.log(`unregisterDevice: Successfully removed device ${deviceId} for user ${userId}`);
-        return { success: true, deviceId: deviceId };
-
+        return { success: true, deviceId };
     } catch (error) {
-        console.error('unregisterDevice error:', error);
         if (error instanceof functions.https.HttpsError) {
             throw error;
         }
-        throw new functions.https.HttpsError("internal", error.message || "Failed to unregister device");
+        console.error('unregisterDevice failed');
+        throw new functions.https.HttpsError("internal", "Failed to unregister device");
     }
 });
 
@@ -425,8 +397,6 @@ exports.unregisterDevice = functions.https.onCall(async (data, context) => {
 exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) => {
     requireAdmin(context);
     try {
-        console.log('cleanupOldDevicesManual: Starting manual device cleanup');
-
         const usersRef = admin.database().ref('users');
         const usersSnapshot = await usersRef.once('value');
 
@@ -435,48 +405,21 @@ exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) =
         }
 
         const now = Date.now();
-        const oneHourAgo = now - (1 * 60 * 60 * 1000); // 1 hour ago for testing
+        // 7 days threshold for production
+        const thresholdMs = 7 * 24 * 60 * 60 * 1000;
+        const threshold = now - thresholdMs;
         let totalCleaned = 0;
-        const cleanedDevices = [];
-        const deviceInfo = [];
+        let totalDevices = 0;
 
         const users = usersSnapshot.val();
         for (const [userId, userData] of Object.entries(users)) {
             if (!userData.devices) continue;
 
-            console.log(`cleanupOldDevicesManual: Processing user ${userId}`);
-
             const devices = userData.devices;
-
-            // Collect all devices info for debugging
-            for (const [deviceId, deviceData] of Object.entries(devices)) {
-                const platform = deviceData.platform || 'unknown';
-                const lastSeen = deviceData.lastSeen || 0;
-                const registeredAt = deviceData.registeredAt || 0;
-                const isOnline = deviceData.isOnline || false;
-                const lastSeenDate = new Date(lastSeen).toISOString();
-                const registeredAtDate = new Date(registeredAt).toISOString();
-
-                deviceInfo.push({
-                    userId,
-                    deviceId,
-                    platform,
-                    lastSeen,
-                    lastSeenDate,
-                    registeredAt,
-                    registeredAtDate,
-                    isOnline,
-                    ageHours: Math.round((now - registeredAt) / (60 * 60 * 1000)),
-                    lastSeenHoursAgo: Math.round((now - lastSeen) / (60 * 60 * 1000))
-                });
-
-                console.log(`cleanupOldDevicesManual: Device ${deviceId} (${platform}) - lastSeen: ${lastSeenDate}, registered: ${registeredAtDate}, online: ${isOnline}`);
-            }
-
-            // Group devices by platform
             const devicesByPlatform = new Map();
 
             for (const [deviceId, deviceData] of Object.entries(devices)) {
+                totalDevices++;
                 const platform = deviceData.platform || 'unknown';
                 const lastSeen = deviceData.lastSeen || 0;
 
@@ -486,67 +429,37 @@ exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) =
                 devicesByPlatform.get(platform).push({
                     deviceId,
                     lastSeen,
-                    registeredAt: deviceData.registeredAt || 0
+                    userId
                 });
             }
 
             // For each platform, keep only the most recent device, clean others
             for (const [platform, deviceList] of devicesByPlatform) {
-                console.log(`cleanupOldDevicesManual: Platform ${platform} has ${deviceList.length} devices`);
-
                 if (deviceList.length > 1) {
-                    // Sort by lastSeen descending (most recent first)
                     deviceList.sort((a, b) => b.lastSeen - a.lastSeen);
 
-                    // Keep the first (most recent), mark others for cleanup
                     for (let i = 1; i < deviceList.length; i++) {
                         const device = deviceList[i];
-                        // For manual cleanup, use very short threshold (1 hour) to test
-                        if (device.lastSeen < oneHourAgo) {
-                            cleanedDevices.push({
-                                deviceId: device.deviceId,
-                                platform: platform,
-                                lastSeen: device.lastSeen,
-                                userId: userId
-                            });
-                            console.log(`cleanupOldDevicesManual: Marked for cleanup - device ${device.deviceId} last seen ${new Date(device.lastSeen).toISOString()}`);
-                        } else {
-                            console.log(`cleanupOldDevicesManual: Keeping device ${device.deviceId} - last seen ${new Date(device.lastSeen).toISOString()} (recent)`);
+                        if (device.lastSeen < threshold) {
+                            await usersRef.child(device.userId).child('devices').child(device.deviceId).remove();
+                            totalCleaned++;
                         }
                     }
-                } else {
-                    console.log(`cleanupOldDevicesManual: Platform ${platform} has only 1 device, keeping it`);
                 }
             }
-
-            // Clean up identified devices
-            for (const device of cleanedDevices) {
-                await usersRef.child(device.userId).child('devices').child(device.deviceId).remove();
-                console.log(`cleanupOldDevicesManual: Cleaned up old device ${device.deviceId} for user ${device.userId}`);
-                totalCleaned++;
-            }
         }
-
-        console.log(`cleanupOldDevicesManual: Completed, cleaned up ${totalCleaned} old devices`);
 
         return {
             success: true,
             cleaned: totalCleaned,
-            devices: cleanedDevices,
-            deviceInfo: deviceInfo, // Include all device info for debugging
-            message: `Cleaned up ${totalCleaned} old device entries. Found ${deviceInfo.length} total devices.`,
-            debug: {
-                totalDevicesFound: deviceInfo.length,
-                thresholdHours: 1,
-                cleanedCount: totalCleaned
-            }
+            totalDevices,
+            message: `Cleaned up ${totalCleaned} old device entries`
         };
     } catch (error) {
-        console.error('cleanupOldDevicesManual error:', error);
+        console.error('cleanupOldDevicesManual failed');
         return {
             success: false,
             cleaned: 0,
-            error: error.message,
             message: 'Failed to cleanup old devices'
         };
     }
@@ -579,19 +492,17 @@ exports.cleanupExpiredPairings = functions.pubsub
                     data.createdAt && (now - data.createdAt > 10 * 60 * 1000); // 10 min
 
                 if (isExpired || isOldCompleted) {
-                    console.log(`Cleaning up pairing: ${pairingSnapshot.key}, status=${data.status}`);
                     deletePromises.push(pairingSnapshot.ref.remove());
                 }
             });
 
             if (deletePromises.length > 0) {
                 await Promise.all(deletePromises);
-                console.log(`Cleaned up ${deletePromises.length} old pairing requests`);
             }
 
             return null;
         } catch (error) {
-            console.error("Error cleaning up pairings:", error);
+            console.error("cleanupExpiredPairings failed");
             return null;
         }
     });
@@ -599,15 +510,11 @@ exports.cleanupExpiredPairings = functions.pubsub
 exports.createPairingToken = functions.https.onCall(async (data, context) => {
     try {
         if (!context.auth) {
-            console.error("createPairingToken: No authentication context");
             throw new functions.https.HttpsError("unauthenticated", "Authentication required");
         }
 
         const deviceType = data && data.deviceType ? String(data.deviceType) : "desktop";
         const uid = context.auth.uid;
-
-        console.log(`createPairingToken: Creating token for uid=${uid}, deviceType=${deviceType}`);
-
         const token = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
         const now = Date.now();
 
@@ -621,15 +528,13 @@ exports.createPairingToken = functions.https.onCall(async (data, context) => {
 
         await admin.database().ref(`/pairing_tokens/${token}`).set(payload);
 
-        console.log(`createPairingToken: Token created successfully: ${token}`);
-
         return { token, expiresAt: payload.expiresAt };
     } catch (error) {
-        console.error("createPairingToken error:", error);
         if (error instanceof functions.https.HttpsError) {
             throw error;
         }
-        throw new functions.https.HttpsError("internal", error.message || "Failed to create pairing token");
+        console.error("createPairingToken failed");
+        throw new functions.https.HttpsError("internal", "Failed to create pairing token");
     }
 });
 
@@ -639,9 +544,6 @@ exports.redeemPairingToken = functions.https.onCall(async (data) => {
         const deviceName = data && data.deviceName ? String(data.deviceName) : "Desktop";
         const deviceType = data && data.deviceType ? String(data.deviceType) : "desktop";
 
-        console.log(`redeemPairingToken: Attempting to redeem token for deviceType=${deviceType}, ` +
-            `deviceName=${deviceName}`);
-
         if (!token) {
             throw new functions.https.HttpsError("invalid-argument", "Missing token");
         }
@@ -649,12 +551,10 @@ exports.redeemPairingToken = functions.https.onCall(async (data) => {
         const tokenRef = admin.database().ref(`/pairing_tokens/${token}`);
         const snapshot = await tokenRef.once("value");
         if (!snapshot.exists()) {
-            console.log(`redeemPairingToken: Token not found: ${token}`);
             throw new functions.https.HttpsError("not-found", "Invalid or expired token");
         }
 
         const tokenData = snapshot.val();
-        console.log(`redeemPairingToken: Token data:`, JSON.stringify(tokenData));
 
         if (tokenData.used) {
             throw new functions.https.HttpsError("failed-precondition", "Token already used");
@@ -674,8 +574,6 @@ exports.redeemPairingToken = functions.https.onCall(async (data) => {
         const pairedUid = tokenData.uid;
         const deviceId = `dev_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
         const deviceUid = `device_${deviceId}`;
-
-        console.log(`redeemPairingToken: Creating device ${deviceId} for user ${pairedUid}`);
 
         await admin.database()
             .ref(`/users/${pairedUid}/devices/${deviceId}`)
@@ -700,15 +598,13 @@ exports.redeemPairingToken = functions.https.onCall(async (data) => {
             redeemedBy: deviceId,
         });
 
-        console.log(`redeemPairingToken: Successfully redeemed token, deviceId=${deviceId}`);
-
         return { customToken, pairedUid, deviceId };
     } catch (error) {
-        console.error("redeemPairingToken error:", error);
         if (error instanceof functions.https.HttpsError) {
             throw error;
         }
-        throw new functions.https.HttpsError("internal", error.message || "Failed to redeem pairing token");
+        console.error("redeemPairingToken failed");
+        throw new functions.https.HttpsError("internal", "Failed to redeem pairing token");
     }
 });
 
@@ -734,30 +630,21 @@ exports.sendCallNotification = functions.database
         const { userId, callId } = context.params;
         const data = snapshot.val();
 
-        console.log(`New call notification for user ${userId}, call ${callId}:`, data);
-
-        // Validate data
         if (!data || !data.type || data.type !== "incoming_call") {
-            console.log("Invalid notification data, skipping");
             return null;
         }
 
         try {
-            // Get the user's FCM token
             const tokenSnapshot = await admin.database()
                 .ref(`/fcm_tokens/${userId}`)
                 .once("value");
             const fcmToken = tokenSnapshot.val();
 
             if (!fcmToken) {
-                console.log(`No FCM token found for user ${userId}`);
-                // Clean up the notification from the queue
                 await snapshot.ref.remove();
                 return null;
             }
 
-            // Construct the FCM message
-            // Using data-only message to ensure delivery even when app is killed
             const message = {
                 token: fcmToken,
                 data: {
@@ -770,7 +657,7 @@ exports.sendCallNotification = functions.database
                 },
                 android: {
                     priority: "high",
-                    ttl: 60000, // 60 seconds - calls shouldn't ring forever
+                    ttl: 60000,
                 },
                 apns: {
                     headers: {
@@ -786,30 +673,16 @@ exports.sendCallNotification = functions.database
                 },
             };
 
-            console.log("Sending FCM message:", JSON.stringify(message));
-
-            // Send the FCM message
             const response = await admin.messaging().send(message);
-            console.log(`Successfully sent FCM message: ${response}`);
-
-            // Clean up the notification from the queue after successful send
             await snapshot.ref.remove();
-            console.log("Cleaned up notification from queue");
-
             return response;
         } catch (error) {
-            console.error("Error sending FCM notification:", error);
-
-            // If the token is invalid, remove it
+            console.error("sendCallNotification failed");
             if (error.code === "messaging/invalid-registration-token" ||
                 error.code === "messaging/registration-token-not-registered") {
-                console.log(`Removing invalid FCM token for user ${userId}`);
                 await admin.database().ref(`/fcm_tokens/${userId}`).remove();
             }
-
-            // Clean up the notification from the queue even on error
             await snapshot.ref.remove();
-
             return null;
         }
     });
@@ -1301,15 +1174,33 @@ exports.triggerCleanup = functions.https.onCall(async (data, context) => {
         const now = Date.now();
         const stats = await cleanupUserData(userId, now);
 
-        // Also clean expired pairings
+        // Clean expired pairings - V1 path (pending_pairings)
         let expiredPairings = 0;
-        const pairingsRef = admin.database().ref("/pending_pairings");
-        const pairingsSnap = await pairingsRef.once("value");
-        if (pairingsSnap.exists()) {
+        const v1PairingsRef = admin.database().ref("/pending_pairings");
+        const v1PairingsSnap = await v1PairingsRef.once("value");
+        if (v1PairingsSnap.exists()) {
             const deletePromises = [];
-            pairingsSnap.forEach((child) => {
+            v1PairingsSnap.forEach((child) => {
                 const pData = child.val();
                 if (pData.expiresAt && now > pData.expiresAt) {
+                    deletePromises.push(child.ref.remove());
+                    expiredPairings++;
+                }
+            });
+            await Promise.all(deletePromises);
+        }
+
+        // Clean expired pairings - V2 path (pairing_requests)
+        const v2PairingsRef = admin.database().ref("/pairing_requests");
+        const v2PairingsSnap = await v2PairingsRef.once("value");
+        if (v2PairingsSnap.exists()) {
+            const deletePromises = [];
+            v2PairingsSnap.forEach((child) => {
+                const pData = child.val();
+                const isExpired = pData.expiresAt && now > pData.expiresAt;
+                const isOldCompleted = pData.status !== "pending" &&
+                    pData.createdAt && (now - pData.createdAt > 10 * 60 * 1000);
+                if (isExpired || isOldCompleted) {
                     deletePromises.push(child.ref.remove());
                     expiredPairings++;
                 }
@@ -2118,3 +2009,518 @@ exports.listUsers = functions.https.onCall(async (data, context) => {
         throw error;
     }
 });
+
+// ============================================
+// PAIRING V2 - Redesigned Pairing System
+// ============================================
+// New pairing flow with:
+// - Persistent device IDs
+// - Device limit enforcement (3 for free, unlimited for pro)
+// - 15-minute token expiration
+// - Phone-verified user identity
+
+const PAIRING_V2_TTL_MS = 15 * 60 * 1000; // 15 minutes (increased from 5)
+
+/**
+ * Helper: Get user's subscription plan
+ */
+async function getUserPlan(userId) {
+    try {
+        const subscriptionRef = admin.database().ref(`/users/${userId}/subscription`);
+        const snapshot = await subscriptionRef.once("value");
+
+        if (!snapshot.exists()) {
+            return "free";
+        }
+
+        const subscription = snapshot.val();
+        const plan = subscription.plan || "free";
+
+        // Check if plan has expired
+        if (subscription.planExpiresAt && Date.now() > subscription.planExpiresAt) {
+            return "free";
+        }
+
+        return plan;
+    } catch (error) {
+        console.error("Error getting user plan:", error);
+        return "free";
+    }
+}
+
+/**
+ * Helper: Get device count for user
+ */
+async function getDeviceCount(userId) {
+    try {
+        const devicesRef = admin.database().ref(`/users/${userId}/devices`);
+        const snapshot = await devicesRef.once("value");
+
+        if (!snapshot.exists()) {
+            return 0;
+        }
+
+        return Object.keys(snapshot.val()).length;
+    } catch (error) {
+        console.error("Error getting device count:", error);
+        return 0;
+    }
+}
+
+/**
+ * Helper: Get device limit for plan
+ */
+function getDeviceLimit(plan) {
+    switch (plan) {
+        case "monthly":
+        case "yearly":
+        case "lifetime":
+            return 999; // Effectively unlimited
+        case "free":
+        default:
+            return 3;
+    }
+}
+
+/**
+ * Initiate Pairing V2 - Called by Mac/Web to start pairing
+ *
+ * Uses persistent device IDs that survive reinstalls.
+ * Returns a QR payload for Android to scan.
+ */
+exports.initiatePairingV2 = functions.https.onCall(async (data, context) => {
+    try {
+        // Device can initiate pairing without auth (will get auth after approval)
+        const deviceId = data && data.deviceId ? String(data.deviceId) : "";
+        const deviceName = data && data.deviceName ? String(data.deviceName) : "Desktop";
+        const deviceType = data && data.deviceType ? String(data.deviceType) : "macos";
+        const appVersion = data && data.appVersion ? String(data.appVersion) : "2.0.0";
+
+        // Validate device ID format
+        if (!deviceId || !deviceId.match(/^(mac|web)_[a-f0-9]{16}$/)) {
+            throw new functions.https.HttpsError(
+                "invalid-argument",
+                "Invalid device ID format. Expected: mac_xxxx or web_xxxx"
+            );
+        }
+
+        console.log(`[PairingV2] Initiating pairing for device: ${deviceId} (${deviceName})`);
+
+        // Generate secure token
+        const token = crypto.randomUUID().replace(/-/g, "");
+        const now = Date.now();
+        const expiresAt = now + PAIRING_V2_TTL_MS;
+
+        // Store pairing request
+        const pairingData = {
+            deviceId,
+            deviceName,
+            deviceType,
+            appVersion,
+            status: "pending",
+            createdAt: now,
+            expiresAt,
+            version: 2 // Protocol version
+        };
+
+        await admin.database().ref(`/pairing_requests/${token}`).set(pairingData);
+
+        // Generate QR payload
+        const qrPayload = JSON.stringify({
+            v: 2, // Protocol version
+            token,
+            device: {
+                id: deviceId,
+                name: deviceName,
+                type: deviceType
+            },
+            expires: expiresAt
+        });
+
+        console.log(`[PairingV2] Session created: token=${token.slice(0, 8)}...`);
+
+        return {
+            success: true,
+            token,
+            expiresAt,
+            qrPayload
+        };
+    } catch (error) {
+        console.error("[PairingV2] initiatePairingV2 error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to initiate pairing");
+    }
+});
+
+/**
+ * Approve Pairing V2 - Called by Android after scanning QR and user confirms
+ *
+ * Validates device limits and creates custom auth token for Mac/Web.
+ */
+exports.approvePairingV2 = functions.https.onCall(async (data, context) => {
+    try {
+        const androidUid = requireAuth(context);
+        const token = data && data.token ? String(data.token) : "";
+        const approved = data && data.approved !== false; // Default to true
+
+        if (!token) {
+            throw new functions.https.HttpsError("invalid-argument", "Missing token");
+        }
+
+        console.log(`[PairingV2] Processing approval for token=${token.slice(0, 8)}..., approved=${approved}`);
+
+        // Get pairing request
+        const requestRef = admin.database().ref(`/pairing_requests/${token}`);
+        const snapshot = await requestRef.once("value");
+
+        if (!snapshot.exists()) {
+            throw new functions.https.HttpsError("not-found", "Pairing request not found or expired");
+        }
+
+        const request = snapshot.val();
+
+        // Check status
+        if (request.status !== "pending") {
+            throw new functions.https.HttpsError(
+                "failed-precondition",
+                `Pairing already ${request.status}`
+            );
+        }
+
+        // Check expiration
+        if (Date.now() > request.expiresAt) {
+            await requestRef.update({ status: "expired" });
+            throw new functions.https.HttpsError("deadline-exceeded", "Pairing request expired");
+        }
+
+        // Handle rejection
+        if (!approved) {
+            await requestRef.update({
+                status: "rejected",
+                rejectedAt: Date.now(),
+                rejectedBy: androidUid
+            });
+
+            console.log(`[PairingV2] Pairing rejected by ${androidUid}`);
+            return { success: true, status: "rejected" };
+        }
+
+        // Check device limits for free users
+        const userPlan = await getUserPlan(androidUid);
+        const deviceCount = await getDeviceCount(androidUid);
+        const deviceLimit = getDeviceLimit(userPlan);
+
+        // Check if this device already exists (re-pairing)
+        const existingDeviceRef = admin.database().ref(`/users/${androidUid}/devices/${request.deviceId}`);
+        const existingDevice = await existingDeviceRef.once("value");
+        const isRePairing = existingDevice.exists();
+
+        // Only check limit if this is a new device
+        if (!isRePairing && deviceCount >= deviceLimit) {
+            console.log(`[PairingV2] Device limit reached: ${deviceCount}/${deviceLimit}`);
+
+            return {
+                success: false,
+                error: "device_limit",
+                message: `Free plan limited to ${deviceLimit} devices. Upgrade to Pro for unlimited.`,
+                currentDevices: deviceCount,
+                limit: deviceLimit,
+                upgradeRequired: true
+            };
+        }
+
+        // Create custom token for Mac/Web device
+        const deviceUid = `device_${request.deviceId}`;
+        const customToken = await admin.auth().createCustomToken(deviceUid, {
+            pairedUid: androidUid,
+            deviceId: request.deviceId,
+            deviceType: request.deviceType,
+            version: 2
+        });
+
+        // Register/update device
+        const now = Date.now();
+        await admin.database()
+            .ref(`/users/${androidUid}/devices/${request.deviceId}`)
+            .set({
+                name: request.deviceName,
+                type: request.deviceType,
+                platform: request.deviceType,
+                isPaired: true,
+                pairedAt: now,
+                lastSeen: now,
+                appVersion: request.appVersion,
+                pairingVersion: 2
+            });
+
+        // Update pairing request with approval
+        await requestRef.update({
+            status: "approved",
+            approvedAt: now,
+            approvedBy: androidUid,
+            pairedUid: androidUid,
+            customToken // Mac/Web will read this to complete auth
+        });
+
+        // Schedule cleanup of the request after 5 minutes
+        // (Let Mac/Web have time to claim the token)
+        setTimeout(async () => {
+            try {
+                await requestRef.remove();
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+        }, 5 * 60 * 1000);
+
+        console.log(`[PairingV2] Pairing approved: device=${request.deviceId}, user=${androidUid}`);
+
+        return {
+            success: true,
+            status: "approved",
+            userId: androidUid,
+            deviceId: request.deviceId,
+            isRePairing
+        };
+    } catch (error) {
+        console.error("[PairingV2] approvePairingV2 error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to approve pairing");
+    }
+});
+
+/**
+ * Check Pairing V2 Status - Called by Mac/Web to poll for approval
+ *
+ * Returns status and custom token when approved.
+ */
+exports.checkPairingV2Status = functions.https.onCall(async (data, context) => {
+    try {
+        const token = data && data.token ? String(data.token) : "";
+
+        if (!token) {
+            throw new functions.https.HttpsError("invalid-argument", "Missing token");
+        }
+
+        const requestRef = admin.database().ref(`/pairing_requests/${token}`);
+        const snapshot = await requestRef.once("value");
+
+        if (!snapshot.exists()) {
+            return {
+                success: true,
+                status: "expired",
+                message: "Pairing request not found or expired"
+            };
+        }
+
+        const request = snapshot.val();
+
+        // Check expiration
+        if (Date.now() > request.expiresAt && request.status === "pending") {
+            return {
+                success: true,
+                status: "expired",
+                message: "Pairing request expired"
+            };
+        }
+
+        const result = {
+            success: true,
+            status: request.status,
+            deviceId: request.deviceId
+        };
+
+        // Include custom token if approved
+        if (request.status === "approved") {
+            result.customToken = request.customToken;
+            result.pairedUid = request.pairedUid;
+        }
+
+        return result;
+    } catch (error) {
+        console.error("[PairingV2] checkPairingV2Status error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to check status");
+    }
+});
+
+/**
+ * Get Device Info V2 - Returns user's devices with limit info
+ */
+exports.getDeviceInfoV2 = functions.https.onCall(async (data, context) => {
+    try {
+        const uid = requireAuth(context);
+
+        const userPlan = await getUserPlan(uid);
+        const deviceLimit = getDeviceLimit(userPlan);
+
+        const devicesRef = admin.database().ref(`/users/${uid}/devices`);
+        const snapshot = await devicesRef.once("value");
+
+        const devices = [];
+        if (snapshot.exists()) {
+            const devicesData = snapshot.val();
+            for (const [deviceId, deviceInfo] of Object.entries(devicesData)) {
+                devices.push({
+                    deviceId,
+                    name: deviceInfo.name || "Unknown Device",
+                    type: deviceInfo.type || deviceInfo.platform || "unknown",
+                    platform: deviceInfo.platform || deviceInfo.type || "unknown",
+                    isPaired: deviceInfo.isPaired !== false,
+                    pairedAt: deviceInfo.pairedAt,
+                    lastSeen: deviceInfo.lastSeen
+                });
+            }
+        }
+
+        return {
+            success: true,
+            plan: userPlan,
+            deviceLimit,
+            deviceCount: devices.length,
+            canAddDevice: devices.length < deviceLimit,
+            devices
+        };
+    } catch (error) {
+        console.error("[PairingV2] getDeviceInfoV2 error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to get device info");
+    }
+});
+
+/**
+ * Sync a message from Android to Firebase
+ * This allows Android to stay in Firebase offline mode to prevent OOM
+ *
+ * @param {Object} data - Message data
+ * @param {string} data.messageId - Unique message ID
+ * @param {Object} data.message - Message content
+ */
+exports.syncMessage = functions.https.onCall(async (data, context) => {
+    try {
+        const uid = requireAuth(context);
+
+        const { messageId, message } = data;
+
+        if (!messageId || !message) {
+            throw new functions.https.HttpsError("invalid-argument", "Missing messageId or message");
+        }
+
+        // Write message to Firebase
+        const messageRef = admin.database().ref(`/users/${uid}/messages/${messageId}`);
+        await messageRef.set({
+            ...message,
+            syncedAt: Date.now(),
+            syncedVia: "cloud_function"
+        });
+
+        return { success: true, messageId };
+    } catch (error) {
+        console.error("[SyncMessage] Error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to sync message");
+    }
+});
+
+/**
+ * Batch sync multiple messages from Android
+ * More efficient than syncing one at a time
+ *
+ * @param {Object} data - Batch data
+ * @param {Array} data.messages - Array of {messageId, message} objects
+ */
+exports.syncMessageBatch = functions.https.onCall(async (data, context) => {
+    try {
+        const uid = requireAuth(context);
+
+        const { messages } = data;
+
+        if (!messages || !Array.isArray(messages) || messages.length === 0) {
+            throw new functions.https.HttpsError("invalid-argument", "Missing or empty messages array");
+        }
+
+        // Limit batch size to prevent timeout
+        if (messages.length > 100) {
+            throw new functions.https.HttpsError("invalid-argument", "Batch size exceeds limit of 100");
+        }
+
+        // Build multi-path update
+        const updates = {};
+        const now = Date.now();
+
+        for (const { messageId, message } of messages) {
+            if (messageId && message) {
+                updates[`/users/${uid}/messages/${messageId}`] = {
+                    ...message,
+                    syncedAt: now,
+                    syncedVia: "cloud_function_batch"
+                };
+            }
+        }
+
+        // Perform atomic update
+        await admin.database().ref().update(updates);
+
+        return { success: true, count: Object.keys(updates).length };
+    } catch (error) {
+        console.error("[SyncMessageBatch] Error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to sync messages");
+    }
+});
+
+/**
+ * Cleanup expired V2 pairing requests
+ * Runs every 5 minutes
+ */
+exports.cleanupExpiredPairingRequestsV2 = functions.pubsub
+    .schedule("every 5 minutes")
+    .onRun(async () => {
+        const now = Date.now();
+
+        try {
+            const requestsRef = admin.database().ref("/pairing_requests");
+            const snapshot = await requestsRef.once("value");
+
+            if (!snapshot.exists()) {
+                return null;
+            }
+
+            const deletePromises = [];
+
+            snapshot.forEach((requestSnapshot) => {
+                const data = requestSnapshot.val();
+
+                // Remove if expired or old completed requests
+                const isExpired = data.expiresAt && (now > data.expiresAt + PAIRING_V2_TTL_MS);
+                const isOldCompleted = data.status !== "pending" &&
+                    data.createdAt && (now - data.createdAt > 10 * 60 * 1000);
+
+                if (isExpired || isOldCompleted) {
+                    console.log(`[PairingV2] Cleaning up request: ${requestSnapshot.key}`);
+                    deletePromises.push(requestSnapshot.ref.remove());
+                }
+            });
+
+            if (deletePromises.length > 0) {
+                await Promise.all(deletePromises);
+                console.log(`[PairingV2] Cleaned up ${deletePromises.length} pairing requests`);
+            }
+
+            return null;
+        } catch (error) {
+            console.error("[PairingV2] Error cleaning up requests:", error);
+            return null;
+        }
+    });

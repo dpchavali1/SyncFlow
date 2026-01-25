@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.database.*
+import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.PhoneNumberUtils
 import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.SmsRepository
@@ -43,7 +44,9 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
     }
 
     private val auth = FirebaseAuth.getInstance()
+    private val authManager = AuthManager.getInstance(context)
     private val database = FirebaseDatabase.getInstance()
+    private val functions = FirebaseFunctions.getInstance()
     private val securityMonitor: SecurityMonitor? = try {
         SecurityMonitor.getInstance(context)
     } catch (e: Exception) {
@@ -67,6 +70,27 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
     init {
         startDeviceMonitoring()
         startDeviceHeartbeat()
+
+        // Attempt sync group recovery on startup if we don't have one locally.
+        scope.launch {
+            try {
+                if (syncGroupManager.syncGroupId == null) {
+                    val userId = getUnifiedUserId()
+                    if (userId != null) {
+                        val recovered = syncGroupManager.recoverSyncGroup()
+                        if (recovered.isSuccess) {
+                            val groupId = recovered.getOrNull()
+                            if (groupId != null) {
+                                Log.d(TAG, "Recovered sync group on startup: $groupId")
+                                _syncGroupId.value = groupId
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Sync group recovery on startup failed", e)
+            }
+        }
     }
 
     /**
@@ -82,16 +106,15 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
      */
     suspend fun getUnifiedUserId(): String? {
         Log.d(TAG, "getUnifiedUserId() called")
+
         var user = auth.currentUser
         Log.d(TAG, "Current user: ${user?.uid}, isAnonymous: ${user?.isAnonymous}")
 
-        // If no authenticated user, try anonymous authentication for testing
         if (user == null) {
             try {
-                Log.d(TAG, "No authenticated user found, attempting anonymous authentication for testing")
+                Log.d(TAG, "No authenticated user found, attempting anonymous authentication")
                 val result = auth.signInAnonymously().await()
                 user = result.user
-                Log.d(TAG, "Anonymous authentication result - user: ${user?.uid}, isAnonymous: ${user?.isAnonymous}")
                 if (user != null) {
                     Log.d(TAG, "Anonymous authentication successful: ${user.uid}")
                 } else {
@@ -103,9 +126,7 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
             }
         }
 
-        val finalUserId = user?.uid
-        Log.d(TAG, "Returning user ID: $finalUserId")
-        return finalUserId
+        return user?.uid
     }
 
     /**
@@ -238,14 +259,33 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
 
     /**
      * Unregister a device from the unified account
+     * Uses Cloud Function to work with Firebase offline mode
      */
     suspend fun unregisterDevice(deviceId: String): Result<Unit> {
         return try {
-            val userId = getUnifiedUserId() ?: return Result.failure(Exception("No authenticated user"))
-            val deviceRef = database.getReference("users").child(userId).child("devices").child(deviceId)
-            deviceRef.removeValue().await()
-            Log.d(TAG, "Device unregistered: $deviceId")
-            Result.success(Unit)
+            Log.d(TAG, "Unregistering device via Cloud Function: $deviceId")
+
+            val result = functions
+                .getHttpsCallable("unregisterDevice")
+                .call(mapOf("deviceId" to deviceId))
+                .await()
+
+            val data = result.data as? Map<*, *>
+            val success = data?.get("success") as? Boolean ?: false
+
+            if (success) {
+                Log.d(TAG, "Device unregistered successfully: $deviceId")
+                Result.success(Unit)
+            } else {
+                val message = data?.get("message") as? String ?: "Failed to unregister device"
+                Log.w(TAG, "Device unregister returned: $message")
+                // Still return success if device was already removed
+                if (message.contains("already removed", ignoreCase = true)) {
+                    Result.success(Unit)
+                } else {
+                    Result.failure(Exception(message))
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error unregistering device", e)
             Result.failure(e)

@@ -58,10 +58,29 @@ export default function MessagesPage() {
       // Wait for authentication before setting up listener
       // This is required for Firebase rules to allow data access
       try {
-        const currentUser = await waitForAuth()
+        let currentUser = await waitForAuth()
 
         if (!currentUser) {
-          // Not authenticated, redirect to pairing
+          // Try to sign in anonymously - the stored userId gives us data access
+          // Firebase rules allow read if auth != null AND the path matches storedUserId
+          console.log('[Messages] No auth, attempting anonymous sign-in for data access')
+          try {
+            const { signInAnonymously } = await import('firebase/auth')
+            const { getAuth } = await import('firebase/auth')
+            const auth = getAuth()
+            const result = await signInAnonymously(auth)
+            currentUser = result.user?.uid || null
+            console.log('[Messages] Anonymous sign-in successful:', currentUser)
+          } catch (signInError) {
+            console.error('[Messages] Failed to sign in anonymously:', signInError)
+            // Redirect to pairing to re-establish connection
+            router.push('/')
+            return
+          }
+        }
+
+        if (!currentUser) {
+          // Still not authenticated, redirect to pairing
           router.push('/')
           return
         }
