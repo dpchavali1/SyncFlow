@@ -18,7 +18,6 @@ import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.data.database.SpamMessage
 import com.phoneintegration.app.data.database.SyncFlowDatabase
-import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.utils.SpamFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -433,106 +432,137 @@ private suspend fun scanInboxForSpam(
     threshold: Float,
     onProgress: (Float, String) -> Unit
 ): ScanResults = withContext(Dispatchers.IO) {
-    val smsRepository = SmsRepository(context)
-    val database = SyncFlowDatabase.getInstance(context)
-    val spamDao = database.spamMessageDao()
-    val syncService = DesktopSyncService(context)
-    val contactHelper = ContactHelper(context)
-
-    // Get existing spam message IDs to avoid duplicates
-    val existingSpamIds = try {
-        spamDao.getAllSpamIds().toSet()
-    } catch (e: Exception) {
-        emptySet()
-    }
-
-    var totalScanned = 0
-    var spamFound = 0
-    var alreadySpam = 0
-
-    // Get all messages (up to 1000 for reasonable scan time)
-    withContext(Dispatchers.Main) {
-        onProgress(0.05f, "Loading messages...")
-    }
-
-    val allMessages = smsRepository.getAllMessages(limit = 1000)
-    val totalMessages = allMessages.size
-
-    if (totalMessages == 0) {
-        withContext(Dispatchers.Main) {
-            onProgress(1f, "No messages to scan")
+    try {
+        val smsRepository = SmsRepository(context)
+        val database = SyncFlowDatabase.getInstance(context)
+        val spamDao = database.spamMessageDao()
+        val contactHelper = try {
+            ContactHelper(context)
+        } catch (e: Exception) {
+            null
         }
-        return@withContext ScanResults(0, 0, 0)
-    }
 
-    withContext(Dispatchers.Main) {
-        onProgress(0.1f, "Scanning $totalMessages messages...")
-    }
+        // Get existing spam message IDs to avoid duplicates
+        val existingSpamIds = try {
+            spamDao.getAllSpamIds().toSet()
+        } catch (e: Exception) {
+            emptySet()
+        }
 
-    // Process messages in batches for better UI feedback
-    val batchSize = 50
-    allMessages.forEachIndexed { index, message ->
-        // Skip if already in spam
-        if (existingSpamIds.contains(message.id)) {
-            alreadySpam++
-            totalScanned++
-        } else {
-            // Check if sender is a contact
-            val contactName = try {
-                contactHelper.getContactName(message.address)
-            } catch (e: Exception) {
-                null
+        var totalScanned = 0
+        var spamFound = 0
+        var alreadySpam = 0
+
+        // Get all messages (up to 1000 for reasonable scan time)
+        withContext(Dispatchers.Main) {
+            onProgress(0.05f, "Loading messages...")
+        }
+
+        val allMessages = try {
+            smsRepository.getAllMessages(limit = 1000)
+        } catch (e: Exception) {
+            android.util.Log.e("SpamScan", "Failed to load messages", e)
+            withContext(Dispatchers.Main) {
+                onProgress(1f, "Error loading messages")
             }
-            val isFromContact = contactName != null && contactName != message.address
+            return@withContext ScanResults(0, 0, 0)
+        }
 
-            // Run spam check
-            val spamResult = SpamFilter.checkMessage(
-                body = message.body,
-                senderAddress = message.address,
-                isFromContact = isFromContact,
-                threshold = threshold
-            )
+        val totalMessages = allMessages.size
 
-            if (spamResult.isSpam) {
-                // Mark as spam
-                val spamMessage = SpamMessage(
-                    messageId = message.id,
-                    address = message.address,
-                    body = message.body,
-                    date = message.date,
-                    contactName = contactName,
-                    spamConfidence = spamResult.confidence,
-                    spamReasons = spamResult.reasons.joinToString(", "),
-                    isUserMarked = false
-                )
+        if (totalMessages == 0) {
+            withContext(Dispatchers.Main) {
+                onProgress(1f, "No messages to scan")
+            }
+            return@withContext ScanResults(0, 0, 0)
+        }
 
+        withContext(Dispatchers.Main) {
+            onProgress(0.1f, "Scanning $totalMessages messages...")
+        }
+
+        // Process messages - wrap each in try-catch to continue on errors
+        val batchSize = 50
+        for ((index, message) in allMessages.withIndex()) {
+            try {
+                // Skip if already in spam
+                if (existingSpamIds.contains(message.id)) {
+                    alreadySpam++
+                    totalScanned++
+                } else {
+                    // Check if sender is a contact (safely)
+                    val contactName = try {
+                        contactHelper?.getContactName(message.address)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    val isFromContact = contactName != null && contactName != message.address
+
+                    // Run spam check
+                    val spamResult = SpamFilter.checkMessage(
+                        body = message.body,
+                        senderAddress = message.address,
+                        isFromContact = isFromContact,
+                        threshold = threshold
+                    )
+
+                    if (spamResult.isSpam) {
+                        // Mark as spam
+                        val spamMessage = SpamMessage(
+                            messageId = message.id,
+                            address = message.address,
+                            body = message.body,
+                            date = message.date,
+                            contactName = contactName,
+                            spamConfidence = spamResult.confidence,
+                            spamReasons = spamResult.reasons.joinToString(", "),
+                            isUserMarked = false
+                        )
+
+                        try {
+                            spamDao.insert(spamMessage)
+                            spamFound++
+                        } catch (e: Exception) {
+                            // Ignore insert errors (might be duplicate)
+                        }
+                        // Note: Desktop sync skipped during bulk scan for performance
+                        // Spam will sync on next regular sync cycle
+                    }
+                    totalScanned++
+                }
+            } catch (e: Exception) {
+                // Log but continue scanning
+                android.util.Log.e("SpamScan", "Error processing message ${message.id}", e)
+                totalScanned++
+            }
+
+            // Update progress every batch
+            if (index % batchSize == 0 || index == totalMessages - 1) {
+                val progress = 0.1f + (0.9f * (index + 1).toFloat() / totalMessages)
                 try {
-                    spamDao.insert(spamMessage)
-                    syncService.syncSpamMessage(spamMessage)
-                    spamFound++
+                    withContext(Dispatchers.Main) {
+                        onProgress(progress, "Scanned ${index + 1} of $totalMessages messages...")
+                    }
                 } catch (e: Exception) {
-                    // Ignore insert errors (might be duplicate)
+                    // Ignore UI update errors
                 }
             }
-            totalScanned++
         }
 
-        // Update progress every batch
-        if (index % batchSize == 0 || index == totalMessages - 1) {
-            val progress = 0.1f + (0.9f * (index + 1).toFloat() / totalMessages)
-            withContext(Dispatchers.Main) {
-                onProgress(progress, "Scanned ${index + 1} of $totalMessages messages...")
-            }
+        withContext(Dispatchers.Main) {
+            onProgress(1f, "Scan complete!")
         }
-    }
 
-    withContext(Dispatchers.Main) {
-        onProgress(1f, "Scan complete!")
+        ScanResults(
+            totalScanned = totalScanned,
+            spamFound = spamFound,
+            alreadySpam = alreadySpam
+        )
+    } catch (e: Exception) {
+        android.util.Log.e("SpamScan", "Scan failed", e)
+        withContext(Dispatchers.Main) {
+            onProgress(1f, "Scan failed: ${e.message}")
+        }
+        ScanResults(0, 0, 0)
     }
-
-    ScanResults(
-        totalScanned = totalScanned,
-        spamFound = spamFound,
-        alreadySpam = alreadySpam
-    )
 }
