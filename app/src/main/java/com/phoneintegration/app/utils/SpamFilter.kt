@@ -121,7 +121,7 @@ object SpamFilter {
         "account will be closed",
         "service interrupted",
 
-        // Adult content
+        // Dating/Adult spam
         "adult content",
         "dating site",
         "singles in your area",
@@ -129,6 +129,68 @@ object SpamFilter {
         "hot singles",
         "lonely housewives",
         "hookup",
+        "looking for fun",
+        "casual dating",
+        "no strings attached",
+        "discreet affair",
+        "naughty",
+        "sexy singles",
+        "local singles",
+        "match waiting",
+        "someone likes you",
+        "new match",
+        "dating profile",
+        "view profile",
+        "women near you",
+        "men near you",
+        "chat now",
+        "meet tonight",
+        "looking for you",
+        "wants to meet",
+
+        // Event/Festival spam
+        "festival tickets",
+        "concert tickets",
+        "event tickets",
+        "whisky festival",
+        "wine festival",
+        "beer festival",
+        "food festival",
+        "music festival",
+        "free tickets",
+        "vip tickets",
+        "exclusive tickets",
+        "limited tickets",
+        "get tickets",
+        "book tickets",
+
+        // Emergency/Roadside scams
+        "aaa membership",
+        "roadside assistance",
+        "emergency roadside",
+        "towing service",
+        "car warranty",
+        "extended warranty",
+        "warranty expiring",
+        "vehicle warranty",
+        "auto warranty",
+        "insurance expired",
+        "coverage expiring",
+
+        // Fake delivery - specific carriers
+        "usps delivery",
+        "usps package",
+        "usps notice",
+        "fedex delivery",
+        "fedex package",
+        "ups delivery",
+        "ups package",
+        "dhl delivery",
+        "dhl package",
+        "your shipment",
+        "delivery notification",
+        "parcel waiting",
+        "schedule your delivery",
 
         // Promotional spam / Ads
         "% off",
@@ -188,20 +250,68 @@ object SpamFilter {
 
     // High confidence spam phrases (instant flag)
     private val HIGH_CONFIDENCE_PHRASES = listOf(
+        // Toll scams
         "your toll",
         "pay your toll",
         "toll invoice",
         "settle your balance",
+        "settle your toll",
+        "toll amount due",
+
+        // Urgency/Threat scams
         "avoid penalties",
         "avoid late fees",
         "collection action",
         "legal action",
         "arrest warrant",
         "court appearance",
+        "final warning",
+        "account will be suspended",
+        "immediate suspension",
+
+        // Delivery scams
         "verify your identity immediately",
         "your package could not be delivered",
         "click to reschedule",
-        "confirm delivery address"
+        "confirm delivery address",
+        "usps: your package",
+        "fedex: your package",
+        "ups: your package",
+        "delivery fee required",
+        "pay delivery fee",
+
+        // Dating scam patterns
+        "girl wants to meet",
+        "woman wants to meet",
+        "sent you a message",
+        "waiting for your reply",
+        "check your matches",
+
+        // Brand impersonation indicators
+        "from amazon",
+        "amazon order",
+        "amazon delivery",
+        "your amazon",
+        "netflix account",
+        "paypal account",
+        "apple id",
+        "google account"
+    )
+
+    // Known brand domains for impersonation detection
+    private val BRAND_DOMAINS = mapOf(
+        "amazon" to listOf("amazon.com", "amazon.in", "amazon.co.uk", "amzn.com", "amzn.to"),
+        "usps" to listOf("usps.com"),
+        "fedex" to listOf("fedex.com"),
+        "ups" to listOf("ups.com"),
+        "netflix" to listOf("netflix.com"),
+        "paypal" to listOf("paypal.com"),
+        "apple" to listOf("apple.com", "icloud.com"),
+        "google" to listOf("google.com", "gmail.com"),
+        "aaa" to listOf("aaa.com"),
+        "walmart" to listOf("walmart.com"),
+        "costco" to listOf("costco.com"),
+        "target" to listOf("target.com")
     )
 
     // Suspicious URL patterns
@@ -374,6 +484,36 @@ object SpamFilter {
             lowerBody.contains("terms apply") || lowerBody.contains("conditions apply")) {
             score += 0.2f
             reasons.add("Contains terms/conditions disclaimer")
+        }
+
+        // Check for unknown sender pattern
+        val lowerSender = senderAddress.lowercase()
+        if (lowerSender.contains("unknown") || lowerSender == "unknown_sender" ||
+            lowerSender == "unknown sender" || lowerSender.contains("private") ||
+            lowerSender.contains("blocked") || lowerSender.contains("no caller id")) {
+            score += 0.4f
+            reasons.add("Unknown/hidden sender")
+        }
+
+        // Brand impersonation detection - message mentions brand but link doesn't match
+        for ((brand, validDomains) in BRAND_DOMAINS) {
+            if (lowerBody.contains(brand)) {
+                // Extract URLs from body
+                val urlPattern = Regex("""https?://[^\s]+|www\.[^\s]+|\w+\.\w+/[^\s]*""", RegexOption.IGNORE_CASE)
+                val urlsInBody = urlPattern.findAll(body).map { it.value.lowercase() }.toList()
+
+                if (urlsInBody.isNotEmpty()) {
+                    // Check if any URL matches the valid brand domains
+                    val hasValidBrandUrl = urlsInBody.any { url ->
+                        validDomains.any { domain -> url.contains(domain) }
+                    }
+
+                    if (!hasValidBrandUrl) {
+                        score += 0.5f  // High score for brand impersonation
+                        reasons.add("Possible $brand impersonation - suspicious link")
+                    }
+                }
+            }
         }
 
         // Normalize score to 0-1 range
