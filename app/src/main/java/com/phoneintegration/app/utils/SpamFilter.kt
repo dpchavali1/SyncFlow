@@ -164,6 +164,44 @@ object SpamFilter {
         "get tickets",
         "book tickets",
 
+        // Political campaigns
+        "vote for",
+        "vote yes",
+        "vote no",
+        "election day",
+        "polling location",
+        "your vote",
+        "cast your vote",
+        "support our campaign",
+        "political action",
+        "donate now",
+        "campaign contribution",
+        "paid for by",
+        "approved by",
+        "candidate for",
+        "running for",
+        "re-elect",
+        "reelect",
+        "democrat",
+        "republican",
+        "conservative",
+        "liberal",
+        "trump",
+        "biden",
+        "congress",
+        "senate",
+        "governor",
+        "senator",
+        "representative",
+        "ballot",
+        "proposition",
+        "measure",
+        "primary election",
+        "general election",
+        "early voting",
+        "mail-in ballot",
+        "absentee ballot",
+
         // Emergency/Roadside scams
         "aaa membership",
         "roadside assistance",
@@ -377,12 +415,16 @@ object SpamFilter {
      * Check if a message is likely spam.
      * Returns a SpamCheckResult with confidence level and reasons.
      * @param threshold The confidence threshold for spam classification (default 0.5)
+     * @param isRead Whether the message has been read (unread messages from unknown senders are more suspicious)
+     * @param messageAgeHours How old the message is in hours (old unread = more suspicious)
      */
     fun checkMessage(
         body: String,
         senderAddress: String,
         isFromContact: Boolean = false,
-        threshold: Float = 0.5f
+        threshold: Float = 0.5f,
+        isRead: Boolean = true,  // Default to true to not penalize when unknown
+        messageAgeHours: Long = 0  // How old the message is
     ): SpamCheckResult {
         val reasons = mutableListOf<String>()
         var score = 0f
@@ -493,6 +535,19 @@ object SpamFilter {
             lowerSender.contains("blocked") || lowerSender.contains("no caller id")) {
             score += 0.4f
             reasons.add("Unknown/hidden sender")
+        }
+
+        // Persistently unread messages from non-contacts are suspicious
+        // Spam/bulk SMS often can't be marked as read properly
+        if (!isRead && !isFromContact) {
+            // Old unread messages are more suspicious (normal messages get read)
+            if (messageAgeHours > 24) {
+                score += 0.25f
+                reasons.add("Old unread message from unknown sender")
+            } else if (messageAgeHours > 1) {
+                score += 0.15f
+                reasons.add("Unread message from unknown sender")
+            }
         }
 
         // Brand impersonation detection - message mentions brand but link doesn't match
