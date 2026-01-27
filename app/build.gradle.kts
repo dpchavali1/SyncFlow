@@ -169,6 +169,7 @@ dependencies {
 
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
     implementation("io.coil-kt:coil-compose:2.4.0")
+    implementation("io.coil-kt:coil-gif:2.4.0")  // GIF support for Coil
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // ──────────────────────────────────────────────

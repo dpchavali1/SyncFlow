@@ -37,9 +37,7 @@ class NotificationMirrorService: ObservableObject {
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if granted {
-                print("NotificationMirrorService: Notification permission granted")
             } else if let error = error {
-                print("NotificationMirrorService: Permission error: \(error)")
             }
         }
     }
@@ -48,14 +46,12 @@ class NotificationMirrorService: ObservableObject {
     func startSync(userId: String) {
         currentUserId = userId
         startListeningForNotifications(userId: userId)
-        print("NotificationMirrorService: Started syncing for user \(userId)")
     }
 
     /// Stop syncing
     func stopSync() {
         stopListeningForNotifications()
         currentUserId = nil
-        print("NotificationMirrorService: Stopped syncing")
     }
 
     /// Listen for notification updates from Firebase
@@ -181,7 +177,6 @@ class NotificationMirrorService: ObservableObject {
             if let error = error {
                 print("NotificationMirrorService: Error showing notification: \(error)")
             } else {
-                print("NotificationMirrorService: Showed notification from \(notification.appName)")
             }
         }
     }
@@ -203,7 +198,6 @@ class NotificationMirrorService: ObservableObject {
                     self.recentNotifications.removeAll()
                     self.displayedNotificationIds.removeAll()
                 }
-                print("NotificationMirrorService: Cleared all notifications")
             }
         }
     }
@@ -238,13 +232,11 @@ class NotificationMirrorService: ObservableObject {
     /// Reduce update frequency for battery saving
     func reduceUpdateFrequency() {
         // Reduce the frequency of notification updates
-        print("NotificationMirrorService: Reducing update frequency")
     }
 
     /// Pause notification mirroring temporarily
     func pauseMirroring() {
         isEnabled = false
-        print("NotificationMirrorService: Paused mirroring")
     }
 
     /// Resume notification mirroring

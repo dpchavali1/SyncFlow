@@ -33,21 +33,6 @@ struct MenuBarView: View {
                             Spacer()
                         }
                     }
-
-                    let isTransferForCall = appState.audioRoutingCallId == call.id
-                    if isTransferForCall && appState.audioRoutingState == .connected {
-                        Button("Stop Transfer") {
-                            appState.stopAudioRouting()
-                        }
-                        .buttonStyle(.bordered)
-                    } else {
-                        let isConnecting = isTransferForCall && appState.audioRoutingState == .connecting
-                        Button(isConnecting ? "Connecting..." : "Transfer Audio") {
-                            appState.startAudioRouting(for: call)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(isConnecting)
-                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)

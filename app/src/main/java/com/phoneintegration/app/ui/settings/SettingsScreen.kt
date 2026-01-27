@@ -33,7 +33,8 @@ fun SettingsScreen(
     onNavigateToTemplates: () -> Unit,
     onNavigateToBackup: () -> Unit,
     onNavigateToDesktop: () -> Unit = {},
-    onNavigateToUsage: () -> Unit = {}
+    onNavigateToUsage: () -> Unit = {},
+    onNavigateToSync: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
@@ -110,6 +111,13 @@ fun SettingsScreen(
                 title = "Desktop Sync",
                 subtitle = "Use SyncFlow on MacBook or PC",
                 onClick = onNavigateToDesktop
+            )
+
+            SettingsItem(
+                icon = Icons.Filled.Sync,
+                title = "Sync Message History",
+                subtitle = "Load older messages to Mac/PC",
+                onClick = onNavigateToSync
             )
 
             Divider(Modifier.padding(vertical = 8.dp))

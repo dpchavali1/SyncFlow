@@ -380,8 +380,6 @@ class AppState: ObservableObject {
     @Published var selectedConversation: Conversation?
     @Published var selectedTab: AppTab = .messages
     @Published var activeCalls: [ActiveCall] = []
-    @Published var audioRoutingState: CallAudioRoutingManager.State = .idle
-    @Published var audioRoutingCallId: String? = nil
     @Published var continuitySuggestion: ContinuityService.ContinuityState?
 
     // SyncFlow calling
@@ -447,12 +445,18 @@ class AppState: ObservableObject {
 
     // Ringtone manager
     let ringtoneManager = CallRingtoneManager.shared
-    private let audioRoutingManager = CallAudioRoutingManager()
     private var pendingCallNotificationId: String?
 
+    // Background activity token to prevent app suspension when minimized
+    // This ensures Firebase listeners remain active for incoming calls
+    private var backgroundActivity: NSObjectProtocol?
+
     deinit {
-        // Ensure proper cleanup when AppState is deallocated
-        unpair()
+        // Clean up local resources when AppState is deallocated
+        // NOTE: Do NOT call unpair() here - that should only happen on explicit user request
+        // Otherwise the app will unpair every time it restarts or AppState is recreated
+        stopBackgroundActivity()
+        stopListeningForCalls()
     }
 
     init() {
@@ -475,7 +479,13 @@ class AppState: ObservableObject {
             startMediaControl(userId: storedUserId)
             startScheduledMessages(userId: storedUserId)
             startVoicemailSync(userId: storedUserId)
+
+            // Start background activity to keep Firebase listeners active when minimized
+            startBackgroundActivity()
         }
+
+        // Observe notification actions for answering/declining calls from macOS notifications
+        setupNotificationActionObservers()
 
         // Observe call state changes to auto-dismiss call view
         syncFlowCallManager.$callState
@@ -496,30 +506,24 @@ class AppState: ObservableObject {
                         self?.pendingCallNotificationId = nil
                     }
                 case .ended, .failed:
+                    self?.ringtoneManager.stopRinging()  // Stop ringback for outgoing calls
                     self?.showSyncFlowCallView = false
                     self?.activeSyncFlowCall = nil
+                    self?.incomingSyncFlowCall = nil  // Also clear any incoming call state
                     if let callId = self?.pendingCallNotificationId {
                         NotificationService.shared.clearCallNotification(callId: callId)
                         self?.pendingCallNotificationId = nil
                     }
                 case .idle:
                     // Also hide on idle (cleanup completed)
+                    self?.ringtoneManager.stopRinging()  // Ensure ringtone is stopped
                     if self?.showSyncFlowCallView == true {
                         self?.showSyncFlowCallView = false
                         self?.activeSyncFlowCall = nil
                     }
+                    self?.incomingSyncFlowCall = nil
                 default:
                     break
-                }
-            }
-            .store(in: &cancellables)
-
-        audioRoutingManager.$state
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                self?.audioRoutingState = state
-                if case .idle = state {
-                    self?.audioRoutingCallId = nil
                 }
             }
             .store(in: &cancellables)
@@ -532,19 +536,205 @@ class AppState: ObservableObject {
             .store(in: &cancellables)
     }
 
+    // MARK: - Background Activity
+
+    /// Starts a background activity to prevent macOS from suspending the app when minimized.
+    /// This ensures Firebase listeners remain active for incoming calls.
+    private func startBackgroundActivity() {
+        guard backgroundActivity == nil else { return }
+
+        backgroundActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .idleSystemSleepDisabled],
+            reason: "SyncFlow needs to receive incoming calls"
+        )
+        print("AppState: Started background activity for incoming calls")
+    }
+
+    private func stopBackgroundActivity() {
+        if let activity = backgroundActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            backgroundActivity = nil
+            print("AppState: Stopped background activity")
+        }
+    }
+
+    // MARK: - Notification Action Observers
+
+    private func setupNotificationActionObservers() {
+        // Answer call from notification
+        NotificationCenter.default.addObserver(
+            forName: .answerCallFromNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let userInfo = notification.userInfo,
+                  let callId = userInfo["callId"] as? String,
+                  let callerName = userInfo["callerName"] as? String else {
+                return
+            }
+
+            let withVideo = userInfo["withVideo"] as? Bool ?? false
+            let isVideoCall = userInfo["isVideoCall"] as? Bool ?? false
+
+            print("AppState: Answering call from notification - callId: \(callId), withVideo: \(withVideo)")
+
+            // Find the incoming call or create one from the notification data
+            if let existingCall = self.incomingSyncFlowCall, existingCall.id == callId {
+                self.answerSyncFlowCall(existingCall, withVideo: withVideo)
+            } else {
+                // Create a temporary call object to answer
+                let call = SyncFlowCall(
+                    id: callId,
+                    callerId: "",
+                    callerName: callerName,
+                    callerPlatform: "android",
+                    calleeId: self.userId ?? "",
+                    calleeName: "Me",
+                    calleePlatform: "macos",
+                    callType: isVideoCall ? .video : .audio,
+                    status: .ringing,
+                    startedAt: Date(),
+                    answeredAt: nil,
+                    endedAt: nil,
+                    offer: nil,
+                    answer: nil
+                )
+                self.answerSyncFlowCall(call, withVideo: withVideo)
+            }
+        }
+
+        // Decline call from notification
+        NotificationCenter.default.addObserver(
+            forName: .declineCallFromNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let userInfo = notification.userInfo,
+                  let callId = userInfo["callId"] as? String else {
+                return
+            }
+
+            print("AppState: Declining call from notification - callId: \(callId)")
+
+            // Find the incoming call or create one from the notification data
+            if let existingCall = self.incomingSyncFlowCall, existingCall.id == callId {
+                self.rejectSyncFlowCall(existingCall)
+            } else {
+                // Create a temporary call object to reject
+                let call = SyncFlowCall(
+                    id: callId,
+                    callerId: "",
+                    callerName: "Unknown",
+                    callerPlatform: "android",
+                    calleeId: self.userId ?? "",
+                    calleeName: "Me",
+                    calleePlatform: "macos",
+                    callType: .audio,
+                    status: .ringing,
+                    startedAt: Date(),
+                    answeredAt: nil,
+                    endedAt: nil,
+                    offer: nil,
+                    answer: nil
+                )
+                self.rejectSyncFlowCall(call)
+            }
+        }
+
+        // Show incoming call UI from notification tap
+        NotificationCenter.default.addObserver(
+            forName: .showIncomingCallUI,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let userInfo = notification.userInfo,
+                  let callId = userInfo["callId"] as? String,
+                  let callerName = userInfo["callerName"] as? String else {
+                return
+            }
+
+            let isVideo = userInfo["isVideo"] as? Bool ?? false
+
+            print("AppState: Showing incoming call UI from notification - callId: \(callId)")
+
+            // If we don't already have this incoming call showing, create one
+            if self.incomingSyncFlowCall?.id != callId {
+                let call = SyncFlowCall(
+                    id: callId,
+                    callerId: "",
+                    callerName: callerName,
+                    callerPlatform: "android",
+                    calleeId: self.userId ?? "",
+                    calleeName: "Me",
+                    calleePlatform: "macos",
+                    callType: isVideo ? .video : .audio,
+                    status: .ringing,
+                    startedAt: Date(),
+                    answeredAt: nil,
+                    endedAt: nil,
+                    offer: nil,
+                    answer: nil
+                )
+                self.incomingSyncFlowCall = call
+            }
+        }
+
+        // Answer phone call from notification
+        NotificationCenter.default.addObserver(
+            forName: .answerPhoneCallFromNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let userInfo = notification.userInfo,
+                  let callId = userInfo["callId"] as? String else {
+                return
+            }
+
+            print("AppState: Answering phone call from notification - callId: \(callId)")
+
+            // Find the incoming phone call and answer it
+            if let call = self.activeCalls.first(where: { $0.id == callId && $0.callState == .ringing }) {
+                self.answerCall(call)
+            } else if let call = self.incomingCall, call.id == callId {
+                self.answerCall(call)
+            }
+        }
+
+        // Decline phone call from notification
+        NotificationCenter.default.addObserver(
+            forName: .declinePhoneCallFromNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let userInfo = notification.userInfo,
+                  let callId = userInfo["callId"] as? String else {
+                return
+            }
+
+            print("AppState: Declining phone call from notification - callId: \(callId)")
+
+            // Find the incoming phone call and reject it
+            if let call = self.activeCalls.first(where: { $0.id == callId && $0.callState == .ringing }) {
+                self.rejectCall(call)
+            } else if let call = self.incomingCall, call.id == callId {
+                self.rejectCall(call)
+            }
+        }
+    }
+
     func setPaired(userId: String) {
         self.userId = userId
         self.isPaired = true
         UserDefaults.standard.set(userId, forKey: "syncflow_user_id")
 
         // Update subscription status with the newly paired user's plan from Firebase
-        print("AppState.setPaired: Setting user \(userId), updating subscription status")
         Task {
-            print("AppState.setPaired: Calling updateSubscriptionStatus...")
             await SubscriptionService.shared.updateSubscriptionStatus()
-            print("AppState.setPaired: updateSubscriptionStatus completed")
-            print("AppState.setPaired: Current subscriptionStatus = \(SubscriptionService.shared.subscriptionStatus.displayText)")
-            print("AppState.setPaired: isPremium = \(SubscriptionService.shared.isPremium)")
         }
 
         fileTransferService.configure(userId: userId)
@@ -564,6 +754,9 @@ class AppState: ObservableObject {
         startScheduledMessages(userId: userId)
         startVoicemailSync(userId: userId)
         startDeviceStatusListener(userId: userId)
+
+        // Start background activity to keep Firebase listeners active when minimized
+        startBackgroundActivity()
     }
 
     func unpair() {
@@ -574,7 +767,6 @@ class AppState: ObservableObject {
         let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id")
 
         stopListeningForCalls()
-        stopAudioRouting()
         stopListeningForPhoneStatus()
         stopClipboardSync()
         stopPhotoSync()
@@ -585,6 +777,7 @@ class AppState: ObservableObject {
         stopScheduledMessages()
         stopVoicemailSync()
         stopDeviceStatusListener()
+        stopBackgroundActivity()
 
         // Cancel all Combine subscriptions to prevent memory leaks
         cancellables.forEach { $0.cancel() }
@@ -628,21 +821,23 @@ class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self?.activeCalls = calls
 
-                // Find first ringing call for incoming notification
-                self?.incomingCall = calls.first { $0.callState == .ringing }
+                // Find NEWEST ringing call by timestamp (not just first one)
+                let ringingCalls = calls.filter { $0.callState == .ringing }
+                let newestRingingCall = ringingCalls.max(by: { $0.timestamp < $1.timestamp })
+
+                if newestRingingCall != nil {
+                    // Clear notifications for any OLD ringing calls that are being replaced
+                    for oldCall in ringingCalls where oldCall.id != newestRingingCall?.id {
+                        NotificationService.shared.clearPhoneCallNotification(callId: oldCall.id)
+                    }
+                }
+                self?.incomingCall = newestRingingCall
 
                 // Clear banner reference when call is gone or ended
                 if let bannerId = self?.lastAnsweredCallId {
                     let stillActive = calls.contains { $0.id == bannerId && $0.callState != .ended }
                     if !stillActive {
                         self?.lastAnsweredCallId = nil
-                    }
-                }
-
-                if let routingCallId = self?.audioRoutingCallId {
-                    let stillActive = calls.contains { $0.id == routingCallId && $0.callState == .active }
-                    if !stillActive {
-                        self?.stopAudioRouting()
                     }
                 }
             }
@@ -676,14 +871,18 @@ class AppState: ObservableObject {
     }
 
     private func handleIncomingCallChange(oldValue: ActiveCall?, newValue: ActiveCall?) {
-        if newValue != nil && oldValue == nil {
-            // New incoming call - start ringing
-            print("AppState: Incoming call detected, starting ringtone")
+        if let call = newValue, oldValue == nil {
+            // New incoming phone call - start ringing and show notification
             ringtoneManager.startRinging()
-        } else if newValue == nil && oldValue != nil {
-            // Incoming call ended/answered - stop ringing
-            print("AppState: Incoming call ended, stopping ringtone")
+            NotificationService.shared.showIncomingPhoneCallNotification(
+                callerName: call.displayName,
+                phoneNumber: call.formattedPhoneNumber,
+                callId: call.id
+            )
+        } else if newValue == nil, let oldCall = oldValue {
+            // Incoming phone call ended/answered - stop ringing and clear notification
             ringtoneManager.stopRinging()
+            NotificationService.shared.clearPhoneCallNotification(callId: oldCall.id)
         }
     }
 
@@ -944,34 +1143,6 @@ class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Call Audio Transfer
-
-    func startAudioRouting(for call: ActiveCall) {
-        guard let userId = userId else { return }
-        audioRoutingCallId = call.id
-        audioRoutingManager.start(userId: userId, callId: call.id)
-        Task {
-            try? await FirebaseService.shared.requestAudioRouting(
-                userId: userId,
-                callId: call.id,
-                enable: true
-            )
-        }
-    }
-
-    func stopAudioRouting() {
-        guard let userId = userId, let callId = audioRoutingCallId else { return }
-        Task {
-            try? await FirebaseService.shared.requestAudioRouting(
-                userId: userId,
-                callId: callId,
-                enable: false
-            )
-        }
-        audioRoutingManager.stop()
-        audioRoutingCallId = nil
-    }
-
     // MARK: - SyncFlow Calls
 
     private var syncFlowCallsListenerHandle: DatabaseHandle?
@@ -996,6 +1167,8 @@ class AppState: ObservableObject {
 
     /// Listen for incoming user-to-user calls (from incoming_syncflow_calls path)
     private func startListeningForIncomingUserCalls(userId: String) {
+        print("AppState: Starting to listen for incoming user calls for userId: \(userId)")
+
         // Use the SyncFlowCallManager to listen for incoming user calls
         syncFlowCallManager.startListeningForIncomingUserCalls(userId: userId)
 
@@ -1004,7 +1177,7 @@ class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] incomingCall in
                 if let call = incomingCall {
-                    print("AppState: Incoming user call from \(call.callerName)")
+                    print("🔔 AppState: Incoming user call detected from \(call.callerName), callId: \(call.callId)")
                     // Create a SyncFlowCall from the incoming user call data
                     let syncFlowCall = SyncFlowCall(
                         id: call.callId,
@@ -1027,6 +1200,7 @@ class AppState: ObservableObject {
                     self?.pendingCallNotificationId = syncFlowCall.id
                     NotificationService.shared.showIncomingCallNotification(
                         callerName: syncFlowCall.callerName,
+                        callerPhone: call.callerPhone,
                         isVideo: syncFlowCall.callType == .video,
                         callId: syncFlowCall.id
                     )
@@ -1124,12 +1298,16 @@ class AppState: ObservableObject {
     }
 
     func endSyncFlowCall() {
+        // Stop ringtone immediately (don't wait for async call)
+        ringtoneManager.stopRinging()
+
         Task {
             do {
                 try await syncFlowCallManager.endCall()
                 await MainActor.run {
                     activeSyncFlowCall = nil
                     showSyncFlowCallView = false
+                    incomingSyncFlowCall = nil
                 }
             } catch {
                 print("Error ending SyncFlow call: \(error)")

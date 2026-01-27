@@ -359,8 +359,10 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
     private fun stopService(serviceName: String) {
         when (serviceName) {
             "intelligent_sync" -> {
-                intelligentSyncManager?.cleanup()
-                intelligentSyncManager = null
+                // Don't cleanup IntelligentSyncManager - it must persist for sync request listeners
+                // intelligentSyncManager?.cleanup()
+                // intelligentSyncManager = null
+                Log.d(TAG, "Skipping IntelligentSyncManager cleanup - must persist for sync listeners")
             }
             "contacts" -> contactsReceiveService?.stopListening()
             "phone_status" -> phoneStatusService?.stopMonitoring()
@@ -410,14 +412,17 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
 
     /**
      * Cleanup resources
+     * Note: IntelligentSyncManager is NOT cleaned up here because it's a singleton
+     * that needs to persist for sync request listeners to work even when activity is destroyed
      */
     fun cleanup() {
         batteryMonitorJob?.cancel()
         networkMonitorJob?.cancel()
-        intelligentSyncManager?.cleanup()
+        // Don't cleanup IntelligentSyncManager - it's a singleton that should persist
+        // intelligentSyncManager?.cleanup()
         stopAllServices()
         scope.cancel()
-        Log.i(TAG, "BatteryAwareServiceManager cleaned up")
+        Log.i(TAG, "BatteryAwareServiceManager cleaned up (IntelligentSyncManager preserved)")
     }
 }
 

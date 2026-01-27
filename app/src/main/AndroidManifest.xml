@@ -22,6 +22,7 @@
     <!-- Network - Core functionality -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <!-- Notifications - Core functionality -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -35,6 +36,9 @@
 
     <!-- Wake lock - Core functionality -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Battery optimization exemption - For reliable background operation -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- ═══════════════════════════════════════════════════════════════
          OPTIONAL PERMISSIONS (Request only when needed)
@@ -204,6 +208,16 @@
             android:exported="false"
             android:taskAffinity="" />
 
+        <!-- Call Action Receiver - handles answer/decline from notification without unlock -->
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.phoneintegration.app.ACTION_ANSWER_CALL" />
+                <action android:name="com.phoneintegration.app.ACTION_DECLINE_CALL" />
+            </intent-filter>
+        </receiver>
+
         <!-- ═══════════════════════════════════════════════════════════
              SERVICES
              ═══════════════════════════════════════════════════════════ -->
@@ -251,6 +265,16 @@
             <meta-data
                 android:name="android.telecom.INCLUDE_SELF_MANAGED_CALLS"
                 android:value="true" />
+        </service>
+
+        <!-- Call Screening Service to get phone numbers without being default dialer -->
+        <service
+            android:name=".SyncFlowCallScreeningService"
+            android:permission="android.permission.BIND_SCREENING_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.CallScreeningService" />
+            </intent-filter>
         </service>
 
         <service

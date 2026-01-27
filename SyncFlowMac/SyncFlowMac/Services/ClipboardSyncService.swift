@@ -42,7 +42,6 @@ class ClipboardSyncService: ObservableObject {
         // Start listening for remote clipboard changes
         startListeningForRemoteClipboard(userId: userId)
 
-        print("ClipboardSyncService: Started syncing for user \(userId)")
     }
 
     /// Stop clipboard sync
@@ -50,7 +49,6 @@ class ClipboardSyncService: ObservableObject {
         stopMonitoringLocalClipboard()
         stopListeningForRemoteClipboard()
         currentUserId = nil
-        print("ClipboardSyncService: Stopped syncing")
     }
 
     /// Monitor local clipboard for changes
@@ -67,7 +65,6 @@ class ClipboardSyncService: ObservableObject {
             if let timer = self?.clipboardCheckTimer {
                 RunLoop.main.add(timer, forMode: .common)
             }
-            print("ClipboardSyncService: Local clipboard monitoring started")
         }
     }
 
@@ -90,19 +87,16 @@ class ClipboardSyncService: ObservableObject {
 
         // Get text content
         guard let text = pasteboard.string(forType: .string) else {
-            print("ClipboardSyncService: No text in clipboard")
             return
         }
         guard !text.isEmpty else { return }
         guard text.count <= maxClipboardLength else {
-            print("ClipboardSyncService: Content too large (\(text.count) chars), skipping")
             return
         }
 
         // Check if content actually changed
         guard text != lastKnownContent else { return }
 
-        print("ClipboardSyncService: Local clipboard changed, syncing: \(text.prefix(50))...")
         syncToFirebase(text: text)
     }
 
@@ -131,7 +125,6 @@ class ClipboardSyncService: ObservableObject {
                 return
             }
 
-            print("ClipboardSyncService: Received clipboard from \(source)")
             self.updateLocalClipboard(text: text, timestamp: timestamp)
         }
     }
@@ -175,7 +168,6 @@ class ClipboardSyncService: ObservableObject {
                     self?.lastSyncedContent = text
                     self?.lastSyncTime = Date()
                 }
-                print("ClipboardSyncService: Synced to Firebase")
             }
         }
     }
@@ -199,7 +191,6 @@ class ClipboardSyncService: ObservableObject {
             // Show notification
             self.showClipboardNotification(text: text)
 
-            print("ClipboardSyncService: Updated local clipboard from Android")
 
             // Reset flag after delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -245,7 +236,6 @@ class ClipboardSyncService: ObservableObject {
     func pauseSync() {
         isEnabled = false
         stopMonitoringLocalClipboard()
-        print("ClipboardSyncService: Paused syncing")
     }
 
     /// Resume clipboard sync
@@ -265,7 +255,6 @@ class ClipboardSyncService: ObservableObject {
             if let timer = self?.clipboardCheckTimer {
                 RunLoop.main.add(timer, forMode: .common)
             }
-            print("ClipboardSyncService: Local clipboard monitoring started with \(interval)s interval")
         }
     }
 }

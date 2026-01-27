@@ -140,15 +140,19 @@ class MmsReceiver : BroadcastReceiver() {
                 .getInstance(context)
                 .sendBroadcast(local)
 
-            // Sync to Firebase
-            try {
-                Log.d("MmsReceiver", "Starting Firebase sync for MMS $mmsId")
-                syncService.syncMessage(message)
-                markMmsSynced(mmsId)
-                syncedCount++
-                Log.d("MmsReceiver", "MMS message synced to Firebase successfully: $mmsId")
-            } catch (e: Exception) {
-                Log.e("MmsReceiver", "Failed to sync MMS $mmsId to Firebase", e)
+            // Sync to Firebase only if devices are paired (saves battery for Android-only users)
+            if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                try {
+                    Log.d("MmsReceiver", "Starting Firebase sync for MMS $mmsId")
+                    syncService.syncMessage(message)
+                    markMmsSynced(mmsId)
+                    syncedCount++
+                    Log.d("MmsReceiver", "MMS message synced to Firebase successfully: $mmsId")
+                } catch (e: Exception) {
+                    Log.e("MmsReceiver", "Failed to sync MMS $mmsId to Firebase", e)
+                }
+            } else {
+                Log.d("MmsReceiver", "Skipping Firebase sync for MMS $mmsId - no paired devices")
             }
         }
 

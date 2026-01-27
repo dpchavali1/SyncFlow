@@ -24,6 +24,12 @@ struct SettingsView: View {
                     Label("General", systemImage: "gear")
                 }
 
+            SyncSettingsView()
+                .environmentObject(appState)
+                .tabItem {
+                    Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+                }
+
             NotificationSettingsView(
                 notificationsEnabled: $notificationsEnabled,
                 soundEnabled: $soundEnabled,
@@ -615,6 +621,84 @@ struct SubscriptionSettingsView: View {
             Text(feature)
                 .font(.subheadline)
         }
+    }
+}
+
+// MARK: - Sync Settings View
+
+struct SyncSettingsView: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "iphone.and.arrow.forward")
+                            .font(.title)
+                            .foregroundColor(.blue)
+                        Text("Sync from Android")
+                            .font(.headline)
+                    }
+
+                    Text("To load older messages, open SyncFlow on your Android phone:")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Open SyncFlow app on your phone", systemImage: "1.circle.fill")
+                        Label("Go to Settings", systemImage: "2.circle.fill")
+                        Label("Tap \"Sync Message History\"", systemImage: "3.circle.fill")
+                        Label("Select the time range and tap Sync", systemImage: "4.circle.fill")
+                    }
+                    .font(.callout)
+                    .padding(.vertical, 8)
+
+                    Text("Messages will automatically appear here once synced.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 8)
+            } header: {
+                Text("Load Older Messages")
+            }
+
+            Section {
+                HStack {
+                    Text("Default sync range")
+                    Spacer()
+                    Text("Last 30 days")
+                        .foregroundColor(.secondary)
+                }
+
+                HStack {
+                    Text("Connection status")
+                    Spacer()
+                    if appState.isPaired {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: 8, height: 8)
+                            Text("Connected")
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 8, height: 8)
+                            Text("Not paired")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Status")
+            } footer: {
+                Text("New messages sync automatically when your Android phone is connected to the internet.")
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

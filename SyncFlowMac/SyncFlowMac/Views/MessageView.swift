@@ -851,49 +851,112 @@ struct AttachmentPreviewBar: View {
     let attachment: SelectedAttachment
     let onRemove: () -> Void
 
+    @State private var isHoveringRemove = false
+
     var body: some View {
-        HStack(spacing: 12) {
-            // Thumbnail or icon
-            Group {
+        HStack(spacing: 14) {
+            // Thumbnail or icon with modern styling
+            ZStack {
                 if let thumbnail = attachment.thumbnail {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 50, height: 50)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
                 } else {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.gray.opacity(0.2))
-                            .frame(width: 50, height: 50)
-                        Image(systemName: iconForType)
-                            .font(.title2)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.accentColor.opacity(0.15), Color.accentColor.opacity(0.08)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 56, height: 56)
+                        .overlay(
+                            Image(systemName: iconForType)
+                                .font(.system(size: 22, weight: .medium))
+                                .foregroundColor(.accentColor)
+                        )
+                }
+
+                // File type badge
+                if attachment.thumbnail != nil {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Image(systemName: iconForType)
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(4)
+                                .background(
+                                    Circle()
+                                        .fill(Color.black.opacity(0.5))
+                                )
+                        }
+                    }
+                    .frame(width: 56, height: 56)
+                    .padding(4)
+                }
+            }
+
+            // File info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(attachment.fileName)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundColor(.primary)
+
+                HStack(spacing: 6) {
+                    Text(formattedSize)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+
+                    if attachment.type == "video" || attachment.type == "audio" {
+                        Text("•")
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text(attachment.type.capitalized)
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(attachment.fileName)
-                    .font(.subheadline)
-                    .lineLimit(1)
-                Text(formattedSize)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
             Spacer()
 
+            // Remove button
             Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title3)
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        Circle()
+                            .fill(isHoveringRemove ? Color.primary.opacity(0.1) : Color.primary.opacity(0.05))
+                    )
             }
             .buttonStyle(.plain)
+            .help("Remove attachment")
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isHoveringRemove = hovering
+                }
+            }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
+        )
+        .padding(.horizontal, 16)
+        .padding(.bottom, 4)
     }
 
     private var iconForType: String {
@@ -948,171 +1011,176 @@ struct ConversationHeader: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(Color(hex: conversation.avatarColor ?? "#2196F3"))
-                .frame(width: 40, height: 40)
-                .overlay(
-                    Text(conversation.initials)
-                        .font(.headline)
-                        .foregroundColor(.white)
-                )
+        HStack(spacing: 16) {
+            // Modern avatar with gradient ring
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(hex: conversation.avatarColor ?? "#2196F3"),
+                                Color(hex: conversation.avatarColor ?? "#2196F3").opacity(0.7)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 44, height: 44)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
+                Text(conversation.initials)
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            .shadow(color: Color(hex: conversation.avatarColor ?? "#2196F3").opacity(0.3), radius: 4, x: 0, y: 2)
+
+            // Contact info
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
                     Text(conversation.displayName)
-                        .font(.headline)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.primary)
 
                     if conversation.isPinned {
                         Image(systemName: "pin.fill")
-                            .font(.caption)
+                            .font(.system(size: 10))
                             .foregroundColor(.orange)
                     }
                 }
 
-                Text(conversation.address)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                if allAddresses.count > 1 {
-                    let active = preferredSendAddress ?? conversation.address
-                    Text("Send using: \(active)")
-                        .font(.caption2)
+                HStack(spacing: 4) {
+                    Text(conversation.address)
+                        .font(.system(size: 12))
                         .foregroundColor(.secondary)
+
+                    if allAddresses.count > 1 {
+                        Text("•")
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("\(allAddresses.count) numbers")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
                 }
             }
 
             Spacer()
 
-            // Search button
-            Button(action: {
-                showSearch.toggle()
-            }) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(showSearch ? .blue : .secondary)
-            }
-            .buttonStyle(.borderless)
-            .help("Search in conversation")
+            // Action buttons in a grouped container
+            HStack(spacing: 2) {
+                // Search button
+                HeaderActionButton(
+                    icon: "magnifyingglass",
+                    isActive: showSearch,
+                    action: { showSearch.toggle() },
+                    help: "Search in conversation"
+                )
 
-            Button(action: {
-                isSelectionMode.toggle()
-                if !isSelectionMode {
-                    onClearSelection()
+                // Selection mode button
+                HeaderActionButton(
+                    icon: isSelectionMode ? "checkmark.circle.fill" : "checkmark.circle",
+                    isActive: isSelectionMode,
+                    action: {
+                        isSelectionMode.toggle()
+                        if !isSelectionMode {
+                            onClearSelection()
+                        }
+                    },
+                    help: isSelectionMode ? "Exit selection" : "Select messages"
+                )
+
+                if isSelectionMode {
+                    HeaderActionButton(
+                        icon: "trash",
+                        isActive: false,
+                        activeColor: .red,
+                        action: { onDeleteSelected() },
+                        help: "Delete selected"
+                    )
+                    .disabled(selectedCount == 0)
+                    .opacity(selectedCount > 0 ? 1 : 0.4)
                 }
-            }) {
-                Image(systemName: isSelectionMode ? "checkmark.circle.fill" : "checkmark.circle")
-                    .foregroundColor(isSelectionMode ? .blue : .secondary)
-            }
-            .buttonStyle(.borderless)
-            .help(isSelectionMode ? "Exit selection" : "Select messages")
 
-            if isSelectionMode {
-                Button(action: {
-                    onDeleteSelected()
-                }) {
-                    Image(systemName: "trash")
-                        .foregroundColor(selectedCount > 0 ? .red : .secondary)
+                // Info button
+                HeaderActionButton(
+                    icon: "info.circle",
+                    isActive: showContactInfo,
+                    action: { showContactInfo.toggle() },
+                    help: "Contact info"
+                )
+                .popover(isPresented: $showContactInfo) {
+                    ContactInfoPopover(
+                        conversation: conversation,
+                        allAddresses: allAddresses,
+                        preferredSendAddress: preferredSendAddress,
+                        onSelectSendAddress: onSelectSendAddress,
+                        onCopyNumber: copyContactNumber
+                    )
                 }
-                .buttonStyle(.borderless)
-                .help("Delete selected messages")
-                .disabled(selectedCount == 0)
             }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 4)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            Button(action: { showContactInfo.toggle() }) {
-                Image(systemName: "info.circle")
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .help("Contact info")
-            .popover(isPresented: $showContactInfo) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(conversation.displayName)
-                        .font(.headline)
-                    Text(conversation.address)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    if allAddresses.count > 1 {
-                        Divider()
-                        Text("Send using")
-                            .font(.subheadline)
-                        ForEach(allAddresses, id: \.self) { address in
+            // Call buttons
+            HStack(spacing: 2) {
+                // Phone call button
+                if availableSims.count > 1 {
+                    Menu {
+                        ForEach(availableSims) { sim in
                             Button(action: {
-                                onSelectSendAddress(address)
+                                selectedSim = sim
+                                initiateCall()
                             }) {
                                 HStack {
-                                    Text(address)
-                                    Spacer()
-                                    if (preferredSendAddress ?? conversation.address) == address {
-                                        Image(systemName: "checkmark.circle.fill")
+                                    Text(sim.formattedDisplayName)
+                                    if selectedSim?.id == sim.id {
+                                        Image(systemName: "checkmark")
                                     }
                                 }
                             }
-                            .buttonStyle(.plain)
                         }
-                        Button(action: {
-                            onSelectSendAddress(nil)
-                        }) {
-                            Text("Reset to primary")
-                        }
-                        .buttonStyle(.plain)
+                    } label: {
+                        HeaderCallButton(
+                            icon: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill",
+                            color: isCallInProgress ? .green : .blue,
+                            isDisabled: isCallInProgress
+                        )
                     }
-                    Divider()
-                    Button(action: copyContactNumber) {
-                        Label("Copy number", systemImage: "doc.on.doc")
+                    .buttonStyle(.plain)
+                    .help("Choose SIM card to call from")
+                } else {
+                    Button(action: { initiateCall() }) {
+                        HeaderCallButton(
+                            icon: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill",
+                            color: isCallInProgress ? .green : .blue,
+                            isDisabled: isCallInProgress
+                        )
                     }
+                    .buttonStyle(.plain)
+                    .help("Call via Android phone")
+                    .disabled(isCallInProgress)
                 }
-                .padding(12)
-                .frame(minWidth: 220)
-            }
 
-            // Call button with SIM selector
-            if availableSims.count > 1 {
-                Menu {
-                    ForEach(availableSims) { sim in
-                        Button(action: {
-                            selectedSim = sim
-                            initiateCall()
-                        }) {
-                            HStack {
-                                Text(sim.formattedDisplayName)
-                                if selectedSim?.id == sim.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill")
-                        .foregroundColor(isCallInProgress ? .green : .blue)
-                }
-                .buttonStyle(.borderless)
-                .help("Choose SIM card to call from")
-                .disabled(isCallInProgress)
-            } else {
+                // Video call button
                 Button(action: {
-                    initiateCall()
+                    initiateSyncFlowCall(isVideo: true)
                 }) {
-                    Image(systemName: isCallInProgress ? "phone.fill.arrow.up.right" : "phone.fill")
-                        .foregroundColor(isCallInProgress ? .green : .blue)
+                    HeaderCallButton(
+                        icon: "video.fill",
+                        color: .green,
+                        isDisabled: appState.userId == nil
+                    )
                 }
-                .buttonStyle(.borderless)
-                .help("Call via Android phone")
-                .disabled(isCallInProgress)
+                .buttonStyle(.plain)
+                .help("SyncFlow video call")
+                .disabled(appState.userId == nil)
             }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 4)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            // SyncFlow Video Call button
-            Button(action: {
-                print("Video call button tapped for \(conversation.address)")
-                initiateSyncFlowCall(isVideo: true)
-            }) {
-                Image(systemName: "video.fill")
-                    .foregroundColor(.green)
-            }
-            .buttonStyle(.borderless)
-            .help("SyncFlow video call to user")
-            .disabled(appState.userId == nil)
-
-            // Action buttons
+            // More options menu
             Menu {
                 Button(action: {
                     messageStore.togglePin(conversation)
@@ -1134,13 +1202,31 @@ struct ConversationHeader: View {
                     Label("Block", systemImage: "hand.raised")
                 }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 32, height: 32)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("More options")
         }
-        .padding()
-        .background(SyncFlowColors.chatHeaderBackground)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            ZStack {
+                SyncFlowColors.chatHeaderBackground
+
+                // Subtle bottom border
+                VStack {
+                    Spacer()
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(height: 1)
+                }
+            }
+        )
         .alert("Calling \(conversation.displayName)", isPresented: $showCallAlert) {
             Button("OK") {
                 showCallAlert = false
@@ -2771,6 +2857,148 @@ struct ClickableMessageText: View {
     }
 }
 
+// MARK: - Header Helper Views
+
+/// Modern action button for the conversation header
+struct HeaderActionButton: View {
+    let icon: String
+    let isActive: Bool
+    var activeColor: Color = .accentColor
+    let action: () -> Void
+    let help: String
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(isActive ? activeColor : .secondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovered || isActive ? Color.primary.opacity(0.08) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+/// Call button with colored background
+struct HeaderCallButton: View {
+    let icon: String
+    let color: Color
+    let isDisabled: Bool
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(isDisabled ? color.opacity(0.5) : color)
+            .frame(width: 28, height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(color.opacity(0.12))
+            )
+    }
+}
+
+/// Contact info popover content
+struct ContactInfoPopover: View {
+    let conversation: Conversation
+    let allAddresses: [String]
+    let preferredSendAddress: String?
+    let onSelectSendAddress: (String?) -> Void
+    let onCopyNumber: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(hex: conversation.avatarColor ?? "#2196F3"),
+                                Color(hex: conversation.avatarColor ?? "#2196F3").opacity(0.7)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 48, height: 48)
+                    .overlay(
+                        Text(conversation.initials)
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                            .foregroundColor(.white)
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(conversation.displayName)
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(conversation.address)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if allAddresses.count > 1 {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Send using")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .textCase(.uppercase)
+
+                    ForEach(allAddresses, id: \.self) { address in
+                        Button(action: {
+                            onSelectSendAddress(address)
+                        }) {
+                            HStack {
+                                Text(address)
+                                    .font(.system(size: 13))
+                                Spacer()
+                                if (preferredSendAddress ?? conversation.address) == address {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button(action: {
+                        onSelectSendAddress(nil)
+                    }) {
+                        Text("Reset to primary")
+                            .font(.system(size: 12))
+                            .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider()
+
+            Button(action: onCopyNumber) {
+                Label("Copy number", systemImage: "doc.on.doc")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(16)
+        .frame(minWidth: 240)
+    }
+}
+
 // MARK: - Compose Bar
 
 struct ComposeBar: View {
@@ -2785,68 +3013,87 @@ struct ComposeBar: View {
 
     @FocusState private var isTextFieldFocused: Bool
     @StateObject private var audioRecorder = AudioRecorderService.shared
+    @State private var isHoveringAttachment = false
+    @State private var isHoveringTemplates = false
+    @State private var isHoveringEmoji = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Attachment button
-            Button(action: {
-                onAttachmentTap?()
-            }) {
-                Image(systemName: hasAttachment ? "photo.fill" : "plus.circle")
-                    .font(.title3)
-                    .foregroundColor(hasAttachment ? .blue : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Add photo or video")
+        HStack(spacing: 8) {
+            // Left action buttons group
+            HStack(spacing: 0) {
+                // Attachment button
+                ComposeActionButton(
+                    icon: hasAttachment ? "photo.fill" : "plus",
+                    isActive: hasAttachment,
+                    isHovered: $isHoveringAttachment,
+                    action: { onAttachmentTap?() },
+                    help: "Add photo or video"
+                )
 
-            // Templates button
-            Button(action: {
-                showTemplates.toggle()
-            }) {
-                Image(systemName: "text.badge.star")
-                    .foregroundColor(showTemplates ? .blue : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Message Templates")
+                // Templates button
+                ComposeActionButton(
+                    icon: "text.badge.star",
+                    isActive: showTemplates,
+                    isHovered: $isHoveringTemplates,
+                    action: { showTemplates.toggle() },
+                    help: "Message Templates"
+                )
 
-            // Emoji picker button (macOS native)
-            Button(action: {
-                NSApp.orderFrontCharacterPalette(nil)
-            }) {
-                Image(systemName: "face.smiling")
-                    .foregroundColor(.secondary)
+                // Emoji picker button
+                ComposeActionButton(
+                    icon: "face.smiling",
+                    isActive: false,
+                    isHovered: $isHoveringEmoji,
+                    action: { NSApp.orderFrontCharacterPalette(nil) },
+                    help: "Emoji & Symbols"
+                )
             }
-            .buttonStyle(.plain)
-            .help("Emoji & Symbols")
+            .padding(4)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
 
-            // Text editor
-            ZStack(alignment: .leading) {
+            // Text input area
+            HStack(spacing: 8) {
+                ZStack(alignment: .leading) {
+                    // Placeholder
+                    if messageText.isEmpty {
+                        Text(hasAttachment ? "Add a caption..." : "Message")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary.opacity(0.7))
+                            .padding(.leading, 4)
+                    }
+
+                    // Text editor
+                    TextEditor(text: $messageText)
+                        .focused($isTextFieldFocused)
+                        .font(.system(size: 14))
+                        .frame(minHeight: 20, maxHeight: 80)
+                        .scrollContentBackground(.hidden)
+                        .padding(.vertical, 4)
+                }
+
+                // Microphone button (shows when no text)
                 if messageText.isEmpty && !hasAttachment {
-                    Text("Type a message...")
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 8)
-                } else if messageText.isEmpty && hasAttachment {
-                    Text("Add a caption (optional)...")
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 8)
-                }
-
-                TextEditor(text: $messageText)
-                    .focused($isTextFieldFocused)
-                    .font(.body)
-                    .frame(minHeight: 36, maxHeight: 100)
-                    .scrollContentBackground(.hidden)
-            }
-            .padding(6)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(18)
-
-            // Microphone button (shows when no text)
-            if messageText.isEmpty && !hasAttachment {
-                MicrophoneButton(audioRecorder: audioRecorder) {
-                    onMicrophoneTap?()
+                    MicrophoneButton(audioRecorder: audioRecorder) {
+                        onMicrophoneTap?()
+                    }
                 }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(
+                        isTextFieldFocused ? Color.accentColor.opacity(0.5) : Color.clear,
+                        lineWidth: 1.5
+                    )
+            )
 
             // Send button
             Button {
@@ -2854,20 +3101,61 @@ struct ComposeBar: View {
                     await onSend()
                 }
             } label: {
-                if isSending {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                        .frame(width: 24, height: 24)
-                } else {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
-                        .foregroundColor(canSend ? .blue : .gray)
+                Group {
+                    if isSending {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
                 }
+                .foregroundColor(.white)
+                .frame(width: 32, height: 32)
+                .background(
+                    Circle()
+                        .fill(
+                            canSend ?
+                            LinearGradient(
+                                colors: [Color.accentColor, Color.accentColor.opacity(0.8)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ) :
+                            LinearGradient(
+                                colors: [Color.gray.opacity(0.4), Color.gray.opacity(0.3)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+                .shadow(
+                    color: canSend ? Color.accentColor.opacity(0.3) : Color.clear,
+                    radius: 4,
+                    x: 0,
+                    y: 2
+                )
             }
             .buttonStyle(.plain)
             .disabled(!canSend || isSending)
+            .animation(.easeInOut(duration: 0.15), value: canSend)
         }
-        .padding()
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            ZStack {
+                // Top border
+                VStack {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(height: 1)
+                    Spacer()
+                }
+
+                // Background
+                Color(nsColor: .windowBackgroundColor)
+            }
+        )
         .onAppear {
             isTextFieldFocused = true
         }
@@ -2876,6 +3164,35 @@ struct ComposeBar: View {
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return hasText || hasAttachment
+    }
+}
+
+/// Action button for compose bar
+private struct ComposeActionButton: View {
+    let icon: String
+    let isActive: Bool
+    @Binding var isHovered: Bool
+    let action: () -> Void
+    let help: String
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(isActive ? .accentColor : .secondary)
+                .frame(width: 30, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isHovered || isActive ? Color.primary.opacity(0.08) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
     }
 }
 
@@ -2920,37 +3237,67 @@ struct ReplyPreviewBar: View {
         return "Message"
     }
 
-    var body: some View {
-        HStack(spacing: 10) {
-            Rectangle()
-                .fill(Color.accentColor)
-                .frame(width: 3)
-                .cornerRadius(2)
+    @State private var isHoveringClose = false
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Replying to \(senderName)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+    var body: some View {
+        HStack(spacing: 12) {
+            // Accent bar with gradient
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.accentColor, Color.accentColor.opacity(0.6)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: 3)
+
+            // Reply content
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(.accentColor)
+                    Text("Replying to \(senderName)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
                 Text(snippet)
-                    .font(.subheadline)
-                    .foregroundColor(.primary)
+                    .font(.system(size: 13))
+                    .foregroundColor(.primary.opacity(0.9))
                     .lineLimit(2)
             }
 
             Spacer()
 
+            // Close button
             Button(action: onClear) {
-                Image(systemName: "xmark.circle.fill")
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.secondary)
+                    .frame(width: 20, height: 20)
+                    .background(
+                        Circle()
+                            .fill(isHoveringClose ? Color.primary.opacity(0.1) : Color.clear)
+                    )
             }
             .buttonStyle(.plain)
             .help("Cancel reply")
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isHoveringClose = hovering
+                }
+            }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(10)
-        .padding(.horizontal)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
+        )
+        .padding(.horizontal, 16)
     }
 }
 

@@ -50,7 +50,7 @@ Purpose: One-time architecture snapshot for Codex reference. This file does not 
 - Listen for messages: `MessageStore.startListening` -> `FirebaseService.listenToMessages`.
 - Message decryption: `FirebaseService` applies E2EE decryption; fallback message shown if key missing.
 - MMS attachments: parsed from Firebase `attachments` field; supports URL downloads and inline base64 data.
-- Contacts: `MessageStore` listens to `users/{uid}/contacts` and `desktopContacts` and resolves contact names.
+- Contacts: `MessageStore` listens to `users/{uid}/contacts` (a single unified feed that flags desktop/web edits via `sync.pendingAndroidSync`) and surfaces contact photos/notes.
 - Outgoing messages: `FirebaseService.sendMessage` writes to `outgoing_messages` for Android to process.
 
 ### Key files
@@ -89,4 +89,3 @@ Purpose: One-time architecture snapshot for Codex reference. This file does not 
 ## Notes for troubleshooting
 - MMS display depends on attachment metadata being present in `SmsMessage.mmsAttachments` (Android) and `attachments` in Firebase (macOS/web).
 - Contact resolution relies on phone number normalization; mismatches often trace to `insert-address-token` or inconsistent normalization.
-

@@ -1,5 +1,7 @@
 package com.phoneintegration.app.ui.navigation
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.runtime.*
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -14,7 +16,6 @@ import com.phoneintegration.app.ui.conversations.ContactInfo
 import com.phoneintegration.app.ui.chat.ConversationDetailScreen
 import com.phoneintegration.app.ui.stats.MessageStatsScreen
 import com.phoneintegration.app.ui.settings.*
-import com.phoneintegration.app.ui.splash.SplashScreen
 import com.phoneintegration.app.ui.conversations.AdConversationScreen
 import com.phoneintegration.app.ui.desktop.DesktopIntegrationScreen
 import com.phoneintegration.app.ui.ai.AIAssistantScreen
@@ -37,6 +38,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import android.util.Log
 import java.net.URLEncoder
 import java.net.URLDecoder
+import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
+import com.phoneintegration.app.ui.components.isPhoneNumberRegistered
 
 
 @Composable
@@ -53,12 +56,39 @@ fun MainNavigation(
     val groupRepository = remember { GroupRepository(context) }
     val scope = rememberCoroutineScope()
 
-    var showSplash by remember { mutableStateOf(true) }
     var selectedContacts by remember { mutableStateOf<List<ContactInfo>>(emptyList()) }
     var activeShare by remember { mutableStateOf<SharePayload?>(null) }
 
-    LaunchedEffect(pendingShare, showSplash) {
-        if (!showSplash && pendingShare != null) {
+    // Phone number registration dialog state
+    var showPhoneRegistrationDialog by remember { mutableStateOf(false) }
+
+    // Check if phone number is registered on first launch
+    LaunchedEffect(Unit) {
+        // Small delay to let the UI render first
+        kotlinx.coroutines.delay(2000)
+        // Check if user is authenticated and phone not registered
+        val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        if (userId != null && !isPhoneNumberRegistered(context)) {
+            showPhoneRegistrationDialog = true
+        }
+    }
+
+    // Show phone number registration dialog
+    if (showPhoneRegistrationDialog) {
+        PhoneNumberRegistrationDialog(
+            onDismiss = {
+                showPhoneRegistrationDialog = false
+            },
+            onRegistered = {
+                showPhoneRegistrationDialog = false
+                Toast.makeText(context, "Phone number registered for video calling", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    // Handle pending share intent
+    LaunchedEffect(pendingShare) {
+        if (pendingShare != null) {
             activeShare = pendingShare
             selectedContacts = emptyList()
             navController.navigate("newConversation") {
@@ -68,8 +98,9 @@ fun MainNavigation(
         }
     }
 
-    LaunchedEffect(pendingConversation, showSplash) {
-        if (!showSplash && pendingConversation != null) {
+    // Handle pending conversation launch
+    LaunchedEffect(pendingConversation) {
+        if (pendingConversation != null) {
             val encodedAddress = URLEncoder.encode(pendingConversation.address, "UTF-8")
             val encodedName = URLEncoder.encode(pendingConversation.name, "UTF-8")
             val threadId = pendingConversation.threadId
@@ -80,10 +111,15 @@ fun MainNavigation(
         }
     }
 
-    if (showSplash) {
-        SplashScreen(onSplashComplete = { showSplash = false })
-    } else {
-        NavHost(navController = navController, startDestination = "list") {
+    // Navigation with NO animations - cleanest, fastest experience
+    NavHost(
+        navController = navController,
+        startDestination = "list",
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None }
+    ) {
 
             composable("list") {
                 // Collect conversations to check if clicked item is a group
@@ -208,7 +244,8 @@ fun MainNavigation(
                     onNavigateToTemplates = { navController.navigate("settings/templates") },
                     onNavigateToBackup = { navController.navigate("settings/backup") },
                     onNavigateToDesktop = { navController.navigate("settings/desktop") },
-                    onNavigateToUsage = { navController.navigate("settings/usage") }
+                    onNavigateToUsage = { navController.navigate("settings/usage") },
+                    onNavigateToSync = { navController.navigate("settings/sync") }
                 )
             }
             
@@ -272,6 +309,12 @@ fun MainNavigation(
                 )
             }
 
+            composable("settings/sync") {
+                SyncSettingsScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
             // Scheduled Messages Screen
             composable("scheduled") {
                 ScheduledMessagesScreen(
@@ -304,7 +347,8 @@ fun MainNavigation(
             // Spam Folder Screen
             composable("spam") {
                 SpamFolderScreen(
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    viewModel = viewModel
                 )
             }
 
@@ -497,4 +541,3 @@ fun MainNavigation(
             }
         }
     }
-}

@@ -254,27 +254,86 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
+        // Initial one-time reconciliation on app start
+        viewModelScope.launch(Dispatchers.IO) {
+            reconcileSpamWithCloud()
+        }
+        // Note: Real-time spam sync is started on-demand via startSpamSync()
+        // when user opens spam folder, to save battery
+    }
+
+    /**
+     * Real-time listener for spam updates from other devices (Mac/Web).
+     * When a user marks a message as spam on any device, all devices sync.
+     */
+    private suspend fun listenForRemoteSpamUpdates() {
+        try {
+            syncService.listenForSpamMessages().collect { remoteSpam ->
+                Log.d("SmsViewModel", "Received ${remoteSpam.size} spam messages from Firebase")
+
+                if (remoteSpam.isEmpty()) return@collect
+
+                // Get current local spam
+                val localSpam = spamMessageDao.getSpamMessages()
+                val localIds = localSpam.map { it.messageId }.toSet()
+                val remoteIds = remoteSpam.map { it.messageId }.toSet()
+
+                // Insert new spam from remote (Mac/Web added these)
+                val newFromRemote = remoteSpam.filter { it.messageId !in localIds }
+                if (newFromRemote.isNotEmpty()) {
+                    Log.d("SmsViewModel", "Adding ${newFromRemote.size} new spam messages from remote")
+                    spamMessageDao.insertAll(newFromRemote)
+                }
+
+                // Update existing spam (e.g., isRead status changed)
+                val existingUpdated = remoteSpam.filter { remote ->
+                    val local = localSpam.find { it.messageId == remote.messageId }
+                    local != null && (local.isRead != remote.isRead || local.isUserMarked != remote.isUserMarked)
+                }
+                if (existingUpdated.isNotEmpty()) {
+                    Log.d("SmsViewModel", "Updating ${existingUpdated.size} existing spam messages")
+                    spamMessageDao.insertAll(existingUpdated)
+                }
+
+                // Delete spam that was removed from remote (another device unspammed it)
+                val deletedFromRemote = localSpam.filter { it.messageId !in remoteIds }
+                if (deletedFromRemote.isNotEmpty()) {
+                    Log.d("SmsViewModel", "Removing ${deletedFromRemote.size} spam messages deleted from remote")
+                    deletedFromRemote.forEach { spamMessageDao.delete(it.messageId) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SmsViewModel", "Error listening for remote spam updates", e)
+        }
+    }
+
+    /**
+     * Refresh spam from cloud. Call when user opens spam folder.
+     * This fetches latest spam from Firebase without keeping a persistent connection.
+     */
+    fun refreshSpamFromCloud() {
         viewModelScope.launch(Dispatchers.IO) {
             reconcileSpamWithCloud()
         }
     }
 
     private suspend fun reconcileSpamWithCloud() {
-        try {
-            val remoteSpam = syncService.fetchSpamMessages()
-            val localSpam = spamMessageDao.getSpamMessages()
-            val remoteIds = remoteSpam.map { it.messageId }.toSet()
-            val localIds = localSpam.map { it.messageId }.toSet()
+        // Skip cloud sync if no devices are paired (saves battery for Android-only users)
+        if (!DesktopSyncService.hasPairedDevices(getApplication())) {
+            Log.d("SmsViewModel", "Skipping spam cloud sync - no paired devices")
+            return
+        }
 
-            if (remoteSpam.isNotEmpty()) {
-                spamMessageDao.insertAll(remoteSpam)
-                val missingRemote = localSpam.filter { it.messageId !in remoteIds }
-                if (missingRemote.isNotEmpty()) {
-                    syncService.syncSpamMessages(missingRemote)
-                }
-            } else if (localSpam.isNotEmpty()) {
+        try {
+            // First, sync ALL local spam to cloud (ensures nothing is lost)
+            val localSpam = spamMessageDao.getSpamMessages()
+            if (localSpam.isNotEmpty()) {
                 syncService.syncSpamMessages(localSpam)
             }
+
+            // Then fetch from cloud and merge any we don't have locally
+            val remoteSpam = syncService.fetchSpamMessages()
+            val localIds = localSpam.map { it.messageId }.toSet()
 
             val missingLocal = remoteSpam.filter { it.messageId !in localIds }
             if (missingLocal.isNotEmpty()) {
@@ -1347,6 +1406,11 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun reconcileDeletedMessages() {
         viewModelScope.launch(Dispatchers.IO) {
+            // Skip if no devices are paired (no point reconciling with empty cloud)
+            if (!DesktopSyncService.hasPairedDevices(getApplication())) {
+                return@launch
+            }
+
             try {
                 val syncService = com.phoneintegration.app.desktop.DesktopSyncService(getApplication())
                 val firebaseKeys = syncService.fetchRecentMessageKeys(1000)
@@ -1472,7 +1536,10 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 isRead = true
             )
             spamMessageDao.insert(spamMessage)
-            syncService.syncSpamMessage(spamMessage)
+            // Only sync to desktop if devices are paired
+            if (DesktopSyncService.hasPairedDevices(getApplication())) {
+                syncService.syncSpamMessage(spamMessage)
+            }
         }
     }
 
@@ -1873,14 +1940,16 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
                 sentMms?.let { mms ->
                     cacheMmsOverride(mms)
-                    // Sync in background to avoid blocking UI
-                    viewModelScope.launch(Dispatchers.IO) {
-                        try {
-                            val syncService = com.phoneintegration.app.desktop.DesktopSyncService(getApplication())
-                            syncService.syncMessage(mms)
-                            Log.d("SmsViewModel", "Sent MMS synced to Firebase: ${mms.id}")
-                        } catch (e: Exception) {
-                            Log.e("SmsViewModel", "Failed to sync sent MMS to Firebase", e)
+                    // Sync in background to avoid blocking UI (only if devices are paired)
+                    if (DesktopSyncService.hasPairedDevices(getApplication())) {
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try {
+                                val syncService = com.phoneintegration.app.desktop.DesktopSyncService(getApplication())
+                                syncService.syncMessage(mms)
+                                Log.d("SmsViewModel", "Sent MMS synced to Firebase: ${mms.id}")
+                            } catch (e: Exception) {
+                                Log.e("SmsViewModel", "Failed to sync sent MMS to Firebase", e)
+                            }
                         }
                     }
                 }

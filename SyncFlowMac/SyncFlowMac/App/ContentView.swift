@@ -49,16 +49,6 @@ struct ContentView: View {
                         },
                         onDismiss: {
                             appState.lastAnsweredCallId = nil
-                        },
-                        isTransferActive: appState.audioRoutingCallId == bannerCall.id &&
-                            appState.audioRoutingState == .connected,
-                        isTransferConnecting: appState.audioRoutingCallId == bannerCall.id &&
-                            appState.audioRoutingState == .connecting,
-                        onStartTransfer: {
-                            appState.startAudioRouting(for: bannerCall)
-                        },
-                        onStopTransfer: {
-                            appState.stopAudioRouting()
                         }
                     )
                     .padding(.horizontal, 16)

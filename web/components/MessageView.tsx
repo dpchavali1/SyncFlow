@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
 import { Send, MoreVertical, MessageSquare, Brain, Loader2, Info, X, Image as ImageIcon, Paperclip, AlertTriangle } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { markMessagesRead, sendSmsFromWeb, sendMmsFromWeb, uploadMmsImage, waitForAuth } from '@/lib/firebase'
@@ -10,16 +10,30 @@ interface MessageViewProps {
   onOpenAI?: () => void
 }
 
-// Normalize phone number for comparison (same logic as ConversationList)
+// LRU Cache for phone number normalization (shared concept with ConversationList)
+const normalizationCache = new Map<string, string>()
+const MAX_CACHE_SIZE = 1000
+
+// Normalize phone number for comparison with caching
 function normalizePhoneNumber(address: string): string {
+  const cached = normalizationCache.get(address)
+  if (cached !== undefined) return cached
+
+  let result: string
   if (address.includes('@') || address.length < 6) {
-    return address.toLowerCase()
+    result = address.toLowerCase()
+  } else {
+    const digitsOnly = address.replace(/[^0-9]/g, '')
+    result = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly
   }
-  const digitsOnly = address.replace(/[^0-9]/g, '')
-  if (digitsOnly.length >= 10) {
-    return digitsOnly.slice(-10)
+
+  // Maintain cache size
+  if (normalizationCache.size >= MAX_CACHE_SIZE) {
+    const firstKey = normalizationCache.keys().next().value
+    if (firstKey) normalizationCache.delete(firstKey)
   }
-  return digitsOnly
+  normalizationCache.set(address, result)
+  return result
 }
 
 interface SelectedImage {
@@ -27,16 +41,126 @@ interface SelectedImage {
   preview: string
 }
 
+interface MessageBubbleProps {
+  msg: any
+  isSent: boolean
+  readReceipt: any
+}
+
+// Memoized message bubble component to prevent unnecessary re-renders
+const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt }: MessageBubbleProps) {
+  const timestamp = format(new Date(msg.date), 'MMM d, h:mm a')
+  const readTime =
+    readReceipt?.readAt && typeof readReceipt.readAt === 'number'
+      ? format(new Date(readReceipt.readAt), 'h:mm a')
+      : null
+  const imageAttachments = msg.attachments?.filter((att: any) =>
+    att.contentType?.startsWith('image/') || att.type === 'image'
+  ) || []
+  const hasImages = imageAttachments.length > 0
+
+  return (
+    <div className={`flex ${isSent ? 'justify-end' : 'justify-start'}`}>
+      <div className={`max-w-md ${isSent ? 'order-2' : 'order-1'}`}>
+        <div
+          className={`rounded-2xl overflow-hidden ${
+            isSent
+              ? 'bg-blue-600 text-white'
+              : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white'
+          }`}
+        >
+          {/* MMS Images */}
+          {imageAttachments.map((att: any, idx: number) => {
+            const imageSrc = att.url
+
+            if (!imageSrc) {
+              return (
+                <div key={idx} className="p-4 flex items-center gap-2 text-gray-400">
+                  <ImageIcon className="w-5 h-5" />
+                  <span className="text-sm">Image not available</span>
+                </div>
+              )
+            }
+
+            return (
+              <a
+                key={idx}
+                href={imageSrc}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block"
+              >
+                <img
+                  src={imageSrc}
+                  alt="MMS attachment"
+                  className="max-w-full h-auto cursor-pointer hover:opacity-90 transition-opacity"
+                  style={{ maxHeight: '300px', objectFit: 'contain' }}
+                  onError={(e) => {
+                    const target = e.target as HTMLImageElement
+                    target.style.display = 'none'
+                    target.parentElement!.innerHTML = `
+                      <div class="p-4 flex items-center gap-2 text-gray-400">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        <span class="text-sm">Image failed to load</span>
+                      </div>
+                    `
+                  }}
+                />
+              </a>
+            )
+          })}
+
+          {/* Text content */}
+          {msg.body && (
+            <p className={`whitespace-pre-wrap break-words ${hasImages ? 'p-3' : 'px-4 py-2'}`}>
+              {msg.body}
+            </p>
+          )}
+
+          {/* Show MMS indicator if no body and no displayable images */}
+          {!msg.body && msg.isMms && !hasImages && (
+            <div className="px-4 py-2 flex items-center gap-2 text-gray-400">
+              <ImageIcon className="w-4 h-4" />
+              <span className="text-sm italic">MMS message</span>
+            </div>
+          )}
+        </div>
+        <p
+          className={`text-xs text-gray-500 dark:text-gray-400 mt-1 ${
+            isSent ? 'text-right' : 'text-left'
+          }`}
+        >
+          {timestamp}
+        </p>
+        {/* E2EE failure warning */}
+        {msg.e2eeFailed && (
+          <div className={`flex items-center gap-1 mt-1 text-xs text-amber-600 dark:text-amber-400 ${isSent ? 'justify-end' : 'justify-start'}`}>
+            <AlertTriangle className="w-3 h-3" />
+            <span title={msg.e2eeFailureReason}>Not encrypted</span>
+          </div>
+        )}
+        {!isSent && readReceipt && readReceipt.readBy !== 'web' && (
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">
+            Read on {readReceipt.readDeviceName || readReceipt.readBy}
+            {readTime ? ` at ${readTime}` : ''}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+})
+
 export default function MessageView({ onOpenAI }: MessageViewProps) {
-  const {
-    messages,
-    selectedConversation,
-    userId,
-    readReceipts,
-    spamMessages,
-    selectedSpamAddress,
-    activeFolder,
-  } = useAppStore()
+  // Use individual selectors for better performance (prevents re-renders from unrelated store changes)
+  const messages = useAppStore((state) => state.messages)
+  const selectedConversation = useAppStore((state) => state.selectedConversation)
+  const userId = useAppStore((state) => state.userId)
+  const readReceipts = useAppStore((state) => state.readReceipts)
+  const spamMessages = useAppStore((state) => state.spamMessages)
+  const selectedSpamAddress = useAppStore((state) => state.selectedSpamAddress)
+  const activeFolder = useAppStore((state) => state.activeFolder)
   const [newMessage, setNewMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -53,12 +177,12 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const dismissSendTip = () => {
+  const dismissSendTip = useCallback(() => {
     setShowSendTip(false)
     localStorage.setItem('syncflow_hide_send_tip', 'true')
-  }
+  }, [])
 
-  const setPreferredSendAddress = (address: string | null) => {
+  const setPreferredSendAddress = useCallback((address: string | null) => {
     setSendAddressOverride(address)
     if (typeof window === 'undefined' || !selectedConversation) return
     const key = `preferred_send_address_${selectedConversation}`
@@ -67,7 +191,7 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
     } else {
       localStorage.setItem(key, address)
     }
-  }
+  }, [selectedConversation])
 
   // Check authentication status
   useEffect(() => {
@@ -135,7 +259,7 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
     })
   }, [userId, selectedConversation, conversationMessages, readReceipts, activeFolder])
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
 
@@ -153,18 +277,18 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
     setSelectedImages((prev) => [...prev, ...newImages])
     // Reset input so same file can be selected again
     e.target.value = ''
-  }
+  }, [selectedImages.length])
 
-  const removeImage = (index: number) => {
+  const removeImage = useCallback((index: number) => {
     setSelectedImages((prev) => {
       const newImages = [...prev]
       URL.revokeObjectURL(newImages[index].preview)
       newImages.splice(index, 1)
       return newImages
     })
-  }
+  }, [])
 
-  const handleSend = async () => {
+  const handleSend = useCallback(async () => {
     const hasContent = newMessage.trim() || selectedImages.length > 0
     if (!hasContent || !userId || !effectiveSendAddress || isSending) return
 
@@ -207,14 +331,14 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
       setIsSending(false)
       setIsUploading(false)
     }
-  }
+  }, [newMessage, selectedImages, userId, effectiveSendAddress, isSending, isAuthenticated])
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyPress = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
-  }
+  }, [handleSend])
 
   if (activeFolder === 'spam') {
     const selected = selectedSpamAddress
@@ -344,113 +468,14 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
 
       {/* Messages */}
       <div className="flex-1 min-h-0 h-0 overflow-y-auto p-6 space-y-4">
-        {conversationMessages.map((msg) => {
-          const isSent = msg.type === 2 // type 2 = sent message
-          const timestamp = format(new Date(msg.date), 'MMM d, h:mm a')
-          const readReceipt = readReceipts[msg.id]
-          const readTime =
-            readReceipt?.readAt && typeof readReceipt.readAt === 'number'
-              ? format(new Date(readReceipt.readAt), 'h:mm a')
-              : null
-          const imageAttachments = msg.attachments?.filter(att =>
-            att.contentType?.startsWith('image/') || att.type === 'image'
-          ) || []
-          const hasImages = imageAttachments.length > 0
-
-          return (
-            <div key={msg.id} className={`flex ${isSent ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-md ${isSent ? 'order-2' : 'order-1'}`}>
-                <div
-                  className={`rounded-2xl overflow-hidden ${
-                    isSent
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white'
-                  }`}
-                >
-                  {/* MMS Images */}
-                  {imageAttachments.map((att, idx) => {
-                    // Use the Firebase Storage URL
-                    const imageSrc = att.url
-
-                    if (!imageSrc) {
-                      return (
-                        <div key={idx} className="p-4 flex items-center gap-2 text-gray-400">
-                          <ImageIcon className="w-5 h-5" />
-                          <span className="text-sm">Image not available</span>
-                        </div>
-                      )
-                    }
-
-                    return (
-                      <a
-                        key={idx}
-                        href={imageSrc}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block"
-                      >
-                        <img
-                          src={imageSrc}
-                          alt="MMS attachment"
-                          className="max-w-full h-auto cursor-pointer hover:opacity-90 transition-opacity"
-                          style={{ maxHeight: '300px', objectFit: 'contain' }}
-                          onError={(e) => {
-                            // Show placeholder for broken images
-                            const target = e.target as HTMLImageElement
-                            target.style.display = 'none'
-                            target.parentElement!.innerHTML = `
-                              <div class="p-4 flex items-center gap-2 text-gray-400">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                                </svg>
-                                <span class="text-sm">Image failed to load</span>
-                              </div>
-                            `
-                          }}
-                        />
-                      </a>
-                    )
-                  })}
-
-                  {/* Text content */}
-                  {msg.body && (
-                    <p className={`whitespace-pre-wrap break-words ${hasImages ? 'p-3' : 'px-4 py-2'}`}>
-                      {msg.body}
-                    </p>
-                  )}
-
-                  {/* Show MMS indicator if no body and no displayable images */}
-                  {!msg.body && msg.isMms && !hasImages && (
-                    <div className="px-4 py-2 flex items-center gap-2 text-gray-400">
-                      <ImageIcon className="w-4 h-4" />
-                      <span className="text-sm italic">MMS message</span>
-                    </div>
-                  )}
-                </div>
-                <p
-                  className={`text-xs text-gray-500 dark:text-gray-400 mt-1 ${
-                    isSent ? 'text-right' : 'text-left'
-                  }`}
-                >
-                  {timestamp}
-                </p>
-                {/* E2EE failure warning */}
-                {msg.e2eeFailed && (
-                  <div className={`flex items-center gap-1 mt-1 text-xs text-amber-600 dark:text-amber-400 ${isSent ? 'justify-end' : 'justify-start'}`}>
-                    <AlertTriangle className="w-3 h-3" />
-                    <span title={msg.e2eeFailureReason}>Not encrypted</span>
-                  </div>
-                )}
-                {!isSent && readReceipt && readReceipt.readBy !== 'web' && (
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">
-                    Read on {readReceipt.readDeviceName || readReceipt.readBy}
-                    {readTime ? ` at ${readTime}` : ''}
-                  </p>
-                )}
-              </div>
-            </div>
-          )
-        })}
+        {conversationMessages.map((msg) => (
+          <MessageBubble
+            key={msg.id}
+            msg={msg}
+            isSent={msg.type === 2}
+            readReceipt={readReceipts[msg.id]}
+          />
+        ))}
         <div ref={messagesEndRef} />
       </div>
 

@@ -1,6 +1,7 @@
 package com.phoneintegration.app
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -55,17 +56,31 @@ class SyncFlowCallService : Service() {
         const val ACTION_REJECT_CALL = "com.phoneintegration.app.REJECT_SYNCFLOW_CALL"
         const val ACTION_END_CALL = "com.phoneintegration.app.END_SYNCFLOW_CALL"
         const val ACTION_START_CALL = "com.phoneintegration.app.START_SYNCFLOW_CALL"
+        const val ACTION_INCOMING_USER_CALL = "com.phoneintegration.app.INCOMING_USER_CALL"
+        const val ACTION_DISMISS_CALL_NOTIFICATION = "com.phoneintegration.app.DISMISS_CALL_NOTIFICATION"
 
         const val EXTRA_CALL_ID = "call_id"
         const val EXTRA_CALLEE_DEVICE_ID = "callee_device_id"
         const val EXTRA_CALLEE_NAME = "callee_name"
         const val EXTRA_IS_VIDEO = "is_video"
         const val EXTRA_WITH_VIDEO = "with_video"
+        const val EXTRA_CALLER_NAME = "caller_name"
+        const val EXTRA_CALLER_PHONE = "caller_phone"
 
         // Singleton reference for call manager
         private var _callManager: SyncFlowCallManager? = null
 
+        // Observable state for pending incoming call (null = no incoming call)
+        private val _pendingIncomingCallFlow = kotlinx.coroutines.flow.MutableStateFlow<SyncFlowCall?>(null)
+        val pendingIncomingCallFlow: kotlinx.coroutines.flow.StateFlow<SyncFlowCall?> = _pendingIncomingCallFlow
+
         fun getCallManager(): SyncFlowCallManager? = _callManager
+
+        // Called when incoming call should be dismissed (answered elsewhere, ended, etc.)
+        fun dismissIncomingCall() {
+            Log.d(TAG, "📞 dismissIncomingCall() called - setting flow to null")
+            _pendingIncomingCallFlow.value = null
+        }
 
         /**
          * Start the service. This now only starts the Firebase listener for incoming calls
@@ -205,6 +220,64 @@ class SyncFlowCallService : Service() {
                     isCallActive = true
                     cancelIdleTimeout() // Keep service alive during call
                     startCall(calleeDeviceId, calleeName, isVideo)
+                }
+            }
+            ACTION_INCOMING_USER_CALL -> {
+                // Handle incoming user call directly from FCM (bypasses Firebase listeners which are offline)
+                val callId = intent.getStringExtra(EXTRA_CALL_ID) ?: return START_NOT_STICKY
+                val callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
+                val callerPhone = intent.getStringExtra(EXTRA_CALLER_PHONE) ?: ""
+                val isVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, false)
+
+                Log.d(TAG, "Incoming user call from FCM: callId=$callId, caller=$callerName")
+
+                val userId = auth.currentUser?.uid ?: return START_NOT_STICKY
+
+                // Create the pending incoming call directly from FCM data
+                val call = com.phoneintegration.app.models.SyncFlowCall(
+                    id = callId,
+                    callerId = "", // Will be populated when answering
+                    callerName = callerName,
+                    callerPlatform = "android",
+                    calleeId = userId,
+                    calleeName = "",
+                    calleePlatform = "android",
+                    callType = if (isVideo) com.phoneintegration.app.models.SyncFlowCall.CallType.VIDEO
+                              else com.phoneintegration.app.models.SyncFlowCall.CallType.AUDIO,
+                    status = com.phoneintegration.app.models.SyncFlowCall.CallStatus.RINGING,
+                    startedAt = System.currentTimeMillis(),
+                    isUserCall = true,
+                    callerPhone = callerPhone
+                )
+
+                cancelIdleTimeout() // Keep service alive while call is ringing
+                pendingIncomingCall = call
+                _pendingIncomingCallFlow.value = call  // Update flow for MainActivity
+                showIncomingCallNotification(call)
+                launchIncomingCallActivity(call)
+            }
+            ACTION_DISMISS_CALL_NOTIFICATION -> {
+                // Call was answered on another device (Mac/Web) or ended
+                val callId = intent.getStringExtra(EXTRA_CALL_ID)
+                Log.d(TAG, "📞 Dismiss call notification received for callId: $callId")
+
+                // Only dismiss if this is for the current pending call
+                if (callId == null || pendingIncomingCall?.id == callId) {
+                    dismissIncomingCallNotification()
+                    pendingIncomingCall = null
+                    startIdleTimeout()
+
+                    // Update the static flow so MainActivity can observe
+                    _pendingIncomingCallFlow.value = null
+                    Log.d(TAG, "📞 Updated pendingIncomingCallFlow to null")
+
+                    // Also send broadcast as backup
+                    val dismissIntent = Intent("com.phoneintegration.app.DISMISS_INCOMING_CALL").apply {
+                        putExtra("call_id", callId)
+                        putExtra("reason", "answered_elsewhere")
+                    }
+                    sendBroadcast(dismissIntent)
+                    Log.d(TAG, "📞 Sent dismiss broadcast to MainActivity")
                 }
             }
         }
@@ -731,45 +804,39 @@ class SyncFlowCallService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val answerVideoIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-            addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION)
-            putExtra("syncflow_call_action", "answer")
-            putExtra("syncflow_call_answer_video", true)
-            putExtra("incoming_syncflow_call_id", call.id)
-            putExtra("incoming_syncflow_call_name", call.callerName)
-            putExtra("incoming_syncflow_call_video", call.isVideo)
+        // Use BroadcastReceiver for answer/decline to avoid unlock requirement on Samsung
+        // The receiver will handle the action and then launch the activity
+
+        val answerVideoIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallActionReceiver.ACTION_ANSWER_CALL
+            putExtra(CallActionReceiver.EXTRA_CALL_ID, call.id)
+            putExtra(CallActionReceiver.EXTRA_CALLER_NAME, call.callerName)
+            putExtra(CallActionReceiver.EXTRA_WITH_VIDEO, true)
+            putExtra(CallActionReceiver.EXTRA_IS_VIDEO_CALL, call.isVideo)
         }
-        val answerVideoPendingIntent = PendingIntent.getActivity(
+        val answerVideoPendingIntent = PendingIntent.getBroadcast(
             this, 110, answerVideoIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val answerAudioIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-            addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION)
-            putExtra("syncflow_call_action", "answer")
-            putExtra("syncflow_call_answer_video", false)
-            putExtra("incoming_syncflow_call_id", call.id)
-            putExtra("incoming_syncflow_call_name", call.callerName)
-            putExtra("incoming_syncflow_call_video", call.isVideo)
+        val answerAudioIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallActionReceiver.ACTION_ANSWER_CALL
+            putExtra(CallActionReceiver.EXTRA_CALL_ID, call.id)
+            putExtra(CallActionReceiver.EXTRA_CALLER_NAME, call.callerName)
+            putExtra(CallActionReceiver.EXTRA_WITH_VIDEO, false)
+            putExtra(CallActionReceiver.EXTRA_IS_VIDEO_CALL, call.isVideo)
         }
-        val answerAudioPendingIntent = PendingIntent.getActivity(
+        val answerAudioPendingIntent = PendingIntent.getBroadcast(
             this, 111, answerAudioIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val rejectIntent = Intent(this, SyncFlowCallService::class.java).apply {
-            action = ACTION_REJECT_CALL
-            putExtra(EXTRA_CALL_ID, call.id)
+        // Use BroadcastReceiver for decline too for consistency
+        val rejectIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallActionReceiver.ACTION_DECLINE_CALL
+            putExtra(CallActionReceiver.EXTRA_CALL_ID, call.id)
         }
-        val rejectPendingIntent = PendingIntent.getService(
+        val rejectPendingIntent = PendingIntent.getBroadcast(
             this, 2, rejectIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -974,14 +1041,41 @@ class SyncFlowCallService : Service() {
     }
 
     private fun launchIncomingCallActivity(call: SyncFlowCall) {
-        // Launch the incoming call activity
+        Log.d(TAG, "Launching incoming call activity for call: ${call.id}")
+
+        // Check if device is locked
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        val isLocked = keyguardManager.isKeyguardLocked
+        Log.d(TAG, "Device locked: $isLocked")
+
+        // Launch the incoming call activity with proper flags for locked screen
         val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            // Essential flags for launching from service
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+
+            // Add flags for showing over lock screen (for older API levels)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+                @Suppress("DEPRECATION")
+                addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                        android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+            }
+
             putExtra("incoming_syncflow_call_id", call.id)
             putExtra("incoming_syncflow_call_name", call.callerName)
             putExtra("incoming_syncflow_call_video", call.isVideo)
+            putExtra("from_locked_screen", isLocked)
         }
-        startActivity(intent)
+
+        try {
+            startActivity(intent)
+            Log.d(TAG, "Activity launched successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch activity", e)
+        }
     }
 
     private fun updateNotificationForActiveCall() {
@@ -1056,6 +1150,11 @@ class SyncFlowCallService : Service() {
         // Upgrade foreground service to microphone/camera type before answering call
         upgradeToCallForegroundType()
 
+        // Check if device is locked
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        val isLocked = keyguardManager.isKeyguardLocked
+        Log.d(TAG, "Answering call, device locked: $isLocked")
+
         // Launch MainActivity to show the call screen
         // Use comprehensive flags for Samsung and other OEM devices
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -1064,10 +1163,21 @@ class SyncFlowCallService : Service() {
                     Intent.FLAG_ACTIVITY_SINGLE_TOP or
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION)
+
+            // Add flags for showing over lock screen (for older API levels)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
+                @Suppress("DEPRECATION")
+                addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                        android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+            }
+
             putExtra("active_syncflow_call", true)
             putExtra("active_syncflow_call_id", callId)
             putExtra("active_syncflow_call_name", callerName)
             putExtra("active_syncflow_call_video", withVideo)
+            putExtra("from_locked_screen", isLocked)
+            putExtra("dismiss_keyguard", true)  // Signal to MainActivity to dismiss keyguard
         }
 
         // Start activity - try multiple approaches for Samsung compatibility

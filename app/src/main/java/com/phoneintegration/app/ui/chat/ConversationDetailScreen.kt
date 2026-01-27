@@ -342,6 +342,7 @@ fun ConversationDetailScreen(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
@@ -511,7 +512,7 @@ fun ConversationDetailScreen(
         },
 
         bottomBar = {
-            EnhancedMessageInput(
+            ModernMessageInput(
                 value = input,
                 onValueChange = { input = it },
                 onSend = { message ->
@@ -546,6 +547,14 @@ fun ConversationDetailScreen(
                     }
                 },
                 onAttach = { showAttachmentSheet = true },
+                onCamera = {
+                    // Launch camera for quick photo
+                    showAttachmentSheet = true
+                },
+                onGif = {
+                    // Show GIF picker (placeholder - can be enhanced later)
+                    Toast.makeText(context, "GIF picker coming soon", Toast.LENGTH_SHORT).show()
+                },
                 smartReplies = smart,
                 replyPreview = replyPreview,
                 onClearReply = { replyToMessage = null }

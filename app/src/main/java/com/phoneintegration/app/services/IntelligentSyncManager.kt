@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.firebase.database.*
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.auth.AuthManager
+import com.phoneintegration.app.desktop.DesktopSyncService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -63,10 +64,13 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     private var messageListener: ChildEventListener? = null
     private var callListener: ChildEventListener? = null
     private var notificationListener: ChildEventListener? = null
+    private var syncRequestListener: ChildEventListener? = null
     private var messageListenerRef: com.google.firebase.database.Query? = null
     private var callListenerRef: DatabaseReference? = null
     private var notificationListenerRef: DatabaseReference? = null
+    private var syncRequestListenerRef: DatabaseReference? = null
     private val appContext = context.applicationContext
+    private val desktopSyncService by lazy { DesktopSyncService(appContext) }
 
     // Adaptive sync timers
     private var adaptiveSyncJob: Job? = null
@@ -97,6 +101,9 @@ class IntelligentSyncManager private constructor(private val context: Context) {
 
                 // Adaptive notification listener (HIGH priority)
                 setupNotificationListener(userId)
+
+                // Sync request listener (for loading older messages on demand)
+                setupSyncRequestListener(userId)
 
                 Log.i(TAG, "Real-time listeners established for user: $userId")
             } catch (e: Exception) {
@@ -195,6 +202,72 @@ class IntelligentSyncManager private constructor(private val context: Context) {
         notificationListenerRef = notificationsRef
 
         updateSyncStatus("notifications", true)
+    }
+
+    /**
+     * Listen for sync history requests from Mac/Web clients.
+     * When a user requests older messages, this triggers the sync.
+     */
+    private suspend fun setupSyncRequestListener(userId: String) {
+        val syncRequestsRef = database.getReference("users").child(userId).child("sync_requests")
+        Log.d(TAG, "Setting up sync request listener at path: users/$userId/sync_requests")
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                Log.d(TAG, "onChildAdded triggered for sync_requests: key=${snapshot.key}, exists=${snapshot.exists()}")
+                val requestId = snapshot.key
+                if (requestId == null) {
+                    Log.w(TAG, "Sync request has null key, skipping")
+                    return
+                }
+                val data = snapshot.value as? Map<String, Any?>
+                if (data == null) {
+                    Log.w(TAG, "Sync request $requestId has invalid data format: ${snapshot.value}")
+                    return
+                }
+
+                val status = data["status"] as? String ?: "pending"
+                Log.d(TAG, "Sync request $requestId has status: $status")
+                if (status != "pending") {
+                    Log.d(TAG, "Skipping non-pending request $requestId")
+                    return // Only process pending requests
+                }
+
+                val days = (data["days"] as? Number)?.toInt() ?: 30
+                val requestedBy = data["requestedBy"] as? String ?: "unknown"
+
+                Log.i(TAG, "Received sync history request: id=$requestId, days=$days, from=$requestedBy")
+
+                // Process the request in background
+                scope.launch {
+                    try {
+                        val request = com.phoneintegration.app.desktop.SyncHistoryRequest(
+                            id = requestId,
+                            days = days,
+                            requestedAt = (data["requestedAt"] as? Number)?.toLong() ?: System.currentTimeMillis(),
+                            requestedBy = requestedBy
+                        )
+                        desktopSyncService.processSyncHistoryRequest(request)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing sync request $requestId", e)
+                    }
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onChildRemoved(snapshot: DataSnapshot) {}
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Sync request listener cancelled: ${error.message}", error.toException())
+            }
+        }
+
+        syncRequestsRef.addChildEventListener(listener)
+        syncRequestListener = listener
+        syncRequestListenerRef = syncRequestsRef
+
+        Log.i(TAG, "Sync request listener established at: users/$userId/sync_requests")
     }
 
     /**

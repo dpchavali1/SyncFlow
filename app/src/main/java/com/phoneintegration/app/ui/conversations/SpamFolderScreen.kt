@@ -31,12 +31,18 @@ import java.util.*
 @Composable
 fun SpamFolderScreen(
     onBack: () -> Unit,
-    onOpenConversation: (address: String, name: String) -> Unit = { _, _ -> }
+    onOpenConversation: (address: String, name: String) -> Unit = { _, _ -> },
+    viewModel: com.phoneintegration.app.SmsViewModel? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val database = remember { AppDatabase.getInstance(context) }
     val syncService = remember { com.phoneintegration.app.desktop.DesktopSyncService(context.applicationContext) }
+
+    // Refresh spam from cloud when screen opens
+    LaunchedEffect(Unit) {
+        viewModel?.refreshSpamFromCloud()
+    }
 
     val spamMessages by database.spamMessageDao().getAllSpam().collectAsState(initial = emptyList())
     var showClearAllDialog by remember { mutableStateOf(false) }
@@ -127,7 +133,10 @@ fun SpamFolderScreen(
                                     .filter { it.address == conversation.address }
                                     .map { it.messageId }
                                 database.spamMessageDao().deleteByAddress(conversation.address)
-                                ids.forEach { syncService.deleteSpamMessage(it) }
+                                // Only sync to cloud if devices are paired
+                                if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                                    ids.forEach { syncService.deleteSpamMessage(it) }
+                                }
                                 Toast.makeText(context, "Restored from spam", Toast.LENGTH_SHORT).show()
                             }
                         },
@@ -137,7 +146,10 @@ fun SpamFolderScreen(
                                     .filter { it.address == conversation.address }
                                     .map { it.messageId }
                                 database.spamMessageDao().deleteByAddress(conversation.address)
-                                ids.forEach { syncService.deleteSpamMessage(it) }
+                                // Only sync to cloud if devices are paired
+                                if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                                    ids.forEach { syncService.deleteSpamMessage(it) }
+                                }
                                 Toast.makeText(context, "Deleted permanently", Toast.LENGTH_SHORT).show()
                             }
                         }
@@ -158,7 +170,10 @@ fun SpamFolderScreen(
                     onClick = {
                         scope.launch {
                             database.spamMessageDao().clearAll()
-                            syncService.clearAllSpamMessages()
+                            // Only sync to cloud if devices are paired
+                            if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                                syncService.clearAllSpamMessages()
+                            }
                             Toast.makeText(context, "All spam cleared", Toast.LENGTH_SHORT).show()
                         }
                         showClearAllDialog = false

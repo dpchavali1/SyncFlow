@@ -12,10 +12,6 @@ struct CallInProgressBanner: View {
     let call: ActiveCall
     let onEndCall: () -> Void
     let onDismiss: () -> Void
-    let isTransferActive: Bool
-    let isTransferConnecting: Bool
-    let onStartTransfer: () -> Void
-    let onStopTransfer: () -> Void
 
     @State private var now = Date()
 
@@ -39,22 +35,6 @@ struct CallInProgressBanner: View {
             }
 
             Spacer()
-
-            if isTransferActive {
-                Button(action: onStopTransfer) {
-                    Label("Stop Transfer", systemImage: "speaker.slash.fill")
-                }
-                .buttonStyle(.bordered)
-            } else {
-                Button(action: onStartTransfer) {
-                    Label(
-                        isTransferConnecting ? "Connecting..." : "Transfer Audio",
-                        systemImage: "speaker.wave.2.fill"
-                    )
-                }
-                .buttonStyle(.bordered)
-                .disabled(isTransferConnecting)
-            }
 
             Button(role: .destructive, action: onEndCall) {
                 Label("End", systemImage: "phone.down.fill")
@@ -96,11 +76,7 @@ struct CallInProgressBanner_Previews: PreviewProvider {
                 timestamp: Date()
             ),
             onEndCall: {},
-            onDismiss: {},
-            isTransferActive: false,
-            isTransferConnecting: false,
-            onStartTransfer: {},
-            onStopTransfer: {}
+            onDismiss: {}
         )
         .padding()
     }

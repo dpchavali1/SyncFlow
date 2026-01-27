@@ -116,7 +116,6 @@ class SubscriptionService: ObservableObject {
     func startTrialIfNeeded() {
         if trialStartDate == nil {
             trialStartDate = Date()
-            print("SubscriptionService: Trial started")
         }
     }
 
@@ -173,7 +172,6 @@ class SubscriptionService: ObservableObject {
                 return (order[p1.id] ?? 99) < (order[p2.id] ?? 99)
             }
 
-            print("SubscriptionService: Loaded \(products.count) products")
         } catch {
             print("SubscriptionService: Failed to load products: \(error)")
             errorMessage = "Failed to load subscription options"
@@ -228,7 +226,6 @@ class SubscriptionService: ObservableObject {
         do {
             try await AppStore.sync()
             await updateSubscriptionStatus()
-            print("SubscriptionService: Purchases restored")
         } catch {
             errorMessage = "Failed to restore purchases"
             print("SubscriptionService: Restore failed: \(error)")
@@ -240,22 +237,18 @@ class SubscriptionService: ObservableObject {
     // MARK: - Update Status
 
     func updateSubscriptionStatus() async {
-        print("SubscriptionService: updateSubscriptionStatus() called")
         // FIRST: Check Firebase for admin-assigned plan (Testing tab)
         // This takes priority over StoreKit for testing
         await syncUsagePlan()
 
         // If Firebase already set a valid paid status, don't override with StoreKit
         if case .subscribed = subscriptionStatus {
-            print("SubscriptionService: Using Firebase-assigned paid plan")
             return
         }
         if subscriptionStatus == .lifetime {
-            print("SubscriptionService: Using Firebase-assigned lifetime plan")
             return
         }
 
-        print("SubscriptionService: No Firebase plan found, checking StoreKit...")
 
         // FALLBACK: Check for StoreKit subscriptions
         var hasActiveSubscription = false
@@ -283,7 +276,6 @@ class SubscriptionService: ObservableObject {
                     }
                 }
             } catch {
-                print("SubscriptionService: Transaction verification failed")
             }
         }
 
@@ -302,7 +294,6 @@ class SubscriptionService: ObservableObject {
             subscriptionStatus = .trial(daysRemaining: trialDaysRemaining)
         }
 
-        print("SubscriptionService: Status updated to \(subscriptionStatus.displayText)")
     }
 
     // MARK: - Transaction Listener
@@ -315,7 +306,6 @@ class SubscriptionService: ObservableObject {
                     await self.updateSubscriptionStatus()
                     await transaction.finish()
                 } catch {
-                    print("SubscriptionService: Transaction update failed verification")
                 }
             }
         }
@@ -345,11 +335,9 @@ class SubscriptionService: ObservableObject {
     private func syncUsagePlan() async {
         guard let userId = UserDefaults.standard.string(forKey: "syncflow_user_id"),
               !userId.isEmpty else {
-            print("SubscriptionService: No userId found in UserDefaults")
             return
         }
 
-        print("SubscriptionService: Loading plan from Firebase for userId: \(userId)")
 
         let userRef = Database.database()
             .reference()
@@ -360,7 +348,6 @@ class SubscriptionService: ObservableObject {
         do {
             let snapshot = try await userRef.getData()
             if let userData = snapshot.value as? [String: Any] {
-                print("SubscriptionService: Firebase user data loaded")
 
                 var plan = ""
                 var planExpiresAt: NSNumber?
@@ -371,26 +358,20 @@ class SubscriptionService: ObservableObject {
                     plan = rootPlan
                     planExpiresAt = userData["planExpiresAt"] as? NSNumber
                     freeTrialExpiresAt = userData["freeTrialExpiresAt"] as? NSNumber
-                    print("SubscriptionService: Found plan at root level: \(plan)")
                 }
 
                 // Check for plan in usage (new location from Testing tab)
                 if let usageData = userData["usage"] as? [String: Any] {
-                    print("SubscriptionService: usage data found: \(usageData.keys.joined(separator: ", "))")
                     if let usagePlan = usageData["plan"] as? String, !usagePlan.isEmpty {
                         plan = usagePlan
                         planExpiresAt = usageData["planExpiresAt"] as? NSNumber
                         freeTrialExpiresAt = usageData["freeTrialExpiresAt"] as? NSNumber
-                        print("SubscriptionService: Found plan in usage: \(plan)")
                     } else {
-                        print("SubscriptionService: No plan found in usage data")
                     }
                 } else {
-                    print("SubscriptionService: No usage section in user data")
                 }
 
                 let now = Int64(Date().timeIntervalSince1970 * 1000)
-                print("SubscriptionService: plan=\(plan), planExpiresAt=\(planExpiresAt?.int64Value ?? 0), now=\(now)")
 
                 // If Firebase has a valid paid plan that hasn't expired, use it
                 if ["monthly", "yearly", "lifetime"].contains(plan.lowercased()) {
@@ -406,26 +387,21 @@ class SubscriptionService: ObservableObject {
                             let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
                             self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
                         }
-                        print("SubscriptionService: Loaded Firebase plan: \(plan)")
                         return
                     }
                 }
 
                 // If Firebase has active free trial, use it
-                print("SubscriptionService: Checking for active free trial: freeTrialExpiresAt=\(freeTrialExpiresAt?.int64Value ?? 0), now=\(now)")
                 if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
                     updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
 
                     // Update subscriptionStatus to reflect active trial (immediately, not async)
                     let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
                     self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
-                    print("SubscriptionService: ✅ Loaded Firebase free trial with \(trialDaysRemaining) days remaining")
                     return
                 } else {
-                    print("SubscriptionService: ❌ No active trial found or trial expired")
                 }
             } else {
-                print("SubscriptionService: No usage data found in Firebase")
             }
         } catch {
             print("SubscriptionService: Error loading plan from Firebase: \(error)")
@@ -445,7 +421,6 @@ class SubscriptionService: ObservableObject {
                 let freeTrialExpiresAt = activeData["freeTrialExpiresAt"] as? NSNumber
 
                 let now = Int64(Date().timeIntervalSince1970 * 1000)
-                print("SubscriptionService: Found subscription record, plan=\(plan), planExpiresAt=\(planExpiresAt?.int64Value ?? 0)")
 
                 // If subscription record has a valid paid plan that hasn't expired, use it
                 if ["monthly", "yearly", "lifetime"].contains(plan.lowercased()) {
@@ -460,7 +435,6 @@ class SubscriptionService: ObservableObject {
                             let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
                             self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
                         }
-                        print("SubscriptionService: Loaded plan from subscription_records: \(plan)")
                         return
                     }
                 }
@@ -471,12 +445,10 @@ class SubscriptionService: ObservableObject {
 
                     let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
                     self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
-                    print("SubscriptionService: Loaded free trial from subscription_records with \(trialDaysRemaining) days remaining")
                     return
                 }
             }
         } catch {
-            print("SubscriptionService: No subscription_records found: \(error)")
         }
 
         // FALLBACK: Sync StoreKit subscription data to Firebase

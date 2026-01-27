@@ -1045,6 +1045,204 @@ exports.notifyIncomingSyncFlowCall = functions.database
     });
 
 /**
+ * Triggered when a SyncFlow call status changes.
+ * Sends an FCM message to dismiss the incoming call notification on Android
+ * when the call is answered, ended, or rejected.
+ *
+ * Path: users/{userId}/incoming_syncflow_calls/{callId}
+ */
+exports.notifySyncFlowCallStatusChange = functions.database
+    .ref("/users/{userId}/incoming_syncflow_calls/{callId}/status")
+    .onUpdate(async (change, context) => {
+        const { userId, callId } = context.params;
+        const beforeStatus = change.before.val();
+        const afterStatus = change.after.val();
+
+        // Only send notification when status changes FROM "ringing" to something else
+        if (beforeStatus !== "ringing" || afterStatus === "ringing") {
+            return null;
+        }
+
+        console.log(`SyncFlow call ${callId} status changed: ${beforeStatus} -> ${afterStatus}`);
+
+        try {
+            // Get the user's FCM token
+            const tokenSnapshot = await admin.database()
+                .ref(`/fcm_tokens/${userId}`)
+                .once("value");
+            const fcmToken = tokenSnapshot.val();
+
+            if (!fcmToken) {
+                console.log(`No FCM token found for user ${userId}`);
+                return null;
+            }
+
+            // Construct the FCM message to dismiss the incoming call notification
+            const message = {
+                token: fcmToken,
+                data: {
+                    type: "call_status_changed",
+                    callId: callId,
+                    status: afterStatus,
+                    timestamp: String(Date.now()),
+                },
+                android: {
+                    priority: "high",
+                    ttl: 30000, // 30 seconds
+                },
+            };
+
+            console.log("Sending FCM for call status change:", JSON.stringify(message));
+
+            const response = await admin.messaging().send(message);
+            console.log(`Successfully sent FCM message for call status change: ${response}`);
+
+            return response;
+        } catch (error) {
+            console.error("Error sending FCM for call status change:", error);
+
+            if (error.code === "messaging/invalid-registration-token" ||
+                error.code === "messaging/registration-token-not-registered") {
+                console.log(`Removing invalid FCM token for user ${userId}`);
+                await admin.database().ref(`/fcm_tokens/${userId}`).remove();
+            }
+
+            return null;
+        }
+    });
+
+/**
+ * Triggered when an outgoing SyncFlow call status changes (receiver ended the call).
+ * Sends an FCM message to the caller to end their call.
+ *
+ * Path: users/{userId}/outgoing_syncflow_calls/{callId}/status
+ */
+exports.notifyOutgoingSyncFlowCallStatusChange = functions.database
+    .ref("/users/{userId}/outgoing_syncflow_calls/{callId}/status")
+    .onUpdate(async (change, context) => {
+        const { userId, callId } = context.params;
+        const beforeStatus = change.before.val();
+        const afterStatus = change.after.val();
+
+        // Only send notification when status changes to "ended" (receiver ended the call)
+        if (afterStatus !== "ended" || beforeStatus === "ended") {
+            return null;
+        }
+
+        console.log(`Outgoing SyncFlow call ${callId} status changed: ${beforeStatus} -> ${afterStatus}`);
+
+        try {
+            // Get the caller's FCM token
+            const tokenSnapshot = await admin.database()
+                .ref(`/fcm_tokens/${userId}`)
+                .once("value");
+            const fcmToken = tokenSnapshot.val();
+
+            if (!fcmToken) {
+                console.log(`No FCM token found for caller ${userId}`);
+                return null;
+            }
+
+            // Construct the FCM message to end the call on the caller's device
+            const message = {
+                token: fcmToken,
+                data: {
+                    type: "call_ended_by_remote",
+                    callId: callId,
+                    status: afterStatus,
+                    timestamp: String(Date.now()),
+                },
+                android: {
+                    priority: "high",
+                    ttl: 30000, // 30 seconds
+                },
+            };
+
+            console.log("Sending FCM for outgoing call status change:", JSON.stringify(message));
+
+            const response = await admin.messaging().send(message);
+            console.log(`Successfully sent FCM message for outgoing call status change: ${response}`);
+
+            return response;
+        } catch (error) {
+            console.error("Error sending FCM for outgoing call status change:", error);
+
+            if (error.code === "messaging/invalid-registration-token" ||
+                error.code === "messaging/registration-token-not-registered") {
+                console.log(`Removing invalid FCM token for user ${userId}`);
+                await admin.database().ref(`/fcm_tokens/${userId}`).remove();
+            }
+
+            return null;
+        }
+    });
+
+/**
+ * Triggered when a SyncFlow call is deleted (caller hung up or call cleaned up).
+ * Sends an FCM message to dismiss the incoming call notification on Android.
+ *
+ * Path: users/{userId}/incoming_syncflow_calls/{callId}
+ */
+exports.notifySyncFlowCallDeleted = functions.database
+    .ref("/users/{userId}/incoming_syncflow_calls/{callId}")
+    .onDelete(async (snapshot, context) => {
+        const { userId, callId } = context.params;
+        const data = snapshot.val();
+
+        // Only send notification if the call was still ringing when deleted
+        if (!data || data.status !== "ringing") {
+            return null;
+        }
+
+        console.log(`SyncFlow call ${callId} deleted while ringing`);
+
+        try {
+            // Get the user's FCM token
+            const tokenSnapshot = await admin.database()
+                .ref(`/fcm_tokens/${userId}`)
+                .once("value");
+            const fcmToken = tokenSnapshot.val();
+
+            if (!fcmToken) {
+                console.log(`No FCM token found for user ${userId}`);
+                return null;
+            }
+
+            // Construct the FCM message to dismiss the incoming call notification
+            const message = {
+                token: fcmToken,
+                data: {
+                    type: "call_status_changed",
+                    callId: callId,
+                    status: "cancelled",
+                    timestamp: String(Date.now()),
+                },
+                android: {
+                    priority: "high",
+                    ttl: 30000, // 30 seconds
+                },
+            };
+
+            console.log("Sending FCM for call deletion:", JSON.stringify(message));
+
+            const response = await admin.messaging().send(message);
+            console.log(`Successfully sent FCM message for call deletion: ${response}`);
+
+            return response;
+        } catch (error) {
+            console.error("Error sending FCM for call deletion:", error);
+
+            if (error.code === "messaging/invalid-registration-token" ||
+                error.code === "messaging/registration-token-not-registered") {
+                console.log(`Removing invalid FCM token for user ${userId}`);
+                await admin.database().ref(`/fcm_tokens/${userId}`).remove();
+            }
+
+            return null;
+        }
+    });
+
+/**
  * Triggered when a new outgoing message is added for desktop-to-phone SMS.
  * Sends an FCM high-priority data message to wake up the Android device
  * so it can send the SMS without requiring a persistent foreground service.
@@ -2705,6 +2903,110 @@ exports.syncMessageBatch = functions.https.onCall(async (data, context) => {
             throw error;
         }
         throw new functions.https.HttpsError("internal", error.message || "Failed to sync messages");
+    }
+});
+
+/**
+ * Sync a spam message from Android to Firebase
+ * Uses admin privileges to bypass security rules
+ *
+ * @param {Object} data - Spam message data
+ * @param {string} data.messageId - Unique message ID
+ * @param {Object} data.spamMessage - Spam message content
+ */
+exports.syncSpamMessage = functions.https.onCall(async (data, context) => {
+    try {
+        const uid = requireAuth(context);
+
+        const { messageId, spamMessage } = data;
+
+        if (!messageId || !spamMessage) {
+            throw new functions.https.HttpsError("invalid-argument", "Missing messageId or spamMessage");
+        }
+
+        // Validate required fields
+        if (!spamMessage.address || !spamMessage.body || spamMessage.date === undefined) {
+            throw new functions.https.HttpsError("invalid-argument", "Spam message missing required fields (address, body, date)");
+        }
+
+        // Write spam message to Firebase
+        const spamRef = admin.database().ref(`/users/${uid}/spam_messages/${messageId}`);
+        await spamRef.set({
+            messageId: messageId,
+            address: spamMessage.address,
+            body: spamMessage.body,
+            date: spamMessage.date,
+            contactName: spamMessage.contactName || spamMessage.address,
+            spamConfidence: spamMessage.spamConfidence || 0.5,
+            spamReasons: spamMessage.spamReasons || "user_marked",
+            detectedAt: spamMessage.detectedAt || Date.now(),
+            isUserMarked: spamMessage.isUserMarked !== undefined ? spamMessage.isUserMarked : true,
+            isRead: spamMessage.isRead !== undefined ? spamMessage.isRead : false,
+            syncedAt: Date.now(),
+            syncedVia: "cloud_function"
+        });
+
+        console.log(`[SyncSpamMessage] Synced spam message ${messageId} for user ${uid}`);
+        return { success: true, messageId };
+    } catch (error) {
+        console.error("[SyncSpamMessage] Error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to sync spam message");
+    }
+});
+
+/**
+ * Delete a spam message from Firebase
+ *
+ * @param {Object} data - Request data
+ * @param {string} data.messageId - Message ID to delete
+ */
+exports.deleteSpamMessage = functions.https.onCall(async (data, context) => {
+    try {
+        const uid = requireAuth(context);
+
+        const { messageId } = data;
+
+        if (!messageId) {
+            throw new functions.https.HttpsError("invalid-argument", "Missing messageId");
+        }
+
+        // Delete spam message from Firebase
+        const spamRef = admin.database().ref(`/users/${uid}/spam_messages/${messageId}`);
+        await spamRef.remove();
+
+        console.log(`[DeleteSpamMessage] Deleted spam message ${messageId} for user ${uid}`);
+        return { success: true, messageId };
+    } catch (error) {
+        console.error("[DeleteSpamMessage] Error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to delete spam message");
+    }
+});
+
+/**
+ * Clear all spam messages for a user
+ */
+exports.clearAllSpamMessages = functions.https.onCall(async (data, context) => {
+    try {
+        const uid = requireAuth(context);
+
+        // Delete all spam messages
+        const spamRef = admin.database().ref(`/users/${uid}/spam_messages`);
+        await spamRef.remove();
+
+        console.log(`[ClearAllSpamMessages] Cleared all spam messages for user ${uid}`);
+        return { success: true };
+    } catch (error) {
+        console.error("[ClearAllSpamMessages] Error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", error.message || "Failed to clear spam messages");
     }
 });
 

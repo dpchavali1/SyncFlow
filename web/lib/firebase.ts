@@ -666,6 +666,51 @@ export const listenToSpamMessages = (userId: string, callback: (messages: any[])
   })
 }
 
+// Mark a message as spam (syncs to all devices)
+export const markMessageAsSpam = async (
+  userId: string,
+  message: {
+    id: string,
+    address: string,
+    body: string,
+    date: number,
+    contactName?: string
+  }
+): Promise<void> => {
+  const messageId = message.id || String(message.date)
+  const spamRef = ref(database, `${USERS_PATH}/${userId}/spam_messages/${messageId}`)
+
+  const payload = {
+    messageId: message.id,
+    address: message.address,
+    body: message.body,
+    date: message.date,
+    contactName: message.contactName || null,
+    spamConfidence: 1.0,
+    spamReasons: 'Marked by user',
+    detectedAt: Date.now(),
+    isUserMarked: true,
+    isRead: true,
+    originalMessageId: message.id
+  }
+
+  await set(spamRef, payload)
+  console.log('Message marked as spam:', messageId)
+}
+
+// Delete a spam message (syncs to all devices)
+export const deleteSpamMessage = async (userId: string, messageId: string): Promise<void> => {
+  const spamRef = ref(database, `${USERS_PATH}/${userId}/spam_messages/${messageId}`)
+  await remove(spamRef)
+  console.log('Spam message deleted:', messageId)
+}
+
+// Unmark a message as spam (move back to inbox)
+export const unmarkMessageAsSpam = async (userId: string, messageId: string): Promise<void> => {
+  await deleteSpamMessage(userId, messageId)
+  console.log('Message unmarked as spam:', messageId)
+}
+
 // Delivery status tracking types
 export type DeliveryStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'delivered'
 
@@ -2664,7 +2709,21 @@ export const getUserDataSummary = async (userId: string): Promise<{
 // ADMIN FUNCTIONS - Comprehensive System Management
 // ============================================
 
-// Admin System Overview
+// Simple cache for admin data (5 minute TTL)
+const adminCache: {
+  systemOverview?: { data: any; timestamp: number }
+  detailedUsers?: { data: any; timestamp: number }
+} = {}
+const ADMIN_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
+// Clear admin cache (call when force refreshing)
+export const clearAdminCache = () => {
+  delete adminCache.systemOverview
+  delete adminCache.detailedUsers
+  console.log('Admin cache cleared')
+}
+
+// Admin System Overview - OPTIMIZED: single pass, no per-user fetches
 export const getSystemOverview = async (): Promise<{
   totalUsers: number
   activeUsers: number
@@ -2684,6 +2743,12 @@ export const getSystemOverview = async (): Promise<{
     issues: string[]
   }
 }> => {
+  // Check cache first
+  if (adminCache.systemOverview && Date.now() - adminCache.systemOverview.timestamp < ADMIN_CACHE_TTL) {
+    console.log('Returning cached system overview')
+    return adminCache.systemOverview.data
+  }
+
   try {
     const usersRef = ref(database, USERS_PATH)
     const usersSnapshot = await get(usersRef)
@@ -2698,68 +2763,62 @@ export const getSystemOverview = async (): Promise<{
       const users = usersSnapshot.val()
       const userIds = Object.keys(users)
       totalUsers = userIds.length
-      console.log(`Found ${totalUsers} users in database:`, userIds)
+      const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000)
 
-      // Analyze each user
-      for (const [userId, userData] of Object.entries(users)) {
+      // Single pass through all users - no additional fetches
+      for (const userData of Object.values(users)) {
         const data = userData as any
 
         // Count messages
         if (data.messages) {
           const messageCount = Object.keys(data.messages).length
           totalMessages += messageCount
-          console.log(`User ${userId}: ${messageCount} messages`)
-        } else {
-          console.log(`User ${userId}: 0 messages`)
+
+          // Check activity - only look at first few messages for speed
+          const messageValues = Object.values(data.messages).slice(0, 50) as any[]
+          const hasRecent = messageValues.some(msg =>
+            (msg.timestamp || msg.date) > thirtyDaysAgo
+          )
+          if (hasRecent) activeUsers++
         }
 
-        // Check user activity (messages in last 30 days)
-        let hasRecentActivity = false
-        if (data.messages) {
-          const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000)
-          for (const message of Object.values(data.messages)) {
-            const msg = message as any
-            if (msg.timestamp && msg.timestamp > thirtyDaysAgo) {
-              hasRecentActivity = true
-              activeUsers++
-              break
-            }
-          }
+        // Estimate storage from usage node if available (no extra fetch)
+        if (data.usage?.storageBytes) {
+          totalStorageMB += data.usage.storageBytes / (1024 * 1024)
+        } else if (data.messages) {
+          // Rough estimate: 500 bytes per message
+          totalStorageMB += Object.keys(data.messages).length * 0.0005
         }
-
-        // Estimate storage usage
-        const userStorage = await getUsageSummary(userId)
-        totalStorageMB += userStorage.storageUsedBytes / (1024 * 1024)
       }
     }
 
     // Estimate Firebase costs
-    const databaseCost = Math.max(0, (totalMessages * 0.000001) + (totalUsers * 0.005)) // Rough estimates
-    const storageCost = Math.max(0, totalStorageMB * 0.026) // $0.026/GB
-    const functionsCost = 5 // Base functions cost
+    const databaseCost = Math.max(0, (totalMessages * 0.000001) + (totalUsers * 0.005))
+    const storageCost = Math.max(0, totalStorageMB * 0.026)
+    const functionsCost = 5
     const totalMonthly = databaseCost + storageCost + functionsCost
 
     // System health check
     let status: 'healthy' | 'warning' | 'critical' = 'healthy'
-    if (totalStorageMB > 1000) { // Over 1GB
+    if (totalStorageMB > 1000) {
       status = 'warning'
       systemIssues.push('High storage usage detected')
     }
-    if (totalMessages > 100000) { // Over 100K messages
+    if (totalMessages > 100000) {
       status = 'warning'
       systemIssues.push('High message volume detected')
     }
-    if (totalMonthly > 50) { // Over $50/month
+    if (totalMonthly > 50) {
       status = 'critical'
       systemIssues.push('High monthly costs projected')
     }
 
-    return {
+    const result = {
       totalUsers,
       activeUsers,
       totalMessages,
       totalStorageMB: Math.round(totalStorageMB * 100) / 100,
-      databaseSize: totalMessages, // Approximate
+      databaseSize: totalMessages,
       firebaseCosts: {
         estimatedMonthly: Math.round(totalMonthly * 100) / 100,
         breakdown: {
@@ -2773,6 +2832,10 @@ export const getSystemOverview = async (): Promise<{
         issues: systemIssues
       }
     }
+
+    // Cache the result
+    adminCache.systemOverview = { data: result, timestamp: Date.now() }
+    return result
   } catch (error) {
     console.error('Error getting system overview:', error)
     return {
@@ -2890,7 +2953,7 @@ export const markAccountDeletedByDevice = async (deviceId: string, userId: strin
   }
 }
 
-// Admin User Management
+// Admin User Management - OPTIMIZED: batch fetch subscriptions, no per-user DB calls
 export const getDetailedUserList = async (): Promise<Array<{
   userId: string
   messagesCount: number
@@ -2904,101 +2967,91 @@ export const getDetailedUserList = async (): Promise<Array<{
   wasPremium: boolean
   isActive: boolean
 }>> => {
-  try {
-    const usersRef = ref(database, USERS_PATH)
-    const snapshot = await get(usersRef)
+  // Check cache first
+  if (adminCache.detailedUsers && Date.now() - adminCache.detailedUsers.timestamp < ADMIN_CACHE_TTL) {
+    console.log('Returning cached user list')
+    return adminCache.detailedUsers.data
+  }
 
-    if (!snapshot.exists()) return []
+  try {
+    // Fetch users and subscription_records in parallel (2 calls instead of 2*N)
+    const [usersSnapshot, subscriptionsSnapshot] = await Promise.all([
+      get(ref(database, USERS_PATH)),
+      get(ref(database, 'subscription_records'))
+    ])
+
+    if (!usersSnapshot.exists()) return []
 
     const users = []
-    const userData = snapshot.val()
+    const userData = usersSnapshot.val()
+    const subscriptions = subscriptionsSnapshot.exists() ? subscriptionsSnapshot.val() : {}
+    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000)
 
     for (const [userId, data] of Object.entries(userData)) {
       const userInfo = data as any
-
-      // Get usage summary
-      const usage = await getUsageSummary(userId)
-      console.log(`[User ${userId}] Usage summary:`, {
-        planLabel: usage.planLabel,
-        planExpiresAt: usage.planExpiresAt,
-        isPaid: usage.isPaid
-      })
-
-      // Get subscription record (persists even after user deletion)
-      let subscriptionRecord: any = null
-      try {
-        const subRef = ref(database, `subscription_records/${userId}/active`)
-        const subSnapshot = await get(subRef)
-        if (subSnapshot.exists()) {
-          subscriptionRecord = subSnapshot.val()
-          console.log(`[User ${userId}] Subscription record found:`, subscriptionRecord)
-        } else {
-          console.log(`[User ${userId}] No subscription record found`)
-        }
-      } catch (error) {
-        console.log(`[User ${userId}] Error loading subscription record:`, error)
-      }
+      const subscriptionRecord = subscriptions[userId]?.active || null
 
       // Count devices
       const devicesCount = userInfo.devices ? Object.keys(userInfo.devices).length : 0
 
-      // Count actual messages and check activity (last 30 days)
-      const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000)
+      // Count messages and check activity - sample first 100 for speed
       let lastActivity: number | null = null
       let isActive = false
       let actualMessageCount = 0
+      let storageUsedMB = 0
 
       if (userInfo.messages) {
-        actualMessageCount = Object.keys(userInfo.messages).length
-        console.log(`User ${userId} has ${actualMessageCount} actual messages`)
+        const messageKeys = Object.keys(userInfo.messages)
+        actualMessageCount = messageKeys.length
 
-        for (const message of Object.values(userInfo.messages)) {
-          const msg = message as any
-          const timestamp = msg.timestamp || msg.date
+        // Sample messages for activity check (don't iterate all)
+        const sampleSize = Math.min(100, messageKeys.length)
+        const sampleKeys = messageKeys.slice(-sampleSize) // Get most recent
+        for (const key of sampleKeys) {
+          const msg = userInfo.messages[key]
+          const timestamp = msg?.timestamp || msg?.date
           if (timestamp) {
-            if (timestamp > thirtyDaysAgo) {
-              isActive = true
-            }
-            if (!lastActivity || timestamp > lastActivity) {
-              lastActivity = timestamp
-            }
+            if (timestamp > thirtyDaysAgo) isActive = true
+            if (!lastActivity || timestamp > lastActivity) lastActivity = timestamp
           }
         }
       }
 
-      // Get plan: prioritize subscription_records, fallback to usage
+      // Get storage from usage node (already in user data, no extra fetch)
+      if (userInfo.usage?.storageBytes) {
+        storageUsedMB = Math.round(userInfo.usage.storageBytes / (1024 * 1024) * 100) / 100
+      } else {
+        // Rough estimate: 500 bytes per message
+        storageUsedMB = Math.round(actualMessageCount * 0.0005 * 100) / 100
+      }
+
+      // Get plan: prioritize subscription_records, fallback to inline usage
       let plan = 'Trial'
       let planExpiresAt: number | null = null
       let planAssignedAt: number | null = null
       let planAssignedBy = 'unknown'
       let wasPremium = false
 
-      // FIRST: Check subscription_records (persists after user deletion)
-      if (subscriptionRecord && subscriptionRecord.plan) {
+      if (subscriptionRecord?.plan) {
         plan = subscriptionRecord.plan === 'free' ? 'Trial' :
                subscriptionRecord.plan.charAt(0).toUpperCase() + subscriptionRecord.plan.slice(1)
         planExpiresAt = subscriptionRecord.planExpiresAt || null
         planAssignedAt = subscriptionRecord.planAssignedAt || null
         planAssignedBy = subscriptionRecord.planAssignedBy || 'system'
         wasPremium = subscriptionRecord.wasPremium === true || (subscriptionRecord.plan && subscriptionRecord.plan !== 'free')
-        console.log(`[User ${userId}] Using subscription_records plan: ${plan}`)
-      }
-      // FALLBACK: Use usage summary if no subscription record
-      else if (usage.planLabel && usage.planLabel !== 'Trial') {
-        plan = usage.planLabel
-        planExpiresAt = usage.planExpiresAt || null
+      } else if (userInfo.usage?.plan && userInfo.usage.plan !== 'free') {
+        // Fallback to inline usage data
+        plan = userInfo.usage.plan.charAt(0).toUpperCase() + userInfo.usage.plan.slice(1)
+        planExpiresAt = userInfo.usage.planExpiresAt || null
         planAssignedBy = 'storekit'
-        wasPremium = usage.isPaid
-        console.log(`[User ${userId}] Using usage plan: ${plan}`)
-      } else {
-        console.log(`[User ${userId}] Using default: Trial`)
+        wasPremium = true
       }
 
       users.push({
         userId,
-        messagesCount: actualMessageCount, // Use actual count instead of estimate
+        messagesCount: actualMessageCount,
         devicesCount,
-        storageUsedMB: Math.round(usage.storageUsedBytes / (1024 * 1024) * 100) / 100,
+        storageUsedMB,
         lastActivity,
         plan,
         planExpiresAt,
@@ -3009,7 +3062,11 @@ export const getDetailedUserList = async (): Promise<Array<{
       })
     }
 
-    return users.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+    const result = users.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+
+    // Cache the result
+    adminCache.detailedUsers = { data: result, timestamp: Date.now() }
+    return result
   } catch (error) {
     console.error('Error getting detailed user list:', error)
     return []

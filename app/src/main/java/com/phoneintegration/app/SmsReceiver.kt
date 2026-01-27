@@ -160,8 +160,11 @@ class SmsReceiver : BroadcastReceiver() {
                             isUserMarked = false
                         )
                         database.spamMessageDao().insert(spamMessage)
-                        com.phoneintegration.app.desktop.DesktopSyncService(context)
-                            .syncSpamMessage(spamMessage)
+                        // Only sync to desktop if devices are paired
+                        if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                            com.phoneintegration.app.desktop.DesktopSyncService(context)
+                                .syncSpamMessage(spamMessage)
+                        }
 
                         // Show spam notification
                         val notificationHelper = NotificationHelper(context)
@@ -210,28 +213,31 @@ class SmsReceiver : BroadcastReceiver() {
                 SecureLogger.e("SMS_RECEIVER", "Error broadcasting SMS received", e)
             }
 
-            // Immediately sync this message to Firebase for desktop
-            // Use WorkManager for guaranteed execution even if app is in background
-            try {
-                com.phoneintegration.app.desktop.SmsSyncWorker.syncNow(context)
-            } catch (e: Exception) {
-                SecureLogger.e("SMS_RECEIVER", "Error scheduling SMS sync", e)
-            }
-
-            // Also try immediate sync in coroutine (faster if app is active)
-            CoroutineScope(Dispatchers.IO).launch {
+            // Only sync to desktop if devices are paired (saves battery for Android-only users)
+            if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                // Immediately sync this message to Firebase for desktop
+                // Use WorkManager for guaranteed execution even if app is in background
                 try {
-                    val smsRepository = SmsRepository(context)
-                    val syncService = com.phoneintegration.app.desktop.DesktopSyncService(context)
-
-                    // Get the most recent message (the one we just received)
-                    val recentMessages = smsRepository.getAllRecentMessages(1)
-                    if (recentMessages.isNotEmpty()) {
-                        syncService.syncMessage(recentMessages[0])
-                        SecureLogger.d("SMS_RECEIVER", "Message synced to Firebase for desktop")
-                    }
+                    com.phoneintegration.app.desktop.SmsSyncWorker.syncNow(context)
                 } catch (e: Exception) {
-                    SecureLogger.e("SMS_RECEIVER", "Error syncing message to Firebase", e)
+                    SecureLogger.e("SMS_RECEIVER", "Error scheduling SMS sync", e)
+                }
+
+                // Also try immediate sync in coroutine (faster if app is active)
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val smsRepository = SmsRepository(context)
+                        val syncService = com.phoneintegration.app.desktop.DesktopSyncService(context)
+
+                        // Get the most recent message (the one we just received)
+                        val recentMessages = smsRepository.getAllRecentMessages(1)
+                        if (recentMessages.isNotEmpty()) {
+                            syncService.syncMessage(recentMessages[0])
+                            SecureLogger.d("SMS_RECEIVER", "Message synced to Firebase for desktop")
+                        }
+                    } catch (e: Exception) {
+                        SecureLogger.e("SMS_RECEIVER", "Error syncing message to Firebase", e)
+                    }
                 }
             }
         } catch (e: Exception) {

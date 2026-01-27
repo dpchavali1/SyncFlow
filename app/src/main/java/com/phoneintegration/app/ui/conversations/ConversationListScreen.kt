@@ -82,6 +82,9 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -144,6 +147,28 @@ fun ConversationListScreen(
         }
     }
 
+    // Check SMS permission state - reload when permission is granted
+    val hasSmsPermission = remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    // Periodically check for permission changes (handles cases where user grants permission via settings)
+    LaunchedEffect(Unit) {
+        while (true) {
+            val currentPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+            if (currentPermission != hasSmsPermission.value) {
+                hasSmsPermission.value = currentPermission
+                if (currentPermission) {
+                    Log.d("ConversationListScreen", "SMS permission granted - reloading conversations")
+                    viewModel.loadConversations(forceReload = true)
+                }
+            }
+            kotlinx.coroutines.delay(1000) // Check every second
+        }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.loadAvailableSims()
         viewModel.loadConversations()
@@ -172,6 +197,7 @@ fun ConversationListScreen(
     var showMenu by remember { mutableStateOf(false) }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("SyncFlow") },

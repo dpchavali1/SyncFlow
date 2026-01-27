@@ -1,6 +1,10 @@
 package com.phoneintegration.app.ui.call
 
+import android.app.Activity
+import android.content.Context
+import android.os.PowerManager
 import android.view.ViewGroup
+import android.view.WindowManager
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -29,15 +33,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.phoneintegration.app.SyncFlowCallService
 import com.phoneintegration.app.webrtc.SyncFlowCallManager
 import com.phoneintegration.app.webrtc.VideoEffect
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoTrack
 
@@ -46,6 +54,8 @@ fun SyncFlowCallScreen(
     callManager: SyncFlowCallManager,
     onCallEnded: () -> Unit
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val callState by callManager.callState.collectAsState()
     val currentCall by callManager.currentCall.collectAsState()
     val isMuted by callManager.isMuted.collectAsState()
@@ -58,6 +68,65 @@ fun SyncFlowCallScreen(
     var showControls by remember { mutableStateOf(true) }
     var elapsedSeconds by remember { mutableStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
+
+    // Keep screen on during video call using wake lock and window flags
+    DisposableEffect(Unit) {
+        val activity = context as? Activity
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "SyncFlow:VideoCallWakeLock"
+        )
+
+        // Acquire wake lock
+        try {
+            wakeLock.acquire(60 * 60 * 1000L) // 1 hour max
+            android.util.Log.d("SyncFlowCallScreen", "Wake lock acquired")
+        } catch (e: Exception) {
+            android.util.Log.e("SyncFlowCallScreen", "Failed to acquire wake lock", e)
+        }
+
+        // Keep screen on via window flags
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        android.util.Log.d("SyncFlowCallScreen", "Screen keep-on flag set")
+
+        onDispose {
+            // Release wake lock
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+                android.util.Log.d("SyncFlowCallScreen", "Wake lock released")
+            }
+            // Remove keep screen on flag
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            android.util.Log.d("SyncFlowCallScreen", "Screen keep-on flag cleared")
+        }
+    }
+
+    // Handle lifecycle events to prevent issues when app goes to background
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    android.util.Log.d("SyncFlowCallScreen", "Lifecycle: ON_PAUSE - keeping call active")
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    android.util.Log.d("SyncFlowCallScreen", "Lifecycle: ON_RESUME - refreshing video")
+                    // Re-enable video if it was enabled before
+                    if (currentCall?.isVideo == true && isVideoEnabled) {
+                        callManager.refreshVideoTrack()
+                    }
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    android.util.Log.d("SyncFlowCallScreen", "Lifecycle: ON_STOP")
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Log state for debugging
     LaunchedEffect(callState, currentCall, localVideoTrack, remoteVideoTrack) {
@@ -362,30 +431,65 @@ fun VideoRenderer(
 ) {
     var rendererRef by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
     var localEglBase by remember { mutableStateOf<org.webrtc.EglBase?>(null) }
+    var isInitialized by remember { mutableStateOf(false) }
+    var currentTrackId by remember { mutableStateOf<String?>(null) }
 
     // Track the video track to handle changes
-    val currentVideoTrack = remember(videoTrack) { videoTrack }
+    val trackId = remember(videoTrack) { videoTrack.id() }
 
-    DisposableEffect(currentVideoTrack) {
-        // When video track changes, update the sink
-        rendererRef?.let { renderer ->
+    // Handle video track changes - re-add sink when track changes
+    DisposableEffect(videoTrack, trackId) {
+        val renderer = rendererRef
+        if (renderer != null && isInitialized) {
             try {
-                currentVideoTrack.addSink(renderer)
-                android.util.Log.d("VideoRenderer", "Added sink for track: $currentVideoTrack, mirror: $mirror")
+                // Remove old track sink if different track
+                if (currentTrackId != null && currentTrackId != trackId) {
+                    android.util.Log.d("VideoRenderer", "Track changed from $currentTrackId to $trackId")
+                }
+                videoTrack.addSink(renderer)
+                currentTrackId = trackId
+                android.util.Log.d("VideoRenderer", "Added sink for track: $trackId, mirror: $mirror")
             } catch (e: Exception) {
                 android.util.Log.e("VideoRenderer", "Error adding sink", e)
             }
         }
 
         onDispose {
-            rendererRef?.let { renderer ->
+            renderer?.let { r ->
                 try {
-                    currentVideoTrack.removeSink(renderer)
-                    android.util.Log.d("VideoRenderer", "Removed sink for track: $currentVideoTrack")
+                    videoTrack.removeSink(r)
+                    android.util.Log.d("VideoRenderer", "Removed sink for track: $trackId")
                 } catch (e: Exception) {
                     android.util.Log.e("VideoRenderer", "Error removing sink", e)
                 }
             }
+        }
+    }
+
+    // Ensure renderer stays active during lifecycle
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, rendererRef) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    // Re-add sink on resume to ensure video continues
+                    rendererRef?.let { renderer ->
+                        try {
+                            if (isInitialized) {
+                                videoTrack.addSink(renderer)
+                                android.util.Log.d("VideoRenderer", "Re-added sink on resume")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("VideoRenderer", "Error re-adding sink on resume", e)
+                        }
+                    }
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -406,24 +510,42 @@ fun VideoRenderer(
                     setMirror(mirror)
                     setEnableHardwareScaler(true)
                     setZOrderMediaOverlay(mirror) // Local video should be on top
+                    setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
                     android.util.Log.d("VideoRenderer", "SurfaceViewRenderer initialized, mirror: $mirror")
                     rendererRef = this
+                    isInitialized = true
                     // Add sink after initialization
                     videoTrack.addSink(this)
-                    android.util.Log.d("VideoRenderer", "Initial sink added for track: $videoTrack")
+                    currentTrackId = trackId
+                    android.util.Log.d("VideoRenderer", "Initial sink added for track: $trackId")
                 } catch (e: Exception) {
                     android.util.Log.e("VideoRenderer", "Error initializing renderer", e)
                 }
             }
         },
         modifier = modifier,
+        update = { renderer ->
+            // Handle updates - ensure sink is attached
+            try {
+                if (isInitialized && currentTrackId != trackId) {
+                    videoTrack.addSink(renderer)
+                    currentTrackId = trackId
+                    android.util.Log.d("VideoRenderer", "Updated sink for new track: $trackId")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VideoRenderer", "Error in update", e)
+            }
+        },
         onRelease = { renderer ->
             try {
                 videoTrack.removeSink(renderer)
+                renderer.clearImage()
                 renderer.release()
                 localEglBase?.release()
                 localEglBase = null
                 rendererRef = null
+                isInitialized = false
+                currentTrackId = null
                 android.util.Log.d("VideoRenderer", "Renderer released")
             } catch (e: Exception) {
                 android.util.Log.e("VideoRenderer", "Error releasing renderer", e)

@@ -464,6 +464,8 @@
           ".indexOn": ["status", "startedAt", "callerId", "calleeId"]
         },
         "call_commands": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           "$commandId": {
             ".validate": "newData.hasChildren(['command', 'callId'])",
             "command": {
@@ -471,6 +473,29 @@
             },
             "callId": {
               ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "processed": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "phoneNumber": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          },
+          ".indexOn": ["timestamp", "processed"]
+        },
+        "audio_routing_requests": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$requestId": {
+            ".validate": "newData.hasChildren(['callId', 'enable'])",
+            "callId": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "enable": {
+              ".validate": "newData.isBoolean()"
             },
             "processed": {
               ".validate": "!newData.exists() || newData.isBoolean()"
@@ -649,6 +674,8 @@
           ".indexOn": ["displayName"]
         },
         "webrtc_signaling": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           "$callId": {
             "offer": {
               ".validate": "!newData.exists() || newData.hasChildren(['sdp', 'type'])",
@@ -657,18 +684,26 @@
               },
               "type": {
                 ".validate": "newData.isString()"
+              },
+              "timestamp": {
+                ".validate": "!newData.exists() || newData.isNumber()"
               }
             },
             "answer": {
-              ".validate": "!newData.exists() || newData.hasChildren(['sdp', 'type'])",
-              "sdp": {
-                ".validate": "newData.isString()"
-              },
-              "type": {
-                ".validate": "newData.isString()"
+              "$answerId": {
+                ".validate": "newData.hasChildren(['sdp', 'type'])",
+                "sdp": {
+                  ".validate": "newData.isString()"
+                },
+                "type": {
+                  ".validate": "newData.isString()"
+                },
+                "timestamp": {
+                  ".validate": "!newData.exists() || newData.isNumber()"
+                }
               }
             },
-            "ice_candidates": {
+            "ice_candidates_android": {
               "$candidateId": {
                 "candidate": {
                   ".validate": "newData.isString()"
@@ -677,6 +712,25 @@
                   ".validate": "!newData.exists() || newData.isString()"
                 },
                 "sdpMLineIndex": {
+                  ".validate": "!newData.exists() || newData.isNumber()"
+                },
+                "timestamp": {
+                  ".validate": "!newData.exists() || newData.isNumber()"
+                }
+              }
+            },
+            "ice_candidates_desktop": {
+              "$candidateId": {
+                "candidate": {
+                  ".validate": "newData.isString()"
+                },
+                "sdpMid": {
+                  ".validate": "!newData.exists() || newData.isString()"
+                },
+                "sdpMLineIndex": {
+                  ".validate": "!newData.exists() || newData.isNumber()"
+                },
+                "timestamp": {
                   ".validate": "!newData.exists() || newData.isNumber()"
                 }
               }
@@ -691,11 +745,32 @@
           ".indexOn": ["timestamp", "status"]
         },
         "incoming_syncflow_calls": {
-          ".read": "auth != null && auth.uid == $uid",
+          ".read": "auth != null",
           ".write": "auth != null",
           "$callId": {
             ".read": "auth != null && (auth.uid == $uid || data.child('callerUid').val() == auth.uid)",
-            ".validate": "newData.hasChildren(['callerUid', 'callType', 'status'])"
+            ".write": "auth != null && (auth.uid == $uid || data.child('callerUid').val() == auth.uid)",
+            ".validate": "newData.hasChildren(['callerUid', 'callType', 'status'])",
+            "answer": {
+              ".read": "auth != null",
+              ".write": "auth != null && auth.uid == $uid"
+            },
+            "offer": {
+              ".read": "auth != null",
+              ".write": "auth != null"
+            },
+            "ice_caller": {
+              ".read": "auth != null",
+              ".write": "auth != null"
+            },
+            "ice_callee": {
+              ".read": "auth != null",
+              ".write": "auth != null && auth.uid == $uid"
+            },
+            "status": {
+              ".read": "auth != null",
+              ".write": "auth != null && (auth.uid == $uid || data.parent().child('callerUid').val() == auth.uid)"
+            }
           },
           ".indexOn": ["status", "startedAt", "callerUid"]
         },
@@ -775,6 +850,44 @@
           "codeHash": {
             ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 64)"
           }
+        },
+        "sync_requests": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$requestId": {
+            ".validate": "newData.hasChildren(['days', 'status', 'requestedAt'])",
+            "days": {
+              ".validate": "newData.isNumber()"
+            },
+            "status": {
+              ".validate": "newData.isString() && (newData.val() == 'pending' || newData.val() == 'in_progress' || newData.val() == 'completed' || newData.val() == 'failed')"
+            },
+            "requestedAt": {
+              ".validate": "newData.isNumber()"
+            },
+            "requestedBy": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "startedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "completedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "failedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "syncedMessages": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "totalMessages": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "error": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          },
+          ".indexOn": ["status", "requestedAt"]
         }
       }
     },

@@ -51,7 +51,6 @@ class HotspotControlService: ObservableObject {
             }
         }
 
-        print("HotspotControlService: Started listening")
     }
 
     /// Stop listening
@@ -66,7 +65,6 @@ class HotspotControlService: ObservableObject {
 
         statusHandle = nil
         currentUserId = nil
-        print("HotspotControlService: Stopped listening")
     }
 
     /// Toggle hotspot on phone
@@ -97,7 +95,6 @@ class HotspotControlService: ObservableObject {
     /// Send command to phone
     private func sendCommand(_ action: String) {
         guard let userId = currentUserId else {
-            print("HotspotControlService: No user ID")
             return
         }
 
@@ -115,7 +112,6 @@ class HotspotControlService: ObservableObject {
             if let error = error {
                 print("HotspotControlService: Error sending command: \(error)")
             } else {
-                print("HotspotControlService: Sent command: \(action)")
             }
         }
     }

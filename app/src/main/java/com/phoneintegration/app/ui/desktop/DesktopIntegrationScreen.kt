@@ -26,6 +26,7 @@ import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.desktop.NotificationMirrorService
 import com.phoneintegration.app.desktop.PhotoSyncService
 import com.phoneintegration.app.SmsRepository
+import com.phoneintegration.app.CallMonitorService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +34,9 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.tasks.await
 import androidx.compose.material3.Switch
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 /**
  * Global cache for paired devices - survives screen navigation
@@ -139,6 +143,22 @@ fun DesktopIntegrationScreen(
         isBackgroundSyncEnabled = preferencesManager.backgroundSyncEnabled.value
         hasNotificationPermission = NotificationMirrorService.isEnabled(appContext)
         isNotificationMirrorEnabled = preferencesManager.notificationMirrorEnabled.value
+        android.util.Log.d("DesktopIntegrationScreen", "Settings refreshed: notificationPermission=$hasNotificationPermission, mirrorEnabled=$isNotificationMirrorEnabled")
+    }
+
+    // Refresh settings when screen resumes (e.g., after returning from system settings)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                android.util.Log.d("DesktopIntegrationScreen", "Screen resumed, refreshing settings")
+                refreshSettings()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // Simple, reliable device loading function
@@ -195,6 +215,9 @@ fun DesktopIntegrationScreen(
                         PairedDevicesCache.userPlan = deviceInfo.plan
                         PairedDevicesCache.canAddDevice = deviceInfo.canAddDevice
                         android.util.Log.d("DesktopIntegrationScreen", "Cache updated: ${desktopDevices.size} desktop devices, total count=${deviceInfo.deviceCount}/${deviceInfo.deviceLimit}")
+
+                        // Update fast-check cache for sync operations
+                        DesktopSyncService.updatePairedDevicesCache(appContext, desktopDevices.isNotEmpty(), desktopDevices.size)
                     }
                 } else {
                     android.util.Log.w("DesktopIntegrationScreen", "getDeviceInfo returned null, falling back to getPairedDevices")
@@ -217,13 +240,13 @@ fun DesktopIntegrationScreen(
         }
     }
 
-    // Sync initial messages after successful pairing
+    // Sync initial messages after successful pairing (last 30 days)
     suspend fun syncInitialMessages() {
         try {
-            android.util.Log.d("DesktopIntegrationScreen", "Starting initial message sync")
+            android.util.Log.d("DesktopIntegrationScreen", "Starting initial message sync (last 30 days)")
             val smsRepository = SmsRepository(appContext)
-            val messages = smsRepository.getAllRecentMessages(limit = 2000)
-            android.util.Log.d("DesktopIntegrationScreen", "Retrieved ${messages.size} messages for sync")
+            val messages = smsRepository.getMessagesFromLastDays(days = 30)
+            android.util.Log.d("DesktopIntegrationScreen", "Retrieved ${messages.size} messages from last 30 days for sync")
 
             if (messages.isNotEmpty()) {
                 desktopSyncService.syncMessages(messages)
@@ -419,6 +442,10 @@ fun DesktopIntegrationScreen(
                                         showSuccessDialog = true
                                         android.util.Log.d("DesktopIntegrationScreen", "SUCCESS DIALOG STATE SET: showSuccessDialog=$showSuccessDialog, successMessage=$successMessage")
 
+                                        // Start CallMonitorService to sync phone calls to Mac
+                                        android.util.Log.d("DesktopIntegrationScreen", "Starting CallMonitorService for phone call sync")
+                                        CallMonitorService.start(context)
+
                                         // Trigger initial data sync immediately
                                         kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
                                             try {
@@ -456,6 +483,8 @@ fun DesktopIntegrationScreen(
                                     is CompletePairingResult.Approved -> {
                                         successMessage = "Successfully paired with desktop device!"
                                         showSuccessDialog = true
+                                        // Start CallMonitorService for phone call sync
+                                        CallMonitorService.start(context)
                                         kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
                                             try {
                                                 syncInitialMessages()
@@ -697,66 +726,66 @@ fun DesktopIntegrationScreen(
                 }
             }
 
-            // Paired Devices Section
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Paired Devices (${pairedDevices.size})",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // Refresh button
-                        IconButton(
-                            onClick = { loadDevices(forceRefresh = true) },
-                            enabled = !isLoadingDevices
-                        ) {
-                            if (isLoadingDevices) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(Icons.Default.Refresh, "Refresh")
+            // Only show Paired Devices section when devices exist or loading
+            if (pairedDevices.isNotEmpty() || isLoadingDevices) {
+                // Paired Devices Section
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Paired Devices (${pairedDevices.size})",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Refresh button
+                            IconButton(
+                                onClick = { loadDevices(forceRefresh = true) },
+                                enabled = !isLoadingDevices
+                            ) {
+                                if (isLoadingDevices) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Refresh, "Refresh")
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Show loading indicator
-            if (isLoadingDevices && pairedDevices.isEmpty()) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                strokeWidth = 2.dp
+                // Show loading indicator
+                if (isLoadingDevices && pairedDevices.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
                             )
-                            Spacer(modifier = Modifier.width(16.dp))
-                            Text("Loading devices...")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Text("Loading devices...")
+                            }
                         }
                     }
                 }
-            }
 
-            // Show paired devices list
-            if (pairedDevices.isNotEmpty()) {
-
+                // Show paired devices list
                 items(pairedDevices) { device ->
                     PairedDeviceItem(
                         device = device,
@@ -768,6 +797,8 @@ fun DesktopIntegrationScreen(
                                     result.onSuccess {
                                         successMessage = "Successfully unpaired ${device.name}"
                                         showSuccessDialog = true
+                                        // Update cache when device is unpaired
+                                        DesktopSyncService.updatePairedDevicesCache(appContext, false, 0)
                                         loadDevices(forceRefresh = true)
                                     }.onFailure { error ->
                                         errorMessage = error.message ?: "Failed to unpair device"
@@ -781,7 +812,7 @@ fun DesktopIntegrationScreen(
                         }
                     )
                 }
-            }
+            } // End of paired devices section
 
             // Show "No devices" only when not loading and list is empty
             if (!isLoadingDevices && pairedDevices.isEmpty()) {
@@ -836,30 +867,31 @@ fun DesktopIntegrationScreen(
                 }
             }
 
-            // Sync Settings Section
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Sync Settings",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(vertical = 16.dp)
-                    )
-                    IconButton(
-                        onClick = { refreshSettings() },
-                        modifier = Modifier.padding(vertical = 16.dp)
+            // Sync Settings Section - only show when devices are paired
+            if (pairedDevices.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            "Refresh Settings",
-                            tint = MaterialTheme.colorScheme.primary
+                        Text(
+                            text = "Sync Settings",
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.padding(vertical = 16.dp)
                         )
+                        IconButton(
+                            onClick = { refreshSettings() },
+                            modifier = Modifier.padding(vertical = 16.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                "Refresh Settings",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
-            }
 
             // Background Sync Setting
             item {
@@ -1006,6 +1038,7 @@ fun DesktopIntegrationScreen(
                     }
                 }
             }
+            } // End of Sync Settings section (only shown when devices are paired)
 
             // Recovery Code Section
             item {

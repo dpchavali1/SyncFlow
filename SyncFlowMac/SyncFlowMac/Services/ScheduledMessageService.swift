@@ -74,7 +74,6 @@ class ScheduledMessageService: ObservableObject {
             }
         }
 
-        print("ScheduledMessageService: Started listening")
     }
 
     /// Stop listening
@@ -90,7 +89,6 @@ class ScheduledMessageService: ObservableObject {
         messagesHandle = nil
         currentUserId = nil
         scheduledMessages = []
-        print("ScheduledMessageService: Stopped listening")
     }
 
     // MARK: - Schedule Messages
@@ -135,7 +133,6 @@ class ScheduledMessageService: ObservableObject {
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else {
-                    print("ScheduledMessageService: Message scheduled for \(scheduledTime)")
                     continuation.resume()
                 }
             }
@@ -164,7 +161,6 @@ class ScheduledMessageService: ObservableObject {
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else {
-                    print("ScheduledMessageService: Message cancelled: \(messageId)")
                     continuation.resume()
                 }
             }
@@ -188,7 +184,6 @@ class ScheduledMessageService: ObservableObject {
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else {
-                    print("ScheduledMessageService: Message deleted: \(messageId)")
                     continuation.resume()
                 }
             }
@@ -307,6 +302,5 @@ class ScheduledMessageService: ObservableObject {
     /// Pause all scheduled messages temporarily
     func pauseAll() {
         // This would cancel all pending scheduled messages
-        print("ScheduledMessageService: Paused all scheduled messages")
     }
 }

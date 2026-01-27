@@ -20,8 +20,7 @@ Common database paths used across clients (from code references):
 - `users/{userId}/messages` (SMS/MMS records, E2EE metadata)
 - `users/{userId}/outgoing_messages` (desktop/web -> Android send queue)
 - `users/{userId}/devices` (paired devices, lastSeen)
-- `users/{userId}/contacts` (Android contacts)
-- `users/{userId}/desktopContacts` (desktop-created contacts)
+- `users/{userId}/contacts` (unified contacts feed; Android data plus desktop/web edits marked by `sync.pendingAndroidSync`)
 - `e2ee_keys/{userId}/{deviceId}` (per-device public keys)
 - `pairing_tokens/{token}` (Cloud Function pairing tokens)
 - `pending_pairings/{token}` (web-initiated QR pairing flow)
@@ -91,7 +90,7 @@ Key responsibilities:
 - Web pairing and session persistence (localStorage for `syncflow_user_id`).
 - Reads messages from Firebase and decrypts when per-device keys are available.
 - Writes to `outgoing_messages` for Android to send.
-- Supports contact management (desktopContacts + contacts read).
+- Supports contact management via the unified `contacts` node (desktop/web edits toggle `sync.pendingAndroidSync`).
 
 Pairing flows:
 - Web-initiated QR flow uses `pending_pairings/{token}` (see `generatePairingToken`).
@@ -101,7 +100,7 @@ Pairing flows:
 - SMS/MMS ingest: Android reads messages -> writes to `users/{uid}/messages` (encrypted when enabled).
 - Message consumption: macOS/web clients listen to `users/{uid}/messages`, decrypt via `e2ee_keys`.
 - Outgoing from desktop/web: write to `users/{uid}/outgoing_messages`; Android service sends and records.
-- Contacts sync: Android writes `users/{uid}/contacts`; web reads and can write `desktopContacts`.
+- Contacts sync: Android writes `users/{uid}/contacts`; desktop/web clients also write to the same path, setting `sync.pendingAndroidSync` for Android to pull.
 - Calls: Android updates call state and FCM queues; functions dispatch push via `fcm_notifications`.
 - Media/attachments: stored in Firebase Storage; message entries carry attachment metadata.
 

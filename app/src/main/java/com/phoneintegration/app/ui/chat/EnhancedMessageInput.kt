@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.phoneintegration.app.speech.VoiceRecognitionState
@@ -114,6 +115,14 @@ fun EnhancedMessageInput(
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
     ) {
+        // Word Prediction Bar (shows when typing)
+        WordPredictionBar(
+            currentInput = value,
+            onSuggestionSelected = onValueChange,
+            isKeyboardVisible = value.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth()
+        )
+
         // Smart Replies Row
         if (smartReplies.isNotEmpty()) {
             Row(
@@ -255,7 +264,11 @@ fun EnhancedMessageInput(
                     modifier = Modifier.weight(1f),
                     placeholder = { Text("Write a message…") },
                     maxLines = 5,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                        autoCorrect = true,
+                        imeAction = ImeAction.Send
+                    ),
                     keyboardActions = KeyboardActions(
                         onSend = {
                             if (value.isNotBlank()) {

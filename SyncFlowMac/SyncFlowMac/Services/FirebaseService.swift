@@ -186,14 +186,12 @@ class FirebaseService {
             // If signed in with a device token (from previous pairing), sign out first
             // Device tokens expire and cause permission_denied errors
             if currentUser.uid.hasPrefix("device_") {
-                print("[Firebase] V2: Current user \(currentUser.uid) is a device token - signing out to get fresh auth")
                 try? auth.signOut()
             }
         }
 
         // Sign in anonymously to get fresh credentials for listening
         if auth.currentUser == nil {
-            print("[Firebase] V2: Signing in anonymously for pairing listener")
             _ = try await auth.signInAnonymously()
         }
 
@@ -204,7 +202,6 @@ class FirebaseService {
             "appVersion": appVersion
         ]
 
-        print("[Firebase] Initiating V2 pairing with deviceId: \(deviceId), user: \(auth.currentUser?.uid ?? "none")")
 
         let result = try await functions
             .httpsCallable("initiatePairingV2")
@@ -219,7 +216,6 @@ class FirebaseService {
             throw FirebaseError.invalidTokenData
         }
 
-        print("[Firebase] V2 pairing session created, token: \(token.prefix(8))...")
 
         return PairingSession(
             token: token,
@@ -275,7 +271,6 @@ class FirebaseService {
     /// - Version 1: pending_pairings (legacy system)
     func listenForPairingApproval(token: String, version: Int = 2, completion: @escaping (PairingStatus) -> Void) -> DatabaseHandle {
         let path = version == 2 ? "pairing_requests" : "pending_pairings"
-        print("[Firebase] Setting up pairing listener on path: \(path)/\(token.prefix(8))... (version: \(version))")
         return listenForPairingApprovalOnPath(token: token, path: path, completion: completion)
     }
 
@@ -288,7 +283,6 @@ class FirebaseService {
         let handle = pairingRef.observe(.value) { [weak self] snapshot in
             guard let self = self else { return }
 
-            print("[Firebase] Pairing status update for token \(token.prefix(8)): exists=\(snapshot.exists()), path=\(path)")
 
             guard snapshot.exists(),
                   let data = snapshot.value as? [String: Any] else {
@@ -297,7 +291,6 @@ class FirebaseService {
                 return
             }
 
-            print("[Firebase] Pairing data received: \(data)")
 
             let now = Date().timeIntervalSince1970 * 1000
             if let expiresAt = data["expiresAt"] as? Double, now > expiresAt {
@@ -362,7 +355,6 @@ class FirebaseService {
 
             guard snapshot.exists(),
                   let data = snapshot.value as? [String: Any] else {
-                print("[Firebase] Token not found in V1 or V2 paths")
                 completion(.expired)
                 return
             }
@@ -399,7 +391,7 @@ class FirebaseService {
                             completion(.approved(pairedUid: pairedUid, deviceId: data["deviceId"] as? String))
                         }
                     } catch {
-                        print("[Firebase] V1 Failed to sign in: \(error)")
+                        print("[Firebase] V2 Failed to sign in: \(error)")
                         await MainActor.run {
                             completion(.expired)
                         }
@@ -1489,13 +1481,10 @@ class FirebaseService {
             .child(userId)
             .child("contacts")
 
-        print("[Firebase] Starting contacts listener for user: \(userId)")
 
         let handle = contactsRef.observe(.value) { snapshot in
-            print("[Firebase] Contacts snapshot received: exists=\(snapshot.exists()), childrenCount=\(snapshot.childrenCount)")
 
             guard snapshot.exists() else {
-                print("[Firebase] No contacts data found for user: \(userId)")
                 completion([])
                 return
             }
@@ -1518,7 +1507,6 @@ class FirebaseService {
                 }
             }
 
-            print("[Firebase] Parsed \(contacts.count) contacts, \(parseFailCount) failed")
 
             // Sort by display name
             contacts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -1774,7 +1762,18 @@ class FirebaseService {
             }
 
             var calls: [ActiveCall] = []
+            let currentTime = Date().timeIntervalSince1970 * 1000 // Convert to milliseconds
+            let maxAge: Double = 30000 // 30 seconds - calls older than this are stale
+
             for (callId, callData) in callsDict {
+                // Check if call is stale (older than 30 seconds)
+                if let timestamp = callData["timestamp"] as? Double {
+                    let age = currentTime - timestamp
+                    if age > maxAge {
+                        continue
+                    }
+                }
+
                 if let call = ActiveCall.from(callData, id: callId) {
                     calls.append(call)
                 }
@@ -1835,25 +1834,6 @@ class FirebaseService {
         }
 
         try await callRequestRef.setValue(requestData)
-    }
-
-    // MARK: - Audio Routing (Call Transfer)
-
-    func requestAudioRouting(userId: String, callId: String, enable: Bool) async throws {
-        let routingRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("audio_routing_requests")
-            .childByAutoId()
-
-        let payload: [String: Any] = [
-            "callId": callId,
-            "enable": enable,
-            "processed": false,
-            "timestamp": ServerValue.timestamp()
-        ]
-
-        try await routingRef.setValue(payload)
     }
 
     // MARK: - SyncFlow Calls
@@ -2195,6 +2175,8 @@ extension FirebaseService {
         messages.sort { $0.date > $1.date }
         return messages
     }
+
+    // MARK: - Sync History Requests
 }
 
 // MARK: - Pairing Session

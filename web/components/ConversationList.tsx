@@ -1,57 +1,179 @@
 'use client'
 
-import { useMemo, useState, useRef, useEffect } from 'react'
+import { useMemo, useState, useRef, useEffect, useCallback, memo } from 'react'
 import { Search, User, GripVertical, X } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { format } from 'date-fns'
 
 interface Conversation {
   address: string
-  normalizedAddress: string  // For deduplication
-  allAddresses: string[]     // All addresses that map to this conversation
+  normalizedAddress: string
+  allAddresses: string[]
   contactName?: string
   lastMessage: string
   timestamp: number
   unreadCount: number
 }
 
-// Normalize phone number for comparison (same logic as Android app)
+// LRU Cache for phone number normalization
+const normalizationCache = new Map<string, string>()
+const MAX_CACHE_SIZE = 1000
+
 function normalizePhoneNumber(address: string): string {
+  // Check cache first
+  const cached = normalizationCache.get(address)
+  if (cached !== undefined) return cached
+
+  let result: string
   // Skip non-phone addresses (email, short codes, etc.)
   if (address.includes('@') || address.length < 6) {
-    return address.toLowerCase()
+    result = address.toLowerCase()
+  } else {
+    // Remove all non-digit characters
+    const digitsOnly = address.replace(/[^0-9]/g, '')
+    // For comparison, use last 10 digits (handles country code differences)
+    result = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly
   }
 
-  // Remove all non-digit characters
-  const digitsOnly = address.replace(/[^0-9]/g, '')
-
-  // For comparison, use last 10 digits (handles country code differences)
-  if (digitsOnly.length >= 10) {
-    return digitsOnly.slice(-10)
+  // Add to cache with LRU eviction
+  if (normalizationCache.size >= MAX_CACHE_SIZE) {
+    const firstKey = normalizationCache.keys().next().value
+    if (firstKey) normalizationCache.delete(firstKey)
   }
-  return digitsOnly
+  normalizationCache.set(address, result)
+  return result
 }
 
+// Debounce hook
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value)
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedValue(value), delay)
+    return () => clearTimeout(timer)
+  }, [value, delay])
+
+  return debouncedValue
+}
+
+// Memoized conversation item component
+const ConversationItem = memo(function ConversationItem({
+  conv,
+  isSelected,
+  onClick,
+}: {
+  conv: Conversation
+  isSelected: boolean
+  onClick: () => void
+}) {
+  return (
+    <div
+      onClick={onClick}
+      className={`p-4 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
+        isSelected
+          ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-l-blue-600'
+          : ''
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white font-semibold flex-shrink-0">
+          {(conv.contactName || conv.address).charAt(0).toUpperCase()}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline justify-between mb-1">
+            <h3 className="font-semibold text-gray-900 dark:text-white truncate">
+              {conv.contactName || conv.address}
+            </h3>
+            <span className="text-xs text-gray-500 dark:text-gray-400 ml-2 flex-shrink-0">
+              {format(new Date(conv.timestamp), 'MMM d')}
+            </span>
+          </div>
+
+          <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
+            {conv.lastMessage}
+          </p>
+        </div>
+
+        {conv.unreadCount > 0 && (
+          <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center flex-shrink-0">
+            {conv.unreadCount}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+})
+
+// Memoized spam conversation item
+const SpamConversationItem = memo(function SpamConversationItem({
+  conv,
+  isSelected,
+  onClick,
+}: {
+  conv: { address: string; contactName?: string; lastMessage: string; timestamp: number; count: number }
+  isSelected: boolean
+  onClick: () => void
+}) {
+  return (
+    <div
+      onClick={onClick}
+      className={`p-4 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
+        isSelected
+          ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-l-red-600'
+          : ''
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 rounded-full bg-red-100 dark:bg-red-900/40 flex items-center justify-center text-red-600 font-semibold flex-shrink-0">
+          {(conv.contactName || conv.address).charAt(0).toUpperCase()}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline justify-between mb-1">
+            <h3 className="font-semibold text-gray-900 dark:text-white truncate">
+              {conv.contactName || conv.address}
+            </h3>
+            <span className="text-xs text-gray-500 dark:text-gray-400 ml-2 flex-shrink-0">
+              {format(new Date(conv.timestamp), 'MMM d')}
+            </span>
+          </div>
+
+          <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
+            {conv.lastMessage}
+          </p>
+        </div>
+
+        <div className="text-xs text-red-600 font-semibold px-2 py-1 bg-red-50 dark:bg-red-900/30 rounded-full">
+          {conv.count}
+        </div>
+      </div>
+    </div>
+  )
+})
+
 export default function ConversationList() {
-  const {
-    messages,
-    readReceipts,
-    selectedConversation,
-    setSelectedConversation,
-    spamMessages,
-    selectedSpamAddress,
-    setSelectedSpamAddress,
-    activeFolder,
-    setActiveFolder,
-    isSidebarOpen,
-    setIsConversationListVisible,
-  } = useAppStore()
+  // Use selectors to minimize re-renders
+  const messages = useAppStore((state) => state.messages)
+  const readReceipts = useAppStore((state) => state.readReceipts)
+  const selectedConversation = useAppStore((state) => state.selectedConversation)
+  const setSelectedConversation = useAppStore((state) => state.setSelectedConversation)
+  const spamMessages = useAppStore((state) => state.spamMessages)
+  const selectedSpamAddress = useAppStore((state) => state.selectedSpamAddress)
+  const setSelectedSpamAddress = useAppStore((state) => state.setSelectedSpamAddress)
+  const activeFolder = useAppStore((state) => state.activeFolder)
+  const setActiveFolder = useAppStore((state) => state.setActiveFolder)
+  const isSidebarOpen = useAppStore((state) => state.isSidebarOpen)
+  const setIsConversationListVisible = useAppStore((state) => state.setIsConversationListVisible)
+
   const [searchQuery, setSearchQuery] = useState('')
-  const [width, setWidth] = useState(320) // Default width in pixels
+  const [width, setWidth] = useState(320)
   const [isResizing, setIsResizing] = useState(false)
   const resizeRef = useRef<HTMLDivElement>(null)
 
-  // Min and max width constraints
+  // Debounce search query for better performance
+  const debouncedSearchQuery = useDebounce(searchQuery, 150)
+
   const MIN_WIDTH = 250
   const MAX_WIDTH = 500
 
@@ -95,11 +217,11 @@ export default function ConversationList() {
     }
   }, [isResizing])
 
-  // Group messages by normalized address to create deduplicated conversations
+  // Group messages by normalized address - optimized with cached normalization
   const conversations = useMemo(() => {
     const convMap = new Map<string, Conversation>()
 
-    messages.forEach((msg) => {
+    for (const msg of messages) {
       const normalized = normalizePhoneNumber(msg.address)
       const existing = convMap.get(normalized)
       const isUnread =
@@ -108,7 +230,6 @@ export default function ConversationList() {
         !readReceipts[msg.id]
 
       if (!existing) {
-        // New conversation
         convMap.set(normalized, {
           address: msg.address,
           normalizedAddress: normalized,
@@ -119,16 +240,13 @@ export default function ConversationList() {
           unreadCount: isUnread ? 1 : 0,
         })
       } else {
-        // Update existing conversation if this message is newer
         if (msg.date > existing.timestamp) {
           existing.lastMessage = msg.body
           existing.timestamp = msg.date
-          // Prefer the contact name if available
           if (msg.contactName && !existing.contactName) {
             existing.contactName = msg.contactName
           }
         }
-        // Track all addresses that map to this conversation
         if (!existing.allAddresses.includes(msg.address)) {
           existing.allAddresses.push(msg.address)
         }
@@ -136,14 +254,15 @@ export default function ConversationList() {
           existing.unreadCount += 1
         }
       }
-    })
+    }
 
     return Array.from(convMap.values()).sort((a, b) => b.timestamp - a.timestamp)
   }, [messages, readReceipts, readReceiptsBaseline])
 
   const spamConversations = useMemo(() => {
     const grouped = new Map<string, { address: string; contactName?: string; lastMessage: string; timestamp: number; count: number }>()
-    spamMessages.forEach((msg) => {
+
+    for (const msg of spamMessages) {
       const existing = grouped.get(msg.address)
       if (!existing) {
         grouped.set(msg.address, {
@@ -163,34 +282,37 @@ export default function ConversationList() {
           }
         }
       }
-    })
+    }
     return Array.from(grouped.values()).sort((a, b) => b.timestamp - a.timestamp)
   }, [spamMessages])
 
-  // Filter conversations by search query
+  // Filter with debounced search query
   const filteredConversations = useMemo(() => {
-    if (!searchQuery.trim()) return conversations
+    if (!debouncedSearchQuery.trim()) return conversations
 
-    const query = searchQuery.toLowerCase()
+    const query = debouncedSearchQuery.toLowerCase()
     const queryDigits = query.replace(/[^0-9]/g, '')
-    return conversations.filter(conv =>
-      (conv.contactName?.toLowerCase().includes(query)) ||
-      conv.address.toLowerCase().includes(query) ||
-      conv.lastMessage.toLowerCase().includes(query) ||
-      (queryDigits.length > 0 && (() => {
+
+    return conversations.filter(conv => {
+      if (conv.contactName?.toLowerCase().includes(query)) return true
+      if (conv.address.toLowerCase().includes(query)) return true
+      if (conv.lastMessage.toLowerCase().includes(query)) return true
+
+      if (queryDigits.length > 0) {
         const addressDigits = conv.address.replace(/[^0-9]/g, '')
-        const normalized = normalizePhoneNumber(conv.address)
+        const normalized = conv.normalizedAddress
         return addressDigits.includes(queryDigits) ||
           queryDigits.includes(addressDigits) ||
           normalized.includes(queryDigits) ||
           queryDigits.includes(normalized)
-      })())
-    )
-  }, [conversations, searchQuery])
+      }
+      return false
+    })
+  }, [conversations, debouncedSearchQuery])
 
   const filteredSpamConversations = useMemo(() => {
-    if (!searchQuery.trim()) return spamConversations
-    const query = searchQuery.toLowerCase()
+    if (!debouncedSearchQuery.trim()) return spamConversations
+    const query = debouncedSearchQuery.toLowerCase()
     const queryDigits = query.replace(/[^0-9]/g, '')
     return spamConversations.filter(conv =>
       (conv.contactName?.toLowerCase().includes(query)) ||
@@ -198,7 +320,26 @@ export default function ConversationList() {
       conv.lastMessage.toLowerCase().includes(query) ||
       (queryDigits.length > 0 && conv.address.replace(/[^0-9]/g, '').includes(queryDigits))
     )
-  }, [spamConversations, searchQuery])
+  }, [spamConversations, debouncedSearchQuery])
+
+  // Memoized click handlers
+  const handleConversationClick = useCallback((normalizedAddress: string) => {
+    setSelectedConversation(normalizedAddress)
+  }, [setSelectedConversation])
+
+  const handleSpamClick = useCallback((address: string) => {
+    setSelectedSpamAddress(address)
+  }, [setSelectedSpamAddress])
+
+  const handleInboxClick = useCallback(() => {
+    setActiveFolder('inbox')
+    setSelectedSpamAddress(null)
+  }, [setActiveFolder, setSelectedSpamAddress])
+
+  const handleSpamFolderClick = useCallback(() => {
+    setActiveFolder('spam')
+    setSelectedConversation(null)
+  }, [setActiveFolder, setSelectedConversation])
 
   if (!isSidebarOpen) {
     return null
@@ -209,25 +350,21 @@ export default function ConversationList() {
       className="relative bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col min-h-0 overflow-hidden"
       style={{ width: `${width}px`, minWidth: `${MIN_WIDTH}px`, maxWidth: `${MAX_WIDTH}px` }}
     >
-       {/* Search */}
-       <div className="flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700">
-         {/* Close Button */}
-         <div className="flex justify-end mb-3">
-           <button
-             onClick={() => setIsConversationListVisible(false)}
-             className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-             title="Hide conversation list"
-           >
-             <X className="w-4 h-4" />
-           </button>
-         </div>
-         <div className="flex items-center gap-2 mb-3">
+      {/* Search */}
+      <div className="flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex justify-end mb-3">
           <button
-            onClick={() => {
-              setActiveFolder('inbox')
-              setSelectedSpamAddress(null)
-            }}
-            className={`px-3 py-1 rounded-full text-xs font-medium ${
+            onClick={() => setIsConversationListVisible(false)}
+            className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            title="Hide conversation list"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex items-center gap-2 mb-3">
+          <button
+            onClick={handleInboxClick}
+            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
               activeFolder === 'inbox'
                 ? 'bg-blue-600 text-white'
                 : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
@@ -236,11 +373,8 @@ export default function ConversationList() {
             Inbox
           </button>
           <button
-            onClick={() => {
-              setActiveFolder('spam')
-              setSelectedConversation(null)
-            }}
-            className={`px-3 py-1 rounded-full text-xs font-medium ${
+            onClick={handleSpamFolderClick}
+            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
               activeFolder === 'spam'
                 ? 'bg-red-600 text-white'
                 : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
@@ -268,7 +402,7 @@ export default function ConversationList() {
             <div className="flex flex-col items-center justify-center h-full p-8 text-center">
               <User className="w-16 h-16 text-gray-300 dark:text-gray-600 mb-4" />
               <p className="text-gray-500 dark:text-gray-400 mb-2">
-                {searchQuery ? 'No spam matches found' : 'No spam messages'}
+                {debouncedSearchQuery ? 'No spam matches found' : 'No spam messages'}
               </p>
               <p className="text-sm text-gray-400 dark:text-gray-500">
                 Spam messages from your phone will appear here
@@ -276,95 +410,32 @@ export default function ConversationList() {
             </div>
           ) : (
             filteredSpamConversations.map((conv) => (
-              <div
+              <SpamConversationItem
                 key={conv.address}
-                onClick={() => {
-                  setSelectedSpamAddress(conv.address)
-                }}
-                className={`p-4 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
-                  selectedSpamAddress === conv.address
-                    ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-l-red-600'
-                    : ''
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="w-12 h-12 rounded-full bg-red-100 dark:bg-red-900/40 flex items-center justify-center text-red-600 font-semibold flex-shrink-0">
-                    {(conv.contactName || conv.address).charAt(0).toUpperCase()}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-between mb-1">
-                      <h3 className="font-semibold text-gray-900 dark:text-white truncate">
-                        {conv.contactName || conv.address}
-                      </h3>
-                      <span className="text-xs text-gray-500 dark:text-gray-400 ml-2 flex-shrink-0">
-                        {format(new Date(conv.timestamp), 'MMM d')}
-                      </span>
-                    </div>
-
-                    <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
-                      {conv.lastMessage}
-                    </p>
-                  </div>
-
-                  <div className="text-xs text-red-600 font-semibold px-2 py-1 bg-red-50 dark:bg-red-900/30 rounded-full">
-                    {conv.count}
-                  </div>
-                </div>
-              </div>
+                conv={conv}
+                isSelected={selectedSpamAddress === conv.address}
+                onClick={() => handleSpamClick(conv.address)}
+              />
             ))
           )
         ) : filteredConversations.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full p-8 text-center">
             <User className="w-16 h-16 text-gray-300 dark:text-gray-600 mb-4" />
             <p className="text-gray-500 dark:text-gray-400 mb-2">
-              {searchQuery ? 'No matches found' : 'No messages yet'}
+              {debouncedSearchQuery ? 'No matches found' : 'No messages yet'}
             </p>
             <p className="text-sm text-gray-400 dark:text-gray-500">
-              {searchQuery ? 'Try a different search term' : 'Messages from your phone will appear here'}
+              {debouncedSearchQuery ? 'Try a different search term' : 'Messages from your phone will appear here'}
             </p>
           </div>
         ) : (
           filteredConversations.map((conv) => (
-            <div
+            <ConversationItem
               key={conv.normalizedAddress}
-              onClick={() => setSelectedConversation(conv.normalizedAddress)}
-              className={`p-4 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
-                selectedConversation === conv.normalizedAddress
-                  ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-l-blue-600'
-                  : ''
-              }`}
-            >
-              <div className="flex items-start gap-3">
-                {/* Avatar */}
-                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white font-semibold flex-shrink-0">
-                  {(conv.contactName || conv.address).charAt(0).toUpperCase()}
-                </div>
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline justify-between mb-1">
-                    <h3 className="font-semibold text-gray-900 dark:text-white truncate">
-                      {conv.contactName || conv.address}
-                    </h3>
-                    <span className="text-xs text-gray-500 dark:text-gray-400 ml-2 flex-shrink-0">
-                      {format(new Date(conv.timestamp), 'MMM d')}
-                    </span>
-                  </div>
-
-                  <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
-                    {conv.lastMessage}
-                  </p>
-                </div>
-
-                {/* Unread badge */}
-                {conv.unreadCount > 0 && (
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center flex-shrink-0">
-                    {conv.unreadCount}
-                  </div>
-                )}
-              </div>
-            </div>
+              conv={conv}
+              isSelected={selectedConversation === conv.normalizedAddress}
+              onClick={() => handleConversationClick(conv.normalizedAddress)}
+            />
           ))
         )}
       </div>

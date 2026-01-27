@@ -64,7 +64,6 @@ class BatteryAwareServiceManager {
         )
 
         if newState != currentState {
-            print("[BatteryManager] State change: \(currentState) -> \(newState) (Battery: \(batteryLevel)%, Charging: \(isCharging))")
             currentState = newState
 
             // Notify all handlers
@@ -83,8 +82,13 @@ class BatteryAwareServiceManager {
         isLowPowerMode: Bool,
         systemLoad: Double
     ) -> ServiceState {
-        // Critical conditions
-        if isLowPowerMode || (batteryLevel < 10 && !isCharging) {
+        // If charging, always allow full operation - phone call listeners are critical
+        if isCharging {
+            return .full
+        }
+
+        // Critical conditions - only when NOT charging
+        if isLowPowerMode || batteryLevel < 10 {
             return .suspended
         }
 
@@ -262,7 +266,7 @@ class BatteryAwareServiceManager {
                 }
             }
         } catch {
-            print("[BatteryManager] Failed to get battery level: \(error)")
+            // Silently fail - default to 100%
         }
 
         return 100 // Default to 100% if unable to determine
@@ -285,7 +289,7 @@ class BatteryAwareServiceManager {
                 return output.contains("AC Power") || output.contains("charging") || output.contains("charged")
             }
         } catch {
-            print("[BatteryManager] Failed to check charging status: \(error)")
+            // Silently fail - assume not charging
         }
 
         return false
@@ -308,7 +312,7 @@ class BatteryAwareServiceManager {
                 return output.contains("lowpowermode") && output.contains("1")
             }
         } catch {
-            print("[BatteryManager] Failed to check low power mode: \(error)")
+            // Silently fail - assume low power mode is off
         }
 
         return false

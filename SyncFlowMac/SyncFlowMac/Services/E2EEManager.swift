@@ -37,7 +37,6 @@ class E2EEManager {
     /// Initialize E2EE keys - generates new keys if not exists
     func initializeKeys() async throws {
         if privateKey != nil {
-            print("[E2EE] Keys already initialized")
             try await publishDevicePublicKey()
             return
         }
@@ -57,7 +56,6 @@ class E2EEManager {
         try await publishPublicKeyToFirebase()
         try await publishDevicePublicKey()
 
-        print("[E2EE] Keys initialized successfully")
     }
 
     /// Check if E2EE is initialized
@@ -68,7 +66,6 @@ class E2EEManager {
     /// Load existing keys from Keychain
     private func loadExistingKeys() {
         guard let privateKeyData = loadFromKeychain(tag: privateKeyTag) else {
-            print("[E2EE] No existing keys found")
             return
         }
 
@@ -76,7 +73,6 @@ class E2EEManager {
             let rawRepresentation = privateKeyData
             privateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: rawRepresentation)
             publicKey = privateKey?.publicKey
-            print("[E2EE] Existing keys loaded")
         } catch {
             print("[E2EE] Error loading keys: \(error)")
             // Clear corrupt keys
@@ -171,7 +167,6 @@ class E2EEManager {
         // IMPORTANT: Use updateChildValues instead of setValue to preserve per-device keys
         // setValue would delete all child nodes including per-device key entries
         try await keyRef.updateChildValues(keyData)
-        print("[E2EE] Public key published to Firebase")
     }
 
     func publishDevicePublicKey() async throws {
@@ -197,7 +192,6 @@ class E2EEManager {
             .child(deviceId)
 
         try await keyRef.setValue(keyData)
-        print("[E2EE] Device public key published to Firebase")
     }
 
     /// Get recipient's public key from Firebase
@@ -617,7 +611,6 @@ class E2EEManager {
             database.reference().child("e2ee_keys").child(uid).removeValue()
         }
 
-        print("[E2EE] Keys cleared")
     }
 }
 

@@ -1,5 +1,6 @@
 package com.phoneintegration.app
 
+import android.content.Intent
 import android.os.Build
 import android.telecom.Call
 import android.telecom.InCallService
@@ -17,6 +18,11 @@ class DesktopInCallService : InCallService() {
         private const val TAG = "DesktopInCallService"
         private var instance: DesktopInCallService? = null
         private var activeCall: Call? = null
+
+        // Broadcast action for incoming call with phone number
+        const val ACTION_INCOMING_CALL = "com.phoneintegration.app.INCOMING_CALL_DETECTED"
+        const val EXTRA_PHONE_NUMBER = "phone_number"
+        const val EXTRA_CALL_STATE = "call_state"
 
         /**
          * Answer the currently ringing call
@@ -98,6 +104,20 @@ class DesktopInCallService : InCallService() {
 
         activeCall = call
         call.registerCallback(callCallback)
+
+        // Extract phone number from call details and broadcast it
+        val phoneNumber = call.details?.handle?.schemeSpecificPart
+        Log.d(TAG, "Call phone number: $phoneNumber")
+
+        if (call.state == Call.STATE_RINGING && !phoneNumber.isNullOrEmpty()) {
+            Log.d(TAG, "Broadcasting incoming call with phone number: $phoneNumber")
+            val intent = Intent(ACTION_INCOMING_CALL).apply {
+                putExtra(EXTRA_PHONE_NUMBER, phoneNumber)
+                putExtra(EXTRA_CALL_STATE, "ringing")
+                setPackage(packageName)
+            }
+            sendBroadcast(intent)
+        }
 
         Log.d(TAG, "Active call registered, ready for programmatic control")
     }

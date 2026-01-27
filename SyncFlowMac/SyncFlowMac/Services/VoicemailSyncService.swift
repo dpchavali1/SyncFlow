@@ -81,7 +81,6 @@ class VoicemailSyncService: ObservableObject {
             }
         }
 
-        print("VoicemailSyncService: Started listening")
     }
 
     /// Stop listening
@@ -98,7 +97,6 @@ class VoicemailSyncService: ObservableObject {
         currentUserId = nil
         voicemails = []
         unreadCount = 0
-        print("VoicemailSyncService: Stopped listening")
     }
 
     // MARK: - Actions
@@ -119,7 +117,6 @@ class VoicemailSyncService: ObservableObject {
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else {
-                    print("VoicemailSyncService: Marked \(voicemailId) as read")
                     continuation.resume()
                 }
             }
@@ -141,7 +138,6 @@ class VoicemailSyncService: ObservableObject {
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else {
-                    print("VoicemailSyncService: Deleted \(voicemailId)")
                     continuation.resume()
                 }
             }
@@ -185,7 +181,6 @@ class VoicemailSyncService: ObservableObject {
     /// Pause voicemail sync temporarily
     func pauseSync() {
         stopListening()
-        print("VoicemailSyncService: Paused syncing")
     }
 
     /// Resume voicemail sync

@@ -83,10 +83,10 @@ class SmsSyncWorker(
             val syncService = DesktopSyncService(applicationContext)
             val smsRepository = SmsRepository(applicationContext)
 
-            // Get recent messages (last 500)
-            val messages = smsRepository.getAllRecentMessages(limit = 500)
+            // Get messages from last 7 days for periodic sync (balance between freshness and efficiency)
+            val messages = smsRepository.getMessagesFromLastDays(days = 7)
 
-            Log.d(TAG, "Syncing ${messages.size} messages")
+            Log.d(TAG, "Syncing ${messages.size} messages from last 7 days")
 
             // Sync each message
             syncService.syncMessages(messages)

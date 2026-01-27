@@ -60,6 +60,7 @@ import {
   bulkDeleteInactiveUsers,
   deleteUserAccount,
   getCostOptimizationRecommendations,
+  clearAdminCache,
   OrphanCounts,
   CleanupStats,
   database,
@@ -907,10 +908,11 @@ export default function AdminCleanupPage() {
         <div className="flex items-center gap-2">
           <button
             onClick={async () => {
+              clearAdminCache() // Clear cache to force fresh data
               await loadSystemOverview()
               await loadDetailedUsers()
               await loadCostRecommendations()
-              addLog('Dashboard data refreshed')
+              addLog('Dashboard data refreshed (cache cleared)')
             }}
             className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors"
           >

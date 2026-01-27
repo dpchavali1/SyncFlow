@@ -116,7 +116,6 @@ class PhoneStatusService: ObservableObject {
         }
 
         isListening = true
-        print("PhoneStatusService: Started listening for status updates")
     }
 
     /// Stop listening for updates
@@ -134,7 +133,6 @@ class PhoneStatusService: ObservableObject {
         statusHandle = nil
         currentUserId = nil
         isListening = false
-        print("PhoneStatusService: Stopped listening for status updates")
     }
 
     /// Parse status data from Firebase
@@ -169,7 +167,6 @@ class PhoneStatusService: ObservableObject {
 
         lastLoggedSignature = signature
         phoneStatus = status
-        print("PhoneStatusService: Status updated - Battery: \(status.batteryLevel)%, Signal: \(status.signalStrength), WiFi: \(status.wifiConnected)")
     }
 
     /// Request a status refresh from the phone

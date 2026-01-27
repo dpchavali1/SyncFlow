@@ -113,7 +113,8 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     // User-to-user call tracking
     private var isUserCall: Bool = false
-    private var userCallRecipientUid: String?
+    private var userCallRecipientUid: String?  // For outgoing calls - who we're calling
+    private var userCallCallerUid: String?     // For incoming calls - who called us
     private var userCallSignalingUid: String?
 
     // Timeout timer
@@ -288,6 +289,13 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     /// End the current call
     func endCall() async throws {
+        // For user-to-user calls, delegate to endUserCall
+        if isUserCall {
+            print("SyncFlowCallManager: endCall() - delegating to endUserCall() for user call")
+            try await endUserCall()
+            return
+        }
+
         defer { cleanup() }
 
         guard let call = currentCall,
@@ -527,12 +535,27 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         let snapshot = try await phoneToUidRef.getData()
         print("SyncFlowCallManager: phone_to_uid lookup result: \(String(describing: snapshot.value))")
 
-        guard let recipientUid = snapshot.value as? String else {
-            print("SyncFlowCallManager: ERROR - User not found in phone_to_uid for \(phoneKey)")
-            await MainActor.run {
-                callState = .failed("User not found on SyncFlow")
+        var recipientUid: String
+        if let uid = snapshot.value as? String {
+            recipientUid = uid
+        } else {
+            // Fallback: If phone_to_uid lookup fails, try using the paired user's UID
+            // This enables video calls between paired devices when the Android hasn't
+            // registered its phone number in phone_to_uid
+            print("SyncFlowCallManager: phone_to_uid lookup failed, checking for paired user fallback...")
+
+            if let pairedUserId = UserDefaults.standard.string(forKey: "syncflow_user_id"),
+               !pairedUserId.isEmpty,
+               pairedUserId != myUid {
+                print("SyncFlowCallManager: Using paired user UID as fallback: \(pairedUserId)")
+                recipientUid = pairedUserId
+            } else {
+                print("SyncFlowCallManager: ERROR - User not found in phone_to_uid for \(phoneKey) and no paired user fallback")
+                await MainActor.run {
+                    callState = .failed("User not found on SyncFlow")
+                }
+                throw SyncFlowCallError.userNotOnSyncFlow
             }
-            throw SyncFlowCallError.userNotOnSyncFlow
         }
 
         print("SyncFlowCallManager: Found recipient UID: \(recipientUid)")
@@ -1079,6 +1102,9 @@ class SyncFlowCallManager: NSObject, ObservableObject {
             answer: nil
         )
 
+        // Store the caller's UID so we can update their outgoing call when we end
+        userCallCallerUid = callerUid
+
         await MainActor.run {
             currentCall = call
             isUserCall = true
@@ -1193,7 +1219,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
                 try await myCallRef.child("status").setValue("ended")
                 try await myCallRef.child("endedAt").setValue(ServerValue.timestamp())
             } else {
-                // I received this call - update my incoming call
+                // I received this call - update my incoming call AND the caller's outgoing call
                 let myCallRef = database.reference()
                     .child("users")
                     .child(myUid)
@@ -1202,6 +1228,19 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
                 try await myCallRef.child("status").setValue("ended")
                 try await myCallRef.child("endedAt").setValue(ServerValue.timestamp())
+
+                // Also update the caller's outgoing call so they know the call ended
+                if let callerUid = userCallCallerUid, !callerUid.isEmpty, callerUid != "unknown" {
+                    print("SyncFlowCallManager: Also updating caller's outgoing call - callerUid: \(callerUid)")
+                    let callerCallRef = database.reference()
+                        .child("users")
+                        .child(callerUid)
+                        .child("outgoing_syncflow_calls")
+                        .child(call.id)
+
+                    try await callerCallRef.child("status").setValue("ended")
+                    try await callerCallRef.child("endedAt").setValue(ServerValue.timestamp())
+                }
             }
         } catch {
             print("SyncFlowCallManager: endUserCall() failed to update Firebase: \(error)")
@@ -1664,6 +1703,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         // Reset user call tracking
         isUserCall = false
         userCallRecipientUid = nil
+        userCallCallerUid = nil
         userCallSignalingUid = nil
 
         // Reset retry tracking

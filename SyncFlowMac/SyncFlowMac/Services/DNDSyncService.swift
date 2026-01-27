@@ -56,7 +56,6 @@ class DNDSyncService: ObservableObject {
             }
         }
 
-        print("DNDSyncService: Started listening")
     }
 
     /// Stop listening
@@ -71,7 +70,6 @@ class DNDSyncService: ObservableObject {
 
         statusHandle = nil
         currentUserId = nil
-        print("DNDSyncService: Stopped listening")
     }
 
     /// Toggle phone DND
@@ -107,7 +105,6 @@ class DNDSyncService: ObservableObject {
     /// Send command to phone
     private func sendCommand(_ action: String) {
         guard let userId = currentUserId else {
-            print("DNDSyncService: No user ID")
             return
         }
 
@@ -125,7 +122,6 @@ class DNDSyncService: ObservableObject {
             if let error = error {
                 print("DNDSyncService: Error sending command: \(error)")
             } else {
-                print("DNDSyncService: Sent command: \(action)")
             }
         }
     }
@@ -144,13 +140,11 @@ class DNDSyncService: ObservableObject {
     /// Pause DND sync temporarily
     func pauseSync() {
         stopListening()
-        print("DNDSyncService: Paused syncing")
     }
 
     /// Stop DND sync
     func stopSync() {
         stopListening()
-        print("DNDSyncService: Stopped syncing")
     }
 
     /// Resume DND sync

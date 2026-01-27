@@ -118,25 +118,21 @@ class MessageStore: ObservableObject {
 
     private func reduceMessageProcessing() {
         // Reduce frequency of message updates and processing
-        print("[MessageStore] Reducing message processing frequency")
         // Implementation would adjust timers and processing queues
     }
 
     private func minimizeMessageProcessing() {
         // Further minimize processing
-        print("[MessageStore] Minimizing message processing")
         // Clear non-visible message caches
     }
 
     private func pauseMessageProcessing() {
         // Pause background message processing
-        print("[MessageStore] Pausing message processing")
         // Stop background processing but keep UI responsive
     }
 
     private func resumeNormalProcessing() {
         // Resume normal processing
-        print("[MessageStore] Resuming normal message processing")
         // Restore normal processing frequency
     }
 
@@ -155,12 +151,10 @@ class MessageStore: ObservableObject {
     private func clearNonVisibleMessageCache() {
         // Clear messages that aren't currently displayed
         // This is a simplified implementation
-        print("[MessageStore] Clearing non-visible message cache")
     }
 
     private func clearOldMessageCache(olderThan seconds: TimeInterval) {
         // Clear message cache entries older than specified time
-        print("[MessageStore] Clearing message cache older than \(seconds) seconds")
     }
 
     private func setupNotificationHandlers() {
@@ -182,9 +176,7 @@ class MessageStore: ObservableObject {
     // MARK: - Start Listening
 
     func startListening(userId: String) {
-        print("[MessageStore] startListening called for userId: \(userId)")
         guard currentUserId != userId else {
-            print("[MessageStore] Already listening to user: \(userId)")
             return
         }
 
@@ -354,12 +346,10 @@ class MessageStore: ObservableObject {
     func loadMoreMessages() {
         guard let userId = currentUserId, !isLoadingMore, canLoadMore,
               let oldestTimestamp = loadedTimeRangeStart else {
-            print("[MessageStore] Cannot load more: userId=\(currentUserId != nil), loading=\(isLoadingMore), canLoad=\(canLoadMore), oldest=\(loadedTimeRangeStart != nil)")
             return
         }
 
         isLoadingMore = true
-        print("[MessageStore] Loading more messages older than \(Date(timeIntervalSince1970: oldestTimestamp))")
 
         // Calculate new time range (30 more days back)
         let endTime = oldestTimestamp * 1000  // Convert to milliseconds
@@ -374,7 +364,6 @@ class MessageStore: ObservableObject {
                 )
 
                 await MainActor.run {
-                    print("[MessageStore] Loaded \(olderMessages.count) older messages")
 
                     // Merge with existing messages
                     var allMessages = self.messages + olderMessages

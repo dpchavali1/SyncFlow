@@ -59,7 +59,6 @@ class MediaControlService: ObservableObject {
             }
         }
 
-        print("MediaControlService: Started listening")
     }
 
     /// Stop listening
@@ -74,7 +73,6 @@ class MediaControlService: ObservableObject {
 
         statusHandle = nil
         currentUserId = nil
-        print("MediaControlService: Stopped listening")
     }
 
     // MARK: - Playback Controls
@@ -160,7 +158,6 @@ class MediaControlService: ObservableObject {
     /// Send command to phone
     private func sendCommand(_ action: String, extraData: [String: Any]? = nil) {
         guard let userId = currentUserId else {
-            print("MediaControlService: No user ID")
             return
         }
 
@@ -184,7 +181,6 @@ class MediaControlService: ObservableObject {
             if let error = error {
                 print("MediaControlService: Error sending command: \(error)")
             } else {
-                print("MediaControlService: Sent command: \(action)")
             }
         }
     }
@@ -192,7 +188,6 @@ class MediaControlService: ObservableObject {
     /// Reduce update frequency for battery saving
     func reduceUpdates() {
         // Reduce the frequency of media control updates
-        print("MediaControlService: Reducing update frequency")
     }
 
 

@@ -15,6 +15,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.tasks.await
 import org.webrtc.*
+import java.net.URL
 import java.util.UUID
 
 /**
@@ -91,7 +92,7 @@ class SyncFlowCallManager(context: Context) {
     private val _videoEffect = MutableStateFlow(VideoEffect.NONE)
     val videoEffect: StateFlow<VideoEffect> = _videoEffect.asStateFlow()
 
-    // Firebase listeners
+    // Firebase listeners (for device-to-device calls only - user calls use REST polling)
     private var callListener: ValueEventListener? = null
     private var answerListener: ValueEventListener? = null
     private var iceCandidatesListener: ChildEventListener? = null
@@ -99,6 +100,12 @@ class SyncFlowCallManager(context: Context) {
     private var callStatusRef: DatabaseReference? = null
     private var currentCallRef: DatabaseReference? = null
     private var disconnectJob: Job? = null
+
+    // REST API polling jobs (for user-to-user calls to avoid OOM)
+    private var answerPollingJob: Job? = null
+    private var icePollingJob: Job? = null
+    private var statusPollingJob: Job? = null
+    private val processedIceCandidates = mutableSetOf<String>()
 
     // Coroutine scope
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -177,15 +184,18 @@ class SyncFlowCallManager(context: Context) {
             val normalizedPhone = recipientPhoneNumber.replace(Regex("[^0-9+]"), "")
             val phoneKey = normalizedPhone.replace("+", "")
 
-            // Look up recipient's UID from phone number
-            val recipientUidSnapshot = database.reference
-                .child("phone_to_uid")
-                .child(phoneKey)
-                .get()
-                .await()
+            Log.d(TAG, "Looking up phone_to_uid for: $phoneKey")
 
-            val recipientUid = recipientUidSnapshot.getValue(String::class.java)
-                ?: return@withContext Result.failure(Exception("User not found on SyncFlow. They need to install SyncFlow to receive video calls."))
+            // Look up recipient's UID using REST API to avoid OOM from goOnline()
+            val recipientUid = withContext(Dispatchers.IO) {
+                lookupPhoneToUid(phoneKey)
+            }
+
+            if (recipientUid == null) {
+                Log.e(TAG, "User not found in phone_to_uid for: $phoneKey")
+                return@withContext Result.failure(Exception("User not found on SyncFlow. They need to install SyncFlow to receive video calls."))
+            }
+            Log.d(TAG, "Found recipient UID: $recipientUid")
 
             val deviceId = getDeviceId()
             val deviceName = getDeviceName()
@@ -207,43 +217,52 @@ class SyncFlowCallManager(context: Context) {
             _currentCall.value = call
             Log.d(TAG, "Created outgoing user call: callId=$callId, isUserCall=${call.isUserCall}")
 
-            // Write call to RECIPIENT's Firebase path so they receive notification
-            val callRef = database.reference
-                .child("users")
-                .child(recipientUid)
-                .child("incoming_syncflow_calls")
-                .child(callId)
-
+            // Prepare call data
             val callData = call.toMap().toMutableMap()
             callData["callerUid"] = myUserId
             callData["callerPhone"] = myPhoneNumber
 
-            callRef.setValue(callData).await()
-            currentCallRef = callRef
+            // Write call to RECIPIENT's Firebase path using REST API (to avoid OOM)
+            val callPath = "users/$recipientUid/incoming_syncflow_calls/$callId"
+            val writeSuccess = withContext(Dispatchers.IO) {
+                writeToFirebaseRest(callPath, callData)
+            }
 
-            // Also write to my path for tracking
-            database.reference
-                .child("users")
-                .child(myUserId)
-                .child("outgoing_syncflow_calls")
-                .child(callId)
-                .setValue(callData)
+            if (!writeSuccess) {
+                Log.e(TAG, "Failed to write call to Firebase")
+                _callState.value = CallState.Failed("Failed to initiate call")
+                return@withContext Result.failure(Exception("Failed to initiate call"))
+            }
+
+            Log.d(TAG, "Call data written to recipient's path via REST API")
+
+            // Clear any stale currentCallRef from previous calls
+            currentCallRef = null
+
+            // Also write to my path for tracking (fire and forget via REST)
+            withContext(Dispatchers.IO) {
+                writeToFirebaseRest("users/$myUserId/outgoing_syncflow_calls/$callId", callData)
+            }
 
             // Send FCM push notification to wake up recipient's device
             sendCallNotificationToUser(recipientUid, callId, deviceName, myPhoneNumber, isVideo)
 
-            // Setup peer connection for user call - ICE candidates go to recipient's path
-            setupPeerConnectionForUserCall(recipientUid, callId, isOutgoing = true)
+            // IMPORTANT: We do NOT call database.goOnline() to avoid OOM crash
+            // All signaling is done via REST API polling instead of Firebase SDK listeners
+            Log.d(TAG, "Setting up WebRTC (using REST API for signaling)")
+
+            // Setup peer connection for user call - ICE candidates sent via REST API
+            setupPeerConnectionForUserCallRest(recipientUid, callId, isOutgoing = true)
 
             // Create media tracks
             createMediaTracks(isVideo)
 
-            // Create and send offer to recipient's incoming_syncflow_calls path
-            createAndSendOfferForUserCall(recipientUid, callId)
+            // Create and send offer to recipient's incoming_syncflow_calls path via REST
+            createAndSendOfferForUserCallRest(recipientUid, callId)
 
-            // Listen for answer and ICE candidates from recipient's path
-            listenForAnswerForUserCall(recipientUid, callId)
-            listenForIceCandidatesForUserCall(recipientUid, callId, isOutgoing = true)
+            // Poll for answer and ICE candidates via REST API (instead of Firebase listeners)
+            startAnswerPollingRest(recipientUid, callId)
+            startIceCandidatesPollingRest(recipientUid, callId, isOutgoing = true)
 
             // Setup audio
             setupAudio()
@@ -253,8 +272,8 @@ class SyncFlowCallManager(context: Context) {
             // Start ringback tone so caller hears feedback
             startRingbackTone()
 
-            // Listen for call status changes (if remote party ends the call)
-            listenForCallStatusChanges()
+            // Poll for call status changes via REST (if remote party ends the call)
+            startCallStatusPollingRest(recipientUid, callId)
 
             // Start timeout timer for user call
             startCallTimeoutForUserCall(recipientUid, callId)
@@ -501,7 +520,13 @@ class SyncFlowCallManager(context: Context) {
             val currentCallValue = _currentCall.value
             val callId = currentCallValue?.id
 
-            Log.d(TAG, "endCall: callId=$callId, isUserCall=${currentCallValue?.isUserCall}, currentCallRef=$currentCallRef")
+            Log.d(TAG, "endCall: callId=$callId, isUserCall=${currentCallValue?.isUserCall}")
+
+            // For user-to-user calls, use REST API (delegate to endUserCall)
+            if (currentCallValue?.isUserCall == true && callId != null) {
+                Log.d(TAG, "Delegating to endUserCall for user call")
+                return@withContext endUserCall()
+            }
 
             // Use the stored call reference if available (this is set during call setup
             // and points to the correct Firebase path regardless of caller/callee)
@@ -572,6 +597,49 @@ class SyncFlowCallManager(context: Context) {
         _isVideoEnabled.value = newVideoState
         localVideoTrack?.setEnabled(newVideoState)
         Log.d(TAG, "Video toggled: $newVideoState")
+    }
+
+    /**
+     * Refresh video track when returning from background.
+     * This ensures video is re-enabled and the track is re-emitted to trigger UI updates.
+     * Helps fix issues where video disappears after app goes to background and returns.
+     */
+    fun refreshVideoTrack() {
+        Log.d(TAG, "Refreshing video track...")
+
+        // Re-enable the video track if it exists
+        localVideoTrack?.let { track ->
+            if (_isVideoEnabled.value) {
+                track.setEnabled(true)
+                Log.d(TAG, "Local video track re-enabled")
+            }
+        }
+
+        // Re-emit the local video track to trigger UI updates
+        val currentLocalTrack = localVideoTrack
+        if (currentLocalTrack != null) {
+            _localVideoTrackFlow.value = null
+            _localVideoTrackFlow.value = currentLocalTrack
+            Log.d(TAG, "Local video track flow re-emitted: $currentLocalTrack")
+        }
+
+        // Re-emit remote video track as well
+        val currentRemoteTrack = _remoteVideoTrackFlow.value
+        if (currentRemoteTrack != null) {
+            _remoteVideoTrackFlow.value = null
+            _remoteVideoTrackFlow.value = currentRemoteTrack
+            Log.d(TAG, "Remote video track flow re-emitted: $currentRemoteTrack")
+        }
+
+        // Ensure video capturer is still running
+        try {
+            if (videoCapturer != null && _isVideoEnabled.value) {
+                // The capturer should still be running, but log for debugging
+                Log.d(TAG, "Video capturer status: active")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking video capturer", e)
+        }
     }
 
     fun toggleFaceFocus() {
@@ -716,7 +784,7 @@ class SyncFlowCallManager(context: Context) {
     }
 
     /**
-     * Answer an incoming user-to-user call
+     * Answer an incoming user-to-user call (uses REST API to avoid OOM)
      */
     suspend fun answerUserCall(callId: String, withVideo: Boolean): Result<Unit> =
         withContext(Dispatchers.Main) {
@@ -725,21 +793,14 @@ class SyncFlowCallManager(context: Context) {
                 val myUserId = auth.currentUser?.uid
                     ?: return@withContext Result.failure(Exception("Not authenticated"))
 
-                Log.d(TAG, "Answering user call: $callId, withVideo: $withVideo")
+                Log.d(TAG, "Answering user call: $callId, withVideo: $withVideo (using REST API)")
                 _callState.value = CallState.Connecting
 
-                val callRef = database.reference
-                    .child("users")
-                    .child(myUserId)
-                    .child("incoming_syncflow_calls")
-                    .child(callId)
-
-                currentCallRef = callRef
-
-                // Get call data
-                val snapshot = callRef.get().await()
-                val callData = snapshot.value as? Map<String, Any?>
-                    ?: return@withContext Result.failure(Exception("Call not found"))
+                // Get call data via REST API (avoid goOnline OOM)
+                val callPath = "users/$myUserId/incoming_syncflow_calls/$callId"
+                val callData = withContext(Dispatchers.IO) {
+                    readFromFirebaseRest(callPath)
+                } ?: return@withContext Result.failure(Exception("Call not found"))
 
                 val callerUid = callData["callerUid"] as? String
                     ?: return@withContext Result.failure(Exception("Caller UID not found"))
@@ -749,15 +810,17 @@ class SyncFlowCallManager(context: Context) {
                 _currentCall.value = call
                 Log.d(TAG, "Set current call: ${call.callerName}, isVideo: ${call.isVideo}, isUserCall: ${call.isUserCall}")
 
-                // Update call status
-                callRef.child("status").setValue("active").await()
-                callRef.child("answeredAt").setValue(ServerValue.TIMESTAMP).await()
+                // Update call status via REST API
+                withContext(Dispatchers.IO) {
+                    writeToFirebaseRestValue("$callPath/status", "active")
+                    writeToFirebaseRestValue("$callPath/answeredAt", System.currentTimeMillis())
+                }
 
-                // Setup peer connection - use myUserId because signaling is in my path
-                setupPeerConnectionForUserCall(myUserId, callId, isOutgoing = false)
+                // Setup peer connection using REST for ICE candidates
+                setupPeerConnectionForUserCallRest(myUserId, callId, isOutgoing = false)
 
                 // Get the offer and set as remote description FIRST
-                // This tells WebRTC what tracks the caller is sending
+                @Suppress("UNCHECKED_CAST")
                 val offerData = callData["offer"] as? Map<String, Any?>
                     ?: return@withContext Result.failure(Exception("No offer in call"))
                 val offerSdp = offerData["sdp"] as? String
@@ -770,7 +833,6 @@ class SyncFlowCallManager(context: Context) {
                 )
 
                 // CRITICAL: Must await setRemoteDescription completion before creating answer
-                // This was causing calls to fail - the answer was created before the offer was processed
                 val setRemoteResult = setRemoteDescriptionAsync(offer)
                 if (setRemoteResult.isFailure) {
                     val error = setRemoteResult.exceptionOrNull()?.message ?: "Unknown error"
@@ -780,18 +842,17 @@ class SyncFlowCallManager(context: Context) {
                 Log.d(TAG, "Remote description set from offer successfully")
 
                 // Create media tracks AFTER setting remote description
-                // This ensures our tracks are properly negotiated
                 createMediaTracks(withVideo)
                 Log.d(TAG, "Media tracks created, withVideo: $withVideo")
 
-                // Create and send answer to my path (where caller is listening)
-                createAndSendAnswerForUserCall(myUserId, callId)
+                // Create and send answer via REST API
+                createAndSendAnswerForUserCallRest(myUserId, callId)
 
-                // Listen for ICE candidates from caller
-                listenForIceCandidatesForUserCall(myUserId, callId, isOutgoing = false)
+                // Poll for ICE candidates from caller via REST
+                startIceCandidatesPollingRest(myUserId, callId, isOutgoing = false)
 
-                // Listen for call status changes (if caller ends the call)
-                listenForCallStatusChanges()
+                // Poll for call status changes via REST
+                startCallStatusPollingRest(myUserId, callId)
 
                 // Setup audio
                 setupAudio()
@@ -805,7 +866,7 @@ class SyncFlowCallManager(context: Context) {
         }
 
     /**
-     * Reject an incoming user-to-user call
+     * Reject an incoming user-to-user call (uses REST API to avoid OOM)
      */
     suspend fun rejectUserCall(callId: String): Result<Unit> =
         withContext(Dispatchers.Main) {
@@ -813,14 +874,13 @@ class SyncFlowCallManager(context: Context) {
                 val myUserId = auth.currentUser?.uid
                     ?: return@withContext Result.failure(Exception("Not authenticated"))
 
-                val callRef = database.reference
-                    .child("users")
-                    .child(myUserId)
-                    .child("incoming_syncflow_calls")
-                    .child(callId)
+                val callPath = "users/$myUserId/incoming_syncflow_calls/$callId"
 
-                callRef.child("status").setValue("rejected").await()
-                callRef.child("endedAt").setValue(ServerValue.TIMESTAMP).await()
+                // Update call status via REST API
+                withContext(Dispatchers.IO) {
+                    writeToFirebaseRestValue("$callPath/status", "rejected")
+                    writeToFirebaseRestValue("$callPath/endedAt", System.currentTimeMillis())
+                }
 
                 _callState.value = CallState.Ended
                 cleanup()
@@ -1128,31 +1188,30 @@ class SyncFlowCallManager(context: Context) {
                 ?: return@withContext Result.failure(Exception("No active call"))
             val call = _currentCall.value
 
-            if (call?.isOutgoing == true && !call.calleeId.isNullOrBlank()) {
-                val recipientRef = database.reference
-                    .child("users")
-                    .child(call.calleeId)
-                    .child("incoming_syncflow_calls")
-                    .child(callId)
-                recipientRef.child("status").setValue("ended").await()
-                recipientRef.child("endedAt").setValue(ServerValue.TIMESTAMP).await()
+            // Use REST API to update call status (avoid Firebase SDK OOM)
+            val timestamp = System.currentTimeMillis()
 
-                val myCallRef = database.reference
-                    .child("users")
-                    .child(myUserId)
-                    .child("outgoing_syncflow_calls")
-                    .child(callId)
-                myCallRef.child("status").setValue("ended").await()
-                myCallRef.child("endedAt").setValue(ServerValue.TIMESTAMP).await()
+            if (call?.isOutgoing == true && !call.calleeId.isNullOrBlank()) {
+                // Update recipient's incoming call
+                val recipientPath = "users/${call.calleeId}/incoming_syncflow_calls/$callId"
+                withContext(Dispatchers.IO) {
+                    writeToFirebaseRestValue("$recipientPath/status", "ended")
+                    writeToFirebaseRestValue("$recipientPath/endedAt", timestamp)
+                }
+
+                // Update my outgoing call
+                val myCallPath = "users/$myUserId/outgoing_syncflow_calls/$callId"
+                withContext(Dispatchers.IO) {
+                    writeToFirebaseRestValue("$myCallPath/status", "ended")
+                    writeToFirebaseRestValue("$myCallPath/endedAt", timestamp)
+                }
             } else {
                 // Update my incoming call path
-                val callRef = database.reference
-                    .child("users")
-                    .child(myUserId)
-                    .child("incoming_syncflow_calls")
-                    .child(callId)
-                callRef.child("status").setValue("ended").await()
-                callRef.child("endedAt").setValue(ServerValue.TIMESTAMP).await()
+                val callPath = "users/$myUserId/incoming_syncflow_calls/$callId"
+                withContext(Dispatchers.IO) {
+                    writeToFirebaseRestValue("$callPath/status", "ended")
+                    writeToFirebaseRestValue("$callPath/endedAt", timestamp)
+                }
             }
 
             _callState.value = CallState.Ended
@@ -1175,19 +1234,502 @@ class SyncFlowCallManager(context: Context) {
             if (_callState.value == CallState.Ringing) {
                 Log.d(TAG, "User call timed out")
 
-                // Update status in recipient's incoming_syncflow_calls path
-                database.reference
-                    .child("users")
-                    .child(recipientUid)
-                    .child("incoming_syncflow_calls")
-                    .child(callId)
-                    .child("status")
-                    .setValue("missed")
+                // Update status via REST API
+                withContext(Dispatchers.IO) {
+                    writeToFirebaseRestValue(
+                        "users/$recipientUid/incoming_syncflow_calls/$callId/status",
+                        "missed"
+                    )
+                }
 
                 _callState.value = CallState.Failed("Call timed out - no answer")
                 cleanup()
             }
         }
+    }
+
+    // ========== REST API-based signaling methods (to avoid OOM from goOnline()) ==========
+
+    /**
+     * Setup peer connection for user calls using REST API for ICE candidates.
+     * This avoids the OOM crash caused by Firebase SDK's goOnline().
+     */
+    private fun setupPeerConnectionForUserCallRest(userId: String, callId: String, isOutgoing: Boolean) {
+        val rtcConfig = PeerConnection.RTCConfiguration(ICE_SERVERS).apply {
+            bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+            rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        }
+
+        peerConnection = peerConnectionFactory?.createPeerConnection(
+            rtcConfig,
+            object : PeerConnection.Observer {
+                override fun onIceCandidate(candidate: IceCandidate?) {
+                    candidate?.let {
+                        Log.d(TAG, "ICE candidate generated (REST mode)")
+                        scope.launch {
+                            sendIceCandidateForUserCallRest(userId, callId, it, isOutgoing)
+                        }
+                    }
+                }
+
+                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
+                    Log.d(TAG, "ICE connection state (REST mode): $state")
+                    when (state) {
+                        PeerConnection.IceConnectionState.CONNECTED -> {
+                            cancelDisconnectTimeout()
+                            stopRingbackTone()
+                            _callState.value = CallState.Connected
+                        }
+                        PeerConnection.IceConnectionState.FAILED -> {
+                            cancelDisconnectTimeout()
+                            stopRingbackTone()
+                            _callState.value = CallState.Failed("Connection failed")
+                            scope.launch { endUserCall() }
+                        }
+                        PeerConnection.IceConnectionState.DISCONNECTED -> {
+                            scheduleDisconnectTimeout()
+                        }
+                        PeerConnection.IceConnectionState.CLOSED -> {
+                            cancelDisconnectTimeout()
+                            stopRingbackTone()
+                            if (_callState.value != CallState.Ended && _callState.value != CallState.Idle) {
+                                scope.launch { endUserCall() }
+                            }
+                        }
+                        else -> {}
+                    }
+                }
+
+                override fun onTrack(transceiver: RtpTransceiver?) {
+                    Log.d(TAG, "onTrack called (REST mode), transceiver: $transceiver")
+                    transceiver?.receiver?.track()?.let { track ->
+                        Log.d(TAG, "Remote track received (REST mode): kind=${track.kind()}, id=${track.id()}")
+                        if (track is VideoTrack) {
+                            Log.d(TAG, "Setting remote video track (REST mode)")
+                            _remoteVideoTrackFlow.value = track
+                            track.setEnabled(true)
+                        } else if (track is AudioTrack) {
+                            Log.d(TAG, "Remote audio track received (REST mode)")
+                            track.setEnabled(true)
+                        }
+                    }
+                }
+
+                override fun onSignalingChange(state: PeerConnection.SignalingState?) {
+                    Log.d(TAG, "Signaling state (REST mode): $state")
+                }
+
+                override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
+                    Log.d(TAG, "Peer connection state (REST mode): $newState")
+                }
+
+                override fun onIceConnectionReceivingChange(receiving: Boolean) {}
+                override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
+                    Log.d(TAG, "ICE gathering state (REST mode): $state")
+                }
+                override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {}
+                override fun onAddStream(stream: MediaStream?) {}
+                override fun onRemoveStream(stream: MediaStream?) {}
+                override fun onDataChannel(channel: DataChannel?) {}
+                override fun onRenegotiationNeeded() {}
+                override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {}
+            }
+        )
+    }
+
+    /**
+     * Create and send offer via REST API.
+     */
+    private suspend fun createAndSendOfferForUserCallRest(recipientUid: String, callId: String) {
+        val constraints = MediaConstraints().apply {
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
+        }
+
+        suspendCancellableCoroutine<Unit> { continuation ->
+            peerConnection?.createOffer(object : SdpObserver {
+                override fun onCreateSuccess(sdp: SessionDescription?) {
+                    sdp?.let {
+                        peerConnection?.setLocalDescription(SdpObserverAdapter(), it)
+
+                        // Send offer via REST API
+                        scope.launch {
+                            try {
+                                val offerData = mapOf(
+                                    "sdp" to it.description,
+                                    "type" to it.type.canonicalForm()
+                                )
+                                val success = withContext(Dispatchers.IO) {
+                                    writeToFirebaseRest(
+                                        "users/$recipientUid/incoming_syncflow_calls/$callId/offer",
+                                        offerData
+                                    )
+                                }
+                                if (success) {
+                                    Log.d(TAG, "Offer sent via REST API")
+                                    continuation.resume(Unit) {}
+                                } else {
+                                    Log.e(TAG, "Failed to send offer via REST API")
+                                    continuation.cancel(Exception("Failed to send offer"))
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error sending offer via REST", e)
+                                continuation.cancel(e)
+                            }
+                        }
+                    }
+                }
+
+                override fun onSetSuccess() {}
+                override fun onCreateFailure(error: String?) {
+                    Log.e(TAG, "Create offer failed (REST): $error")
+                    continuation.cancel(Exception(error))
+                }
+                override fun onSetFailure(error: String?) {}
+            }, constraints)
+        }
+    }
+
+    /**
+     * Poll for answer via REST API instead of using Firebase listener.
+     */
+    private fun startAnswerPollingRest(recipientUid: String, callId: String) {
+        answerPollingJob?.cancel()
+        answerPollingJob = scope.launch {
+            val path = "users/$recipientUid/incoming_syncflow_calls/$callId/answer"
+            Log.d(TAG, "Starting REST polling for answer at: $path")
+
+            var pollCount = 0
+            repeat(180) { // Poll for up to 90 seconds (500ms * 180) - extended for slow FCM
+                if (!isActive || _callState.value == CallState.Connected ||
+                    _callState.value == CallState.Ended || _callState.value == CallState.Idle) {
+                    Log.d(TAG, "Answer polling stopped: state=${_callState.value}, isActive=$isActive")
+                    return@launch
+                }
+
+                try {
+                    val answerData = withContext(Dispatchers.IO) {
+                        readFromFirebaseRest(path)
+                    }
+
+                    pollCount++
+                    if (pollCount % 10 == 0) {
+                        Log.d(TAG, "Answer polling attempt #$pollCount, data=${answerData?.keys}")
+                    }
+
+                    if (answerData != null && answerData.containsKey("sdp")) {
+                        val sdp = answerData["sdp"] as? String
+                        val type = answerData["type"] as? String
+
+                        if (sdp != null && type != null) {
+                            Log.d(TAG, "Answer received via REST polling! type=$type, sdpLength=${sdp.length}")
+                            val answer = SessionDescription(
+                                SessionDescription.Type.fromCanonicalForm(type),
+                                sdp
+                            )
+                            peerConnection?.setRemoteDescription(SdpObserverAdapter(), answer)
+                            _callState.value = CallState.Connecting
+                            return@launch
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error polling for answer: ${e.message}")
+                }
+
+                delay(500) // Poll every 500ms
+            }
+
+            Log.w(TAG, "Answer polling timed out after $pollCount attempts")
+        }
+    }
+
+    /**
+     * Poll for ICE candidates via REST API instead of using Firebase listener.
+     */
+    private fun startIceCandidatesPollingRest(userId: String, callId: String, isOutgoing: Boolean) {
+        icePollingJob?.cancel()
+        processedIceCandidates.clear()
+        icePollingJob = scope.launch {
+            val icePath = if (isOutgoing) "ice_callee" else "ice_caller"
+            val path = "users/$userId/incoming_syncflow_calls/$callId/$icePath"
+            Log.d(TAG, "Starting REST polling for ICE candidates at: $path")
+
+            while (isActive && _callState.value != CallState.Ended && _callState.value != CallState.Idle) {
+                try {
+                    val iceCandidates = withContext(Dispatchers.IO) {
+                        readFromFirebaseRest(path)
+                    }
+
+                    if (iceCandidates != null) {
+                        @Suppress("UNCHECKED_CAST")
+                        val candidates = iceCandidates as? Map<String, Map<String, Any?>>
+                        candidates?.forEach { (key, candidateData) ->
+                            if (key !in processedIceCandidates) {
+                                val candidate = candidateData["candidate"] as? String
+                                val sdpMid = candidateData["sdpMid"] as? String
+                                val sdpMLineIndex = (candidateData["sdpMLineIndex"] as? Number)?.toInt() ?: 0
+
+                                if (candidate != null) {
+                                    Log.d(TAG, "Remote ICE candidate received via REST polling")
+                                    val iceCandidate = IceCandidate(sdpMid, sdpMLineIndex, candidate)
+                                    peerConnection?.addIceCandidate(iceCandidate)
+                                    processedIceCandidates.add(key)
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error polling for ICE candidates: ${e.message}")
+                }
+
+                delay(300) // Poll every 300ms for ICE candidates (faster than answer)
+            }
+        }
+    }
+
+    /**
+     * Poll for call status changes via REST API.
+     */
+    private fun startCallStatusPollingRest(recipientUid: String, callId: String) {
+        statusPollingJob?.cancel()
+        statusPollingJob = scope.launch {
+            val path = "users/$recipientUid/incoming_syncflow_calls/$callId/status"
+            Log.d(TAG, "Starting REST polling for call status...")
+
+            while (isActive && _callState.value != CallState.Ended && _callState.value != CallState.Idle) {
+                try {
+                    val statusResponse = withContext(Dispatchers.IO) {
+                        readFromFirebaseRestRaw(path)
+                    }
+
+                    if (statusResponse != null) {
+                        val status = statusResponse.trim().removeSurrounding("\"")
+                        when (status) {
+                            "ended", "rejected", "missed", "failed" -> {
+                                if (_callState.value != CallState.Ended && _callState.value != CallState.Idle) {
+                                    Log.d(TAG, "Remote party ended the call (status: $status)")
+                                    stopRingbackTone()
+                                    _callState.value = CallState.Ended
+                                    cleanup()
+                                    return@launch
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error polling call status: ${e.message}")
+                }
+
+                delay(1000) // Poll every 1 second for status
+            }
+        }
+    }
+
+    /**
+     * Create and send answer via REST API.
+     */
+    private suspend fun createAndSendAnswerForUserCallRest(userId: String, callId: String) {
+        val constraints = MediaConstraints().apply {
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
+        }
+
+        suspendCancellableCoroutine<Unit> { continuation ->
+            peerConnection?.createAnswer(object : SdpObserver {
+                override fun onCreateSuccess(sdp: SessionDescription?) {
+                    sdp?.let {
+                        peerConnection?.setLocalDescription(SdpObserverAdapter(), it)
+
+                        // Send answer via REST API
+                        scope.launch {
+                            try {
+                                val answerData = mapOf(
+                                    "sdp" to it.description,
+                                    "type" to it.type.canonicalForm()
+                                )
+                                val success = withContext(Dispatchers.IO) {
+                                    writeToFirebaseRest(
+                                        "users/$userId/incoming_syncflow_calls/$callId/answer",
+                                        answerData
+                                    )
+                                }
+                                if (success) {
+                                    Log.d(TAG, "Answer sent via REST API")
+                                    continuation.resume(Unit) {}
+                                } else {
+                                    Log.e(TAG, "Failed to send answer via REST API")
+                                    continuation.cancel(Exception("Failed to send answer"))
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error sending answer via REST", e)
+                                continuation.cancel(e)
+                            }
+                        }
+                    }
+                }
+
+                override fun onSetSuccess() {}
+                override fun onCreateFailure(error: String?) {
+                    Log.e(TAG, "Create answer failed (REST): $error")
+                    continuation.cancel(Exception(error))
+                }
+                override fun onSetFailure(error: String?) {}
+            }, constraints)
+        }
+    }
+
+    /**
+     * Send ICE candidate via REST API.
+     */
+    private suspend fun sendIceCandidateForUserCallRest(
+        userId: String,
+        callId: String,
+        candidate: IceCandidate,
+        isOutgoing: Boolean
+    ) {
+        val icePath = if (isOutgoing) "ice_caller" else "ice_callee"
+        val candidateKey = "ice_${System.currentTimeMillis()}_${(0..999).random()}"
+
+        try {
+            val candidateData = mapOf(
+                "candidate" to candidate.sdp,
+                "sdpMid" to candidate.sdpMid,
+                "sdpMLineIndex" to candidate.sdpMLineIndex
+            )
+
+            val success = withContext(Dispatchers.IO) {
+                writeToFirebaseRest(
+                    "users/$userId/incoming_syncflow_calls/$callId/$icePath/$candidateKey",
+                    candidateData
+                )
+            }
+
+            if (success) {
+                Log.d(TAG, "ICE candidate sent via REST API")
+            } else {
+                Log.e(TAG, "Failed to send ICE candidate via REST")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending ICE candidate via REST", e)
+        }
+    }
+
+    /**
+     * Write a single value to Firebase using REST API.
+     */
+    private suspend fun writeToFirebaseRestValue(path: String, value: Any): Boolean {
+        return try {
+            val token = auth.currentUser?.getIdToken(false)?.await()?.token
+                ?: return false
+
+            val databaseUrl = "https://syncflow-6980e-default-rtdb.firebaseio.com"
+            val url = URL("$databaseUrl/$path.json?auth=$token")
+
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+
+            // Write value as JSON
+            val jsonValue = when (value) {
+                is String -> "\"$value\""
+                is Number -> value.toString()
+                is Boolean -> value.toString()
+                else -> org.json.JSONObject(mapOf("value" to value)).toString()
+            }
+            connection.outputStream.bufferedWriter().use { it.write(jsonValue) }
+
+            val responseCode = connection.responseCode
+            responseCode in 200..299
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing value to Firebase via REST", e)
+            false
+        }
+    }
+
+    /**
+     * Read data from Firebase using REST API.
+     * Returns a Map of the data, or null if not found.
+     */
+    private suspend fun readFromFirebaseRest(path: String): Map<String, Any?>? {
+        return try {
+            val response = readFromFirebaseRestRaw(path)
+            if (response == null || response == "null" || response.isBlank()) {
+                null
+            } else {
+                // Parse JSON response
+                val json = org.json.JSONObject(response)
+                jsonToMap(json)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error reading from Firebase REST: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Read raw response from Firebase REST API.
+     */
+    private suspend fun readFromFirebaseRestRaw(path: String): String? {
+        return try {
+            val token = auth.currentUser?.getIdToken(false)?.await()?.token
+                ?: return null
+
+            val databaseUrl = "https://syncflow-6980e-default-rtdb.firebaseio.com"
+            val url = URL("$databaseUrl/$path.json?auth=$token")
+
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+
+            val responseCode = connection.responseCode
+            if (responseCode == 200) {
+                connection.inputStream.bufferedReader().readText()
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Convert JSONObject to Map recursively.
+     */
+    private fun jsonToMap(json: org.json.JSONObject): Map<String, Any?> {
+        val map = mutableMapOf<String, Any?>()
+        json.keys().forEach { key ->
+            val value = json.get(key)
+            map[key] = when (value) {
+                is org.json.JSONObject -> jsonToMap(value)
+                is org.json.JSONArray -> jsonArrayToList(value)
+                org.json.JSONObject.NULL -> null
+                else -> value
+            }
+        }
+        return map
+    }
+
+    /**
+     * Convert JSONArray to List recursively.
+     */
+    private fun jsonArrayToList(array: org.json.JSONArray): List<Any?> {
+        val list = mutableListOf<Any?>()
+        for (i in 0 until array.length()) {
+            val value = array.get(i)
+            list.add(when (value) {
+                is org.json.JSONObject -> jsonToMap(value)
+                is org.json.JSONArray -> jsonArrayToList(value)
+                org.json.JSONObject.NULL -> null
+                else -> value
+            })
+        }
+        return list
     }
 
     /**
@@ -1205,6 +1747,7 @@ class SyncFlowCallManager(context: Context) {
     /**
      * Send FCM push notification to wake up recipient's device for incoming call.
      * This writes to a queue that Cloud Functions picks up to send the actual FCM.
+     * Uses REST API to avoid OOM from Firebase SDK.
      */
     private fun sendCallNotificationToUser(
         recipientUid: String,
@@ -1224,18 +1767,21 @@ class SyncFlowCallManager(context: Context) {
             "timestamp" to System.currentTimeMillis()
         )
 
-        // Write to fcm_notifications queue - Cloud Functions will pick this up
-        database.reference
-            .child("fcm_notifications")
-            .child(recipientUid)
-            .child(callId)
-            .setValue(notificationData)
-            .addOnSuccessListener {
-                Log.d(TAG, "FCM notification queued for $recipientUid")
+        // Write to fcm_notifications queue via REST API - Cloud Functions will pick this up
+        scope.launch {
+            try {
+                val success = withContext(Dispatchers.IO) {
+                    writeToFirebaseRest("fcm_notifications/$recipientUid/$callId", notificationData)
+                }
+                if (success) {
+                    Log.d(TAG, "FCM notification queued for $recipientUid")
+                } else {
+                    Log.e(TAG, "Failed to queue FCM notification")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error queueing FCM notification", e)
             }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Failed to queue FCM notification", e)
-            }
+        }
     }
 
     /**
@@ -1752,7 +2298,16 @@ class SyncFlowCallManager(context: Context) {
         // Stop ringback tone if playing
         stopRingbackTone()
 
-        // Remove Firebase listeners
+        // Cancel REST polling jobs
+        answerPollingJob?.cancel()
+        answerPollingJob = null
+        icePollingJob?.cancel()
+        icePollingJob = null
+        statusPollingJob?.cancel()
+        statusPollingJob = null
+        processedIceCandidates.clear()
+
+        // Remove Firebase listeners (for device-to-device calls)
         callListener?.let { currentCallRef?.removeEventListener(it) }
         callListener = null
 
@@ -1845,6 +2400,83 @@ class SyncFlowCallManager(context: Context) {
         eglBase?.release()
         eglBase = null
         scope.cancel()
+    }
+
+    /**
+     * Write data to Firebase using REST API.
+     * This avoids the OOM issues caused by goOnline() syncing all data.
+     */
+    private suspend fun writeToFirebaseRest(path: String, data: Map<String, Any?>): Boolean {
+        return try {
+            val token = auth.currentUser?.getIdToken(false)?.await()?.token
+                ?: return false
+
+            val databaseUrl = "https://syncflow-6980e-default-rtdb.firebaseio.com"
+            val url = URL("$databaseUrl/$path.json?auth=$token")
+
+            Log.d(TAG, "Writing to Firebase REST API: $path")
+
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+
+            // Convert data to JSON
+            val jsonData = org.json.JSONObject(data).toString()
+            connection.outputStream.bufferedWriter().use { it.write(jsonData) }
+
+            val responseCode = connection.responseCode
+            Log.d(TAG, "REST API write response: $responseCode")
+            responseCode in 200..299
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing to Firebase via REST", e)
+            false
+        }
+    }
+
+    /**
+     * Look up user UID from phone number using Firebase REST API.
+     * This avoids the OOM issues caused by goOnline() syncing all data.
+     */
+    private suspend fun lookupPhoneToUid(phoneKey: String): String? {
+        return try {
+            // Get auth token for authenticated REST request
+            val token = auth.currentUser?.getIdToken(false)?.await()?.token
+                ?: return null
+
+            // Firebase REST API URL
+            val databaseUrl = "https://syncflow-6980e-default-rtdb.firebaseio.com"
+            val url = URL("$databaseUrl/phone_to_uid/$phoneKey.json?auth=$token")
+
+            Log.d(TAG, "Looking up phone via REST API: $phoneKey")
+
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+
+            val responseCode = connection.responseCode
+            if (responseCode == 200) {
+                val response = connection.inputStream.bufferedReader().readText()
+                Log.d(TAG, "REST API response: $response")
+
+                // Response is either "null" or "\"userId\""
+                if (response == "null" || response.isBlank()) {
+                    null
+                } else {
+                    // Remove surrounding quotes
+                    response.trim().removeSurrounding("\"")
+                }
+            } else {
+                Log.e(TAG, "REST API error: $responseCode")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error looking up phone_to_uid via REST", e)
+            null
+        }
     }
 
     private fun getDeviceId(): String {

@@ -46,7 +46,6 @@ class DeviceIdentifier {
         // Try to get from Keychain first
         if let keychainId = getFromKeychain() {
             cachedDeviceId = keychainId
-            print("[DeviceIdentifier] Retrieved device ID from Keychain: \(keychainId)")
             return keychainId
         }
 
@@ -57,7 +56,6 @@ class DeviceIdentifier {
         saveToKeychain(newId)
         cachedDeviceId = newId
 
-        print("[DeviceIdentifier] Generated new device ID: \(newId)")
         return newId
     }
 
@@ -81,7 +79,6 @@ class DeviceIdentifier {
     func resetDeviceId() {
         deleteFromKeychain()
         cachedDeviceId = nil
-        print("[DeviceIdentifier] Device ID reset")
     }
 
     // MARK: - Private Methods
@@ -209,7 +206,6 @@ class DeviceIdentifier {
         if status != errSecSuccess {
             print("[DeviceIdentifier] Keychain write error: \(status)")
         } else {
-            print("[DeviceIdentifier] Device ID saved to Keychain")
         }
     }
 

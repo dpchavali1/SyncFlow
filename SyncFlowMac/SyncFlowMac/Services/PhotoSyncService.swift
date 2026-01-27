@@ -50,20 +50,17 @@ class PhotoSyncService: ObservableObject {
     func startSync(userId: String) {
         // Check subscription status - photo sync is premium only
         guard hasPremiumAccess else {
-            print("PhotoSyncService: Photo sync requires premium subscription")
             return
         }
 
         currentUserId = userId
         startListeningForPhotos(userId: userId)
-        print("PhotoSyncService: Started syncing for user \(userId)")
     }
 
     /// Stop syncing
     func stopSync() {
         stopListeningForPhotos()
         currentUserId = nil
-        print("PhotoSyncService: Stopped syncing")
     }
 
     /// Listen for photo updates from Firebase
@@ -93,7 +90,6 @@ class PhotoSyncService: ObservableObject {
             DispatchQueue.main.async {
                 self.recentPhotos = photos
                 self.lastSyncTime = Date()
-                print("PhotoSyncService: Received \(photos.count) photos")
             }
 
             // Download thumbnails
@@ -182,7 +178,6 @@ class PhotoSyncService: ObservableObject {
                     }
                 }
 
-                print("PhotoSyncService: Downloaded thumbnail for \(photo.fileName)")
             } catch {
                 print("PhotoSyncService: Error saving thumbnail: \(error)")
             }
@@ -214,7 +209,6 @@ class PhotoSyncService: ObservableObject {
             // Show in Finder
             NSWorkspace.shared.selectFile(destination.path, inFileViewerRootedAtPath: "")
 
-            print("PhotoSyncService: Saved photo to \(destination.path)")
         } catch {
             print("PhotoSyncService: Error saving photo: \(error)")
         }
@@ -235,7 +229,6 @@ class PhotoSyncService: ObservableObject {
                 }
             }
 
-            print("PhotoSyncService: Cache cleared")
         } catch {
             print("PhotoSyncService: Error clearing cache: \(error)")
         }
@@ -245,13 +238,11 @@ class PhotoSyncService: ObservableObject {
     func reduceSyncFrequency() {
         // Reduce sync frequency by increasing polling interval
         // This would typically reduce the frequency of photo sync operations
-        print("PhotoSyncService: Reducing sync frequency")
     }
 
     /// Pause photo sync temporarily
     func pauseSync() {
         stopSync()
-        print("PhotoSyncService: Paused syncing")
     }
 
     /// Resume photo sync

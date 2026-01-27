@@ -1,0 +1,240 @@
+package com.phoneintegration.app.ui.settings
+
+import android.widget.Toast
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SyncSettingsScreen(
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val syncState by SyncManager.syncState.collectAsStateWithLifecycle()
+
+    var selectedDays by remember { mutableStateOf(30) }
+
+    val dayOptions = listOf(
+        30 to "Last 30 days",
+        60 to "Last 60 days",
+        90 to "Last 90 days",
+        180 to "Last 6 months",
+        365 to "Last year",
+        -1 to "All messages"
+    )
+
+    // Show toast when sync completes or fails
+    LaunchedEffect(syncState.isComplete, syncState.error) {
+        if (syncState.isComplete && syncState.error == null && syncState.totalCount > 0) {
+            Toast.makeText(
+                context,
+                "Successfully synced ${syncState.syncedCount} messages",
+                Toast.LENGTH_LONG
+            ).show()
+        } else if (syncState.error != null) {
+            Toast.makeText(
+                context,
+                "Sync failed: ${syncState.error}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Sync Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Info Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(Icons.Filled.Sync, contentDescription = null)
+                        Column {
+                            Text(
+                                "Sync Message History",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                "Load older messages to your Mac/PC",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Description
+            Text(
+                "By default, SyncFlow syncs the last 30 days of messages. " +
+                "Use this option to sync older messages to your connected Mac or PC.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // MMS note
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        Icons.Filled.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Text(
+                        text = "MMS messages will sync text only. Images and attachments are not included in history sync to improve speed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+
+            // Day Selection
+            Text(
+                "Select time range:",
+                style = MaterialTheme.typography.titleSmall
+            )
+
+            dayOptions.forEach { (days, label) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = selectedDays == days,
+                        onClick = { selectedDays = days },
+                        enabled = !syncState.isSyncing
+                    )
+                    Text(
+                        text = label,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Sync Button
+            Button(
+                onClick = { SyncManager.startSync(context, selectedDays) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !syncState.isSyncing
+            ) {
+                if (syncState.isSyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(Icons.Filled.CloudDownload, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (syncState.isSyncing) "Syncing..." else "Sync Message History")
+            }
+
+            // Progress
+            if (syncState.isSyncing || syncState.status.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (syncState.error != null)
+                            MaterialTheme.colorScheme.errorContainer
+                        else
+                            MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(
+                            syncState.status,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (syncState.error != null)
+                                MaterialTheme.colorScheme.onErrorContainer
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        if (syncState.totalCount > 0) {
+                            Spacer(Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { syncState.progress },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "${syncState.syncedCount} / ${syncState.totalCount} messages",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Sync again button (after completion)
+            if (syncState.isComplete) {
+                OutlinedButton(
+                    onClick = { SyncManager.resetState() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Sync Again")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Note
+            Text(
+                "Note: Sync continues in background even if you leave this screen. " +
+                "Keep the app open until sync completes.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}

@@ -12,7 +12,9 @@ import com.phoneintegration.app.auth.AuthManager
 import com.phoneintegration.app.MmsHelper
 import com.phoneintegration.app.MmsAttachment
 import com.phoneintegration.app.PhoneNumberUtils
+import com.phoneintegration.app.SimManager
 import com.phoneintegration.app.SmsMessage
+import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.data.database.Group
 import com.phoneintegration.app.data.database.GroupMember
 import com.phoneintegration.app.data.PreferencesManager
@@ -22,10 +24,17 @@ import com.phoneintegration.app.usage.UsageCheck
 import com.phoneintegration.app.usage.UsageTracker
 import com.phoneintegration.app.utils.NetworkUtils
 import com.phoneintegration.app.utils.RetryUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.security.SecureRandom
 
@@ -46,6 +55,27 @@ class DesktopSyncService(context: Context) {
     private val e2eeManager = SignalProtocolManager(this.context)
     private val preferencesManager = PreferencesManager(this.context)
     private val usageTracker = UsageTracker(database)
+    private val simManager = SimManager(this.context)
+
+    // Cache of user's own phone numbers (normalized, last 10 digits) for filtering
+    private val userPhoneNumbers: Set<String> by lazy {
+        val numbers = mutableSetOf<String>()
+        try {
+            simManager.getActiveSims().forEach { sim ->
+                sim.phoneNumber?.let { phone ->
+                    // Store only the last 10 digits (standard US number length without country code)
+                    val normalized = phone.replace(Regex("[^0-9]"), "")
+                    if (normalized.length >= 10) {
+                        numbers.add(normalized.takeLast(10))
+                        Log.d(TAG, "Added user phone number to filter: ${normalized.takeLast(10)}")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not get user phone numbers: ${e.message}")
+        }
+        numbers
+    }
 
     companion object {
         private const val TAG = "DesktopSyncService"
@@ -56,6 +86,54 @@ class DesktopSyncService(context: Context) {
         private const val ATTACHMENTS_PATH = "attachments"
         private const val MESSAGE_REACTIONS_PATH = "message_reactions"
         private const val SPAM_MESSAGES_PATH = "spam_messages"
+        private const val SYNC_REQUESTS_PATH = "sync_requests"
+
+        // Cached paired devices status for fast checks
+        private const val PREFS_NAME = "desktop_sync_prefs"
+        private const val KEY_HAS_PAIRED_DEVICES = "has_paired_devices"
+        private const val KEY_PAIRED_DEVICES_COUNT = "paired_devices_count"
+        private const val KEY_LAST_CHECK_TIME = "last_paired_check_time"
+        private const val CACHE_VALID_MS = 5 * 60 * 1000L // 5 minutes
+
+        /**
+         * Fast synchronous check if devices are paired (uses cached value)
+         * Call this before any sync operation to skip unnecessary work
+         */
+        fun hasPairedDevices(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_HAS_PAIRED_DEVICES, false)
+        }
+
+        /**
+         * Get cached paired devices count
+         */
+        fun getCachedDeviceCount(context: Context): Int {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getInt(KEY_PAIRED_DEVICES_COUNT, 0)
+        }
+
+        /**
+         * Update the cached paired devices status
+         * Called after pairing/unpairing or after fetching device list
+         */
+        fun updatePairedDevicesCache(context: Context, hasPaired: Boolean, count: Int = 0) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putBoolean(KEY_HAS_PAIRED_DEVICES, hasPaired)
+                .putInt(KEY_PAIRED_DEVICES_COUNT, count)
+                .putLong(KEY_LAST_CHECK_TIME, System.currentTimeMillis())
+                .apply()
+            Log.d(TAG, "Updated paired devices cache: hasPaired=$hasPaired, count=$count")
+        }
+
+        /**
+         * Check if cache needs refresh
+         */
+        fun isCacheStale(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val lastCheck = prefs.getLong(KEY_LAST_CHECK_TIME, 0)
+            return System.currentTimeMillis() - lastCheck > CACHE_VALID_MS
+        }
     }
 
     init {
@@ -74,50 +152,31 @@ class DesktopSyncService(context: Context) {
      * not on every user ID request.
      */
     suspend fun getCurrentUserId(): String {
-        // First, check for recovered user ID from RecoveryCodeManager
+        // Priority 1: Use current Firebase Auth user (this is the source of truth)
+        FirebaseAuth.getInstance().currentUser?.let { return it.uid }
+
+        // Priority 2: Try AuthManager
+        authManager.getCurrentUserId()?.let { return it }
+
+        // Priority 3: Check RecoveryCodeManager (only as fallback when not signed in)
         val recoveryManager = com.phoneintegration.app.auth.RecoveryCodeManager.getInstance(context)
-        val recoveredUserId = recoveryManager.getEffectiveUserId()
-        if (recoveredUserId != null) {
-            Log.d(TAG, "getCurrentUserId - Using recovered/effective user: $recoveredUserId")
-            // Ensure we're signed in (anonymous is fine, we just need auth for Firebase access)
-            if (FirebaseAuth.getInstance().currentUser == null) {
-                Log.d(TAG, "getCurrentUserId - Signing in anonymously for Firebase access")
-                FirebaseAuth.getInstance().signInAnonymously().await()
-            }
+        recoveryManager.getEffectiveUserId()?.let { recoveredUserId ->
+            FirebaseAuth.getInstance().signInAnonymously().await()
             return recoveredUserId
         }
 
-        val currentUser = FirebaseAuth.getInstance().currentUser
-
-        // If we have a current user, use their UID directly
-        if (currentUser != null) {
-            Log.d(TAG, "getCurrentUserId - Using current user: ${currentUser.uid}")
-            return currentUser.uid
-        }
-
-        // Fallback: try AuthManager
-        authManager.getCurrentUserId()?.let { userId ->
-            Log.d(TAG, "getCurrentUserId - Using AuthManager user: $userId")
-            return userId
-        }
-
         // Last resort: sign in anonymously
-        Log.d(TAG, "getCurrentUserId - No authenticated user found, creating anonymous user")
         val result = authManager.signInAnonymously()
-        val userId = result.getOrNull() ?: run {
-            Log.e(TAG, "Error signing in anonymously")
-            throw Exception("Authentication failed")
-        }
-        Log.d(TAG, "getCurrentUserId - Signed in anonymously as: $userId")
-        return userId
+        return result.getOrNull() ?: throw Exception("Authentication failed")
     }
 
     /**
      * Get the "conversation partner" address for a message.
      * For received messages (type=1), this is the sender's address.
      * For sent messages (type=2), we need to find the recipient from the thread.
+     * Returns null only if the final resolved address is the user's own number.
      */
-    private suspend fun getConversationAddress(message: SmsMessage): String {
+    private suspend fun getConversationAddress(message: SmsMessage): String? {
         // For received messages, the address is already the other party
         if (message.type == 1) {
             return message.address
@@ -133,17 +192,22 @@ class DesktopSyncService(context: Context) {
                 .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
 
             if (recipients.isNotEmpty()) {
-                val exact = recipients.firstOrNull {
-                    PhoneNumberUtils.areNumbersEqual(it, message.address)
+                // Prefer recipients that are NOT the user's own number
+                val nonUserRecipients = recipients.filterNot { isUserOwnNumber(it) }
+                if (nonUserRecipients.isNotEmpty()) {
+                    return nonUserRecipients.first()
                 }
-                return exact ?: recipients.first()
+                // All recipients are user's own number - skip this message
+                Log.w(TAG, "MMS ${message.id} only has user's own number as recipient, skipping")
+                return null
             }
 
             return message.address
         }
 
-        // For sent messages, we need to find the recipient
-        // Query the thread to find a received message and get its address
+        // For sent SMS messages (type=2), the message.address SHOULD be the recipient
+        // But some Android implementations store the sender's number instead
+        // We need to verify by checking the Threads table
         try {
             val uri = android.provider.Telephony.Sms.CONTENT_URI
             val cursor = context.contentResolver.query(
@@ -159,15 +223,51 @@ class DesktopSyncService(context: Context) {
             )
 
             var threadId: Long? = null
+            var smsAddress: String? = null
             cursor?.use {
                 if (it.moveToFirst()) {
+                    smsAddress = it.getString(0)
                     threadId = it.getLong(2)
                 }
             }
 
-            // If we found the thread ID, look for a received message in that thread
+            // Try to get the recipient address from the Threads table
+            // This is the most reliable source for the conversation partner
             if (threadId != null) {
-                val threadCursor = context.contentResolver.query(
+                try {
+                    val threadsUri = android.net.Uri.parse("content://mms-sms/conversations?simple=true")
+                    val threadCursor = context.contentResolver.query(
+                        threadsUri,
+                        arrayOf("_id", "recipient_ids"),
+                        "_id = ?",
+                        arrayOf(threadId.toString()),
+                        null
+                    )
+
+                    threadCursor?.use {
+                        if (it.moveToFirst()) {
+                            val recipientIdsIndex = it.getColumnIndex("recipient_ids")
+                            if (recipientIdsIndex >= 0) {
+                                val recipientIds = it.getString(recipientIdsIndex)
+                                if (!recipientIds.isNullOrBlank()) {
+                                    // Resolve ALL recipient_ids and filter out user's own number
+                                    val allIds = recipientIds.split(" ").filter { id -> id.isNotBlank() }
+                                    for (recipientId in allIds) {
+                                        val resolvedAddress = resolveRecipientId(recipientId)
+                                        if (!resolvedAddress.isNullOrBlank() && !isUserOwnNumber(resolvedAddress)) {
+                                            return resolvedAddress
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not query Threads table: ${e.message}")
+                }
+
+                // Fallback: look for a received message in the same thread
+                val threadMsgCursor = context.contentResolver.query(
                     uri,
                     arrayOf(android.provider.Telephony.Sms.ADDRESS),
                     "${android.provider.Telephony.Sms.THREAD_ID} = ? AND ${android.provider.Telephony.Sms.TYPE} = 1",
@@ -175,22 +275,66 @@ class DesktopSyncService(context: Context) {
                     "${android.provider.Telephony.Sms.DATE} DESC LIMIT 1"
                 )
 
-                threadCursor?.use {
+                threadMsgCursor?.use {
                     if (it.moveToFirst()) {
                         val recipientAddress = it.getString(0)
                         if (!recipientAddress.isNullOrBlank()) {
-                            Log.d(TAG, "Found conversation partner for sent message: $recipientAddress")
+                            // Received message address is the OTHER party, use it
                             return recipientAddress
                         }
                     }
                 }
             }
+
+            // Use the address from the SMS table query if available
+            if (!smsAddress.isNullOrBlank()) {
+                // Only skip if this address is definitively the user's own number
+                if (isUserOwnNumber(smsAddress!!)) {
+                    Log.w(TAG, "Sent SMS ${message.id} has user's own number as address, skipping")
+                    return null
+                }
+                return smsAddress!!
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error finding conversation address", e)
         }
 
-        // Fallback: return the original address
+        // Final fallback: only skip if address is user's own number
+        if (isUserOwnNumber(message.address)) {
+            Log.w(TAG, "Could not determine recipient for sent message ${message.id}, address is user's own number")
+            return null
+        }
+
+        // Fallback: return the original address from the message
         return message.address
+    }
+
+    /**
+     * Resolve a recipient_id to an actual phone number using the canonical_addresses table
+     */
+    private fun resolveRecipientId(recipientId: String): String? {
+        try {
+            val canonicalUri = android.net.Uri.parse("content://mms-sms/canonical-addresses")
+            val cursor = context.contentResolver.query(
+                canonicalUri,
+                arrayOf("_id", "address"),
+                "_id = ?",
+                arrayOf(recipientId),
+                null
+            )
+
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val addressIndex = it.getColumnIndex("address")
+                    if (addressIndex >= 0) {
+                        return it.getString(addressIndex)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not resolve recipient ID $recipientId: ${e.message}")
+        }
+        return null
     }
 
     private fun isRcsAddress(address: String): Boolean {
@@ -203,11 +347,30 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
+     * Check if an address is the user's own phone number.
+     * Used to filter out incorrectly resolved sent message addresses.
+     * Only matches on last 10 digits to avoid false positives while still
+     * handling different country code formats.
+     */
+    private fun isUserOwnNumber(address: String): Boolean {
+        if (userPhoneNumbers.isEmpty()) return false
+        val normalized = address.replace(Regex("[^0-9]"), "")
+        // Need at least 10 digits for a valid comparison
+        if (normalized.length < 10) return false
+        val last10 = normalized.takeLast(10)
+        val isMatch = userPhoneNumbers.contains(last10)
+        if (isMatch) {
+            Log.d(TAG, "Address $address matches user's own number")
+        }
+        return isMatch
+    }
+
+    /**
      * Sync a message to Firebase with E2EE encryption
      */
-    suspend fun syncMessage(message: SmsMessage) {
+    suspend fun syncMessage(message: SmsMessage, skipAttachments: Boolean = false) {
         try {
-            Log.d(TAG, "Starting sync for message: id=${message.id}, isMms=${message.isMms}, address=${message.address}, body length=${message.body?.length ?: 0}")
+            Log.d(TAG, "Starting sync for message: id=${message.id}, isMms=${message.isMms}, address=${message.address}, body length=${message.body?.length ?: 0}, skipAttachments=$skipAttachments")
 
             // Check network connectivity before syncing
             if (!NetworkUtils.isNetworkAvailable(context)) {
@@ -236,6 +399,13 @@ class DesktopSyncService(context: Context) {
 
             // Get the normalized conversation address (the "other party")
             val conversationAddress = getConversationAddress(message)
+
+            // Skip messages where we couldn't determine the conversation partner
+            // This happens when the address is the user's own phone number
+            if (conversationAddress == null) {
+                Log.w(TAG, "Skipping message ${message.id} - could not determine conversation partner")
+                return
+            }
 
             val messageData = mutableMapOf<String, Any?>(
                 "id" to messageKey,
@@ -308,21 +478,25 @@ class DesktopSyncService(context: Context) {
 
             // Handle MMS attachments
             if (message.isMms) {
-                Log.d(TAG, "Processing MMS attachments for message ${message.id}")
                 messageData["isMms"] = true
-                val attachments = if (message.mmsAttachments.isNotEmpty()) {
-                    Log.d(TAG, "Using existing MMS attachments: ${message.mmsAttachments.size}")
-                    message.mmsAttachments
+                if (skipAttachments) {
+                    Log.d(TAG, "Skipping attachments for MMS message ${message.id} (history sync)")
                 } else {
-                    Log.d(TAG, "Loading MMS attachments from provider for message ${message.id}")
-                    loadMmsAttachmentsFromProvider(message.id)
-                }
-                Log.d(TAG, "Found ${attachments.size} MMS attachments")
-                if (attachments.isNotEmpty()) {
-                    val attachmentUrls = uploadMmsAttachments(userId, message.id, attachments)
-                    Log.d(TAG, "Uploaded ${attachmentUrls.size} MMS attachment URLs")
-                    if (attachmentUrls.isNotEmpty()) {
-                        messageData["attachments"] = attachmentUrls
+                    Log.d(TAG, "Processing MMS attachments for message ${message.id}")
+                    val attachments = if (message.mmsAttachments.isNotEmpty()) {
+                        Log.d(TAG, "Using existing MMS attachments: ${message.mmsAttachments.size}")
+                        message.mmsAttachments
+                    } else {
+                        Log.d(TAG, "Loading MMS attachments from provider for message ${message.id}")
+                        loadMmsAttachmentsFromProvider(message.id)
+                    }
+                    Log.d(TAG, "Found ${attachments.size} MMS attachments")
+                    if (attachments.isNotEmpty()) {
+                        val attachmentUrls = uploadMmsAttachments(userId, message.id, attachments)
+                        Log.d(TAG, "Uploaded ${attachmentUrls.size} MMS attachment URLs")
+                        if (attachmentUrls.isNotEmpty()) {
+                            messageData["attachments"] = attachmentUrls
+                        }
                     }
                 }
             }
@@ -389,31 +563,34 @@ class DesktopSyncService(context: Context) {
      * Sync a spam message to Firebase so it persists across reinstalls/devices.
      */
     suspend fun syncSpamMessage(message: com.phoneintegration.app.data.database.SpamMessage) {
-        try {
-            val userId = getCurrentUserId()
-            val spamRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(SPAM_MESSAGES_PATH)
-                .child(message.messageId.toString())
+        withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val spamMessageData = hashMapOf<String, Any>(
+                    "address" to message.address,
+                    "body" to message.body,
+                    "date" to message.date,
+                    "contactName" to (message.contactName ?: message.address),
+                    "spamConfidence" to message.spamConfidence.toDouble(),
+                    "spamReasons" to (message.spamReasons ?: "user_marked"),
+                    "detectedAt" to message.detectedAt,
+                    "isUserMarked" to message.isUserMarked,
+                    "isRead" to message.isRead
+                )
 
-            val payload = mapOf(
-                "messageId" to message.messageId,
-                "address" to message.address,
-                "body" to message.body,
-                "date" to message.date,
-                "contactName" to message.contactName,
-                "spamConfidence" to message.spamConfidence,
-                "spamReasons" to message.spamReasons,
-                "detectedAt" to message.detectedAt,
-                "isUserMarked" to message.isUserMarked,
-                "isRead" to message.isRead,
-                "timestamp" to ServerValue.TIMESTAMP
-            )
+                val data = hashMapOf<String, Any>(
+                    "messageId" to message.messageId.toString(),
+                    "spamMessage" to spamMessageData
+                )
 
-            spamRef.setValue(payload).await()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error syncing spam message ${message.messageId}", e)
+                val response = functions.getHttpsCallable("syncSpamMessage").call(data).await()
+                val resultData = response.data as? Map<*, *>
+                val success = resultData?.get("success") as? Boolean ?: false
+                if (!success) {
+                    Log.e(TAG, "Failed to sync spam message ${message.messageId}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing spam message ${message.messageId}", e)
+            }
         }
     }
 
@@ -482,29 +659,100 @@ class DesktopSyncService(context: Context) {
     }
 
     suspend fun deleteSpamMessage(messageId: Long) {
-        try {
-            val userId = getCurrentUserId()
-            val spamRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(SPAM_MESSAGES_PATH)
-                .child(messageId.toString())
-            spamRef.removeValue().await()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error deleting spam message $messageId", e)
+        withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val data = hashMapOf<String, Any>("messageId" to messageId.toString())
+                functions.getHttpsCallable("deleteSpamMessage").call(data).await()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error deleting spam message $messageId", e)
+            }
         }
     }
 
     suspend fun clearAllSpamMessages() {
-        try {
-            val userId = getCurrentUserId()
-            val spamRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(SPAM_MESSAGES_PATH)
-            spamRef.removeValue().await()
+        withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                functions.getHttpsCallable("clearAllSpamMessages").call(hashMapOf<String, Any>()).await()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error clearing spam messages", e)
+            }
+        }
+    }
+
+    /**
+     * Real-time listener for spam messages from Firebase.
+     * This enables bidirectional sync - when Mac/Web marks a message as spam,
+     * Android will receive the update in real-time.
+     */
+    fun listenForSpamMessages(): Flow<List<com.phoneintegration.app.data.database.SpamMessage>> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
         } catch (e: Exception) {
-            Log.e(TAG, "Error clearing spam messages", e)
+            Log.e(TAG, "Cannot listen for spam - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val spamRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(SPAM_MESSAGES_PATH)
+
+        Log.d(TAG, "Setting up real-time spam listener for user: $userId")
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val list = mutableListOf<com.phoneintegration.app.data.database.SpamMessage>()
+                snapshot.children.forEach { child ->
+                    try {
+                        val address = child.child("address").getValue(String::class.java) ?: return@forEach
+                        val body = child.child("body").getValue(String::class.java) ?: ""
+                        val date = child.child("date").getValue(Long::class.java) ?: 0L
+                        val id = child.child("messageId").getValue(Long::class.java)
+                            ?: child.key?.toLongOrNull()
+                            ?: child.child("originalMessageId").getValue(String::class.java)?.toLongOrNull()
+                            ?: generateSpamFallbackId(address, body, date)
+                            ?: return@forEach
+                        val contactName = child.child("contactName").getValue(String::class.java)
+                        val spamConfidence = (child.child("spamConfidence").getValue(Double::class.java)
+                            ?: child.child("spamConfidence").getValue(Float::class.java)?.toDouble()
+                            ?: 0.5).toFloat()
+                        val spamReasons = child.child("spamReasons").getValue(String::class.java)
+                        val detectedAt = child.child("detectedAt").getValue(Long::class.java) ?: System.currentTimeMillis()
+                        val isUserMarked = child.child("isUserMarked").getValue(Boolean::class.java) ?: false
+                        val isRead = child.child("isRead").getValue(Boolean::class.java) ?: false
+
+                        list.add(
+                            com.phoneintegration.app.data.database.SpamMessage(
+                                messageId = id,
+                                address = address,
+                                body = body,
+                                date = date,
+                                contactName = contactName,
+                                spamConfidence = spamConfidence,
+                                spamReasons = spamReasons,
+                                detectedAt = detectedAt,
+                                isUserMarked = isUserMarked,
+                                isRead = isRead
+                            )
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error parsing spam message ${child.key}", e)
+                    }
+                }
+                Log.d(TAG, "Spam listener received ${list.size} messages")
+                trySend(list.sortedByDescending { it.date }).isSuccess
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Spam listener cancelled: ${error.message}")
+            }
+        }
+
+        spamRef.addValueEventListener(listener)
+        awaitClose {
+            Log.d(TAG, "Removing spam listener")
+            spamRef.removeEventListener(listener)
         }
     }
 
@@ -825,7 +1073,8 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Sync multiple messages to Firebase
+     * Sync multiple messages to Firebase using batched writes for better performance.
+     * Messages are processed in parallel chunks with a concurrency limit.
      */
     suspend fun syncMessages(messages: List<SmsMessage>) {
         // Early exit if no network - avoid looping through messages
@@ -834,9 +1083,46 @@ class DesktopSyncService(context: Context) {
             return
         }
 
-        for (message in messages) {
-            syncMessage(message)
+        if (messages.isEmpty()) return
+
+        val startTime = System.currentTimeMillis()
+        Log.d(TAG, "Starting batched sync of ${messages.size} messages")
+
+        // Filter out RCS/RBM messages upfront
+        val filteredMessages = messages.filter { msg ->
+            !msg.address.contains("@rbm.goog", ignoreCase = true) && !isRcsAddress(msg.address)
         }
+
+        Log.d(TAG, "After filtering: ${filteredMessages.size} messages to sync")
+
+        // Process in parallel with limited concurrency (50 at a time)
+        val chunkSize = 50
+        val chunks = filteredMessages.chunked(chunkSize)
+
+        for ((index, chunk) in chunks.withIndex()) {
+            Log.d(TAG, "Processing chunk ${index + 1}/${chunks.size} (${chunk.size} messages)")
+
+            // Process each chunk in parallel using coroutines
+            coroutineScope {
+                chunk.map { message: SmsMessage ->
+                    async(Dispatchers.IO) {
+                        try {
+                            syncMessage(message)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error syncing message ${message.id}: ${e.message}")
+                        }
+                    }
+                }.awaitAll()
+            }
+
+            // Small delay between chunks to avoid overwhelming Firebase
+            if (index < chunks.size - 1) {
+                delay(100)
+            }
+        }
+
+        val duration = System.currentTimeMillis() - startTime
+        Log.d(TAG, "Batched sync completed: ${filteredMessages.size} messages in ${duration}ms")
     }
 
     /**
@@ -986,10 +1272,15 @@ class DesktopSyncService(context: Context) {
             val deviceInfo = getDeviceInfo()
             if (deviceInfo == null) {
                 Log.w(TAG, "getDeviceInfo returned null, returning empty list")
+                updatePairedDevicesCache(context, false, 0)
                 return@withContext emptyList()
             }
 
             Log.d(TAG, "=== RESULT: Found ${deviceInfo.devices.size} paired devices ===")
+
+            // Update cache for fast checks
+            updatePairedDevicesCache(context, deviceInfo.devices.isNotEmpty(), deviceInfo.devices.size)
+
             deviceInfo.devices
         } catch (e: Exception) {
             Log.e(TAG, "ERROR getting paired devices: ${e.message}", e)
@@ -1638,7 +1929,179 @@ class DesktopSyncService(context: Context) {
             Log.e(TAG, "Error updating call state after retries", e)
         }
     }
+
+    // =========================================================================
+    // SYNC HISTORY REQUESTS - Load older messages on demand from Mac/Web
+    // =========================================================================
+
+    /**
+     * Listen for sync history requests from Mac/Web clients.
+     * When a request comes in, load the requested messages and sync them.
+     */
+    fun listenForSyncRequests(): Flow<SyncHistoryRequest> = callbackFlow {
+        val userId = runCatching { getCurrentUserId() }.getOrNull()
+        if (userId == null) {
+            close()
+            return@callbackFlow
+        }
+
+        val syncRequestsRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(SYNC_REQUESTS_PATH)
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                val requestId = snapshot.key ?: return
+                val data = snapshot.value as? Map<String, Any?> ?: return
+
+                val status = data["status"] as? String ?: "pending"
+                if (status != "pending") return // Only process pending requests
+
+                val request = SyncHistoryRequest(
+                    id = requestId,
+                    days = (data["days"] as? Number)?.toInt() ?: 30,
+                    requestedAt = (data["requestedAt"] as? Number)?.toLong() ?: System.currentTimeMillis(),
+                    requestedBy = data["requestedBy"] as? String ?: "unknown"
+                )
+
+                trySend(request)
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onChildRemoved(snapshot: DataSnapshot) {}
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Listen for sync requests cancelled", error.toException())
+            }
+        }
+
+        syncRequestsRef.addChildEventListener(listener)
+
+        awaitClose {
+            syncRequestsRef.removeEventListener(listener)
+        }
+    }
+
+    /**
+     * Process a sync history request - load messages for the requested period and sync them.
+     */
+    suspend fun processSyncHistoryRequest(request: SyncHistoryRequest) {
+        val userId = getCurrentUserId()
+        val requestRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(SYNC_REQUESTS_PATH)
+            .child(request.id)
+
+        try {
+            Log.d(TAG, "Processing sync history request: ${request.id}, days=${request.days}")
+
+            // Update status to in_progress
+            requestRef.updateChildren(mapOf(
+                "status" to "in_progress",
+                "startedAt" to ServerValue.TIMESTAMP
+            )).await()
+
+            // Load messages for the requested period
+            val smsRepository = SmsRepository(context)
+            val messages = if (request.days <= 0) {
+                // Load all messages (use a very large number of days)
+                smsRepository.getMessagesFromLastDays(days = 3650) // ~10 years
+            } else {
+                smsRepository.getMessagesFromLastDays(days = request.days)
+            }
+
+            Log.d(TAG, "Loaded ${messages.size} messages for sync request ${request.id}")
+
+            // Update progress
+            requestRef.updateChildren(mapOf(
+                "totalMessages" to messages.size,
+                "syncedMessages" to 0
+            )).await()
+
+            // Sync messages in batches
+            val batchSize = 50
+            var syncedCount = 0
+
+            messages.chunked(batchSize).forEach { batch ->
+                syncMessages(batch)
+                syncedCount += batch.size
+
+                // Update progress
+                requestRef.updateChildren(mapOf(
+                    "syncedMessages" to syncedCount
+                )).await()
+            }
+
+            // Mark as completed
+            requestRef.updateChildren(mapOf(
+                "status" to "completed",
+                "completedAt" to ServerValue.TIMESTAMP,
+                "syncedMessages" to messages.size
+            )).await()
+
+            Log.d(TAG, "Sync history request ${request.id} completed: ${messages.size} messages synced")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing sync history request ${request.id}", e)
+
+            // Mark as failed
+            try {
+                requestRef.updateChildren(mapOf(
+                    "status" to "failed",
+                    "error" to (e.message ?: "Unknown error"),
+                    "failedAt" to ServerValue.TIMESTAMP
+                )).await()
+            } catch (updateError: Exception) {
+                Log.e(TAG, "Failed to update request status", updateError)
+            }
+        }
+    }
+
+    /**
+     * Get current sync settings (last synced date range)
+     */
+    suspend fun getSyncSettings(): SyncSettings? {
+        return try {
+            val userId = getCurrentUserId()
+            val settingsRef = database.reference
+                .child(USERS_PATH)
+                .child(userId)
+                .child("sync_settings")
+
+            val snapshot = settingsRef.get().await()
+            if (!snapshot.exists()) return null
+
+            val data = snapshot.value as? Map<String, Any?> ?: return null
+            SyncSettings(
+                lastSyncDays = (data["lastSyncDays"] as? Number)?.toInt() ?: 30,
+                lastFullSyncAt = (data["lastFullSyncAt"] as? Number)?.toLong()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting sync settings", e)
+            null
+        }
+    }
 }
+
+/**
+ * Sync history request from Mac/Web
+ */
+data class SyncHistoryRequest(
+    val id: String,
+    val days: Int, // Number of days to sync, or -1 for all
+    val requestedAt: Long,
+    val requestedBy: String // Device ID that requested the sync
+)
+
+/**
+ * Sync settings
+ */
+data class SyncSettings(
+    val lastSyncDays: Int = 30,
+    val lastFullSyncAt: Long? = null
+)
 
 /**
  * Represents a paired device

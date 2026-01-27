@@ -421,9 +421,15 @@ class PhoneStatusService(context: Context) {
                 "deviceName" to (Build.MODEL ?: "Android Device")
             )
 
-            statusRef.setValue(statusData).await()
+            // Use NonCancellable to ensure Firebase operation completes even if scope is cancelled
+            withContext(NonCancellable) {
+                statusRef.setValue(statusData).await()
+            }
             lastSyncedStatus = status
             Log.d(TAG, "Phone status synced to Firebase")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Ignore cancellation - this is expected during shutdown
+            Log.d(TAG, "Phone status sync cancelled (expected during shutdown)")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing phone status", e)
         }

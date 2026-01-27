@@ -1,7 +1,9 @@
 package com.phoneintegration.app
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.role.RoleManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -11,6 +13,7 @@ import android.provider.Settings
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.util.Log
+import android.view.WindowManager
 import com.google.android.gms.ads.MobileAds
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -19,11 +22,13 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.phoneintegration.app.CallMonitorService
 import com.phoneintegration.app.R
 import com.phoneintegration.app.SmsPermissions
 import com.phoneintegration.app.SmsViewModel
@@ -65,6 +70,14 @@ class MainActivity : ComponentActivity() {
     private var _pendingIncomingCallId: String? = null
     private var _pendingIncomingCallName: String? = null
     private var _pendingIncomingCallVideo: Boolean = false
+
+    // State for dismissing calls (can be triggered by broadcasts)
+    private val _dismissCallTrigger = mutableStateOf(0)
+    private val _endCallTrigger = mutableStateOf(0)
+
+    // Broadcast receivers for call dismissal (registered at Activity level for reliability)
+    private var callDismissReceiver: android.content.BroadcastReceiver? = null
+    private var callEndedReceiver: android.content.BroadcastReceiver? = null
 
     // Services are now managed by BatteryAwareServiceManager for optimal battery usage
 
@@ -157,6 +170,60 @@ class MainActivity : ComponentActivity() {
         return isDefault
     }
 
+    /**
+     * Request ROLE_CALL_SCREENING to get phone numbers for incoming calls
+     * This allows getting caller info without being the default dialer
+     */
+    private fun requestCallScreeningRole() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = getSystemService(RoleManager::class.java) as RoleManager
+            if (rm.isRoleAvailable(RoleManager.ROLE_CALL_SCREENING)) {
+                if (!rm.isRoleHeld(RoleManager.ROLE_CALL_SCREENING)) {
+                    android.util.Log.d("MainActivity", "Requesting ROLE_CALL_SCREENING")
+                    val intent = rm.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING)
+                    callScreeningRoleLauncher.launch(intent)
+                } else {
+                    android.util.Log.d("MainActivity", "Already have ROLE_CALL_SCREENING")
+                }
+            } else {
+                android.util.Log.w("MainActivity", "ROLE_CALL_SCREENING not available on this device")
+            }
+        }
+    }
+
+    private val callScreeningRoleLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        android.util.Log.d("MainActivity", "Call screening role result: ${result.resultCode}")
+        if (result.resultCode == RESULT_OK) {
+            android.util.Log.d("MainActivity", "ROLE_CALL_SCREENING granted!")
+        }
+    }
+
+    /**
+     * Request exemption from battery optimization to ensure reliable background operation
+     * This allows the app to run in background without being killed by Doze mode
+     */
+    @android.annotation.SuppressLint("BatteryLife")
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                android.util.Log.d("MainActivity", "Requesting battery optimization exemption")
+                try {
+                    val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = android.net.Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Failed to request battery optimization exemption", e)
+                }
+            } else {
+                android.util.Log.d("MainActivity", "Already exempt from battery optimization")
+            }
+        }
+    }
+
     // -------------------------------------------------------------
     // Permissions
     // -------------------------------------------------------------
@@ -247,12 +314,60 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Unregister broadcast receivers
+        unregisterCallBroadcastReceivers()
+
         // Clean up BatteryAwareServiceManager (it handles all service cleanup)
         try {
             BatteryAwareServiceManager.getInstance(applicationContext).cleanup()
             android.util.Log.d("MainActivity", "BatteryAwareServiceManager cleaned up")
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Error cleaning up BatteryAwareServiceManager", e)
+        }
+    }
+
+    private fun registerCallBroadcastReceivers() {
+        // Receiver for dismissing incoming call UI
+        callDismissReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val callId = intent?.getStringExtra("call_id")
+                val reason = intent?.getStringExtra("reason") ?: "unknown"
+                android.util.Log.d("MainActivity", "📞 BROADCAST: Dismiss incoming call - callId=$callId, reason=$reason")
+                _dismissCallTrigger.value++
+            }
+        }
+        val dismissFilter = android.content.IntentFilter("com.phoneintegration.app.DISMISS_INCOMING_CALL")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(callDismissReceiver, dismissFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(callDismissReceiver, dismissFilter)
+        }
+        android.util.Log.d("MainActivity", "📞 Registered DISMISS_INCOMING_CALL receiver")
+
+        // Receiver for call ended by remote
+        callEndedReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val callId = intent?.getStringExtra("call_id")
+                android.util.Log.d("MainActivity", "📞 BROADCAST: Call ended by remote - callId=$callId")
+                _endCallTrigger.value++
+            }
+        }
+        val endedFilter = android.content.IntentFilter("com.phoneintegration.app.CALL_ENDED_BY_REMOTE")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(callEndedReceiver, endedFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(callEndedReceiver, endedFilter)
+        }
+        android.util.Log.d("MainActivity", "📞 Registered CALL_ENDED_BY_REMOTE receiver")
+    }
+
+    private fun unregisterCallBroadcastReceivers() {
+        try {
+            callDismissReceiver?.let { unregisterReceiver(it) }
+            callEndedReceiver?.let { unregisterReceiver(it) }
+            android.util.Log.d("MainActivity", "📞 Unregistered call broadcast receivers")
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error unregistering call receivers", e)
         }
     }
 
@@ -277,19 +392,26 @@ class MainActivity : ComponentActivity() {
             requestCorePermissions()
         }
 
+        // Start CallMonitorService for phone call sync to Mac/Web
+        // Start it regardless of cached paired devices status - the service is lightweight
+        // and will properly sync calls when devices are paired
+        android.util.Log.d("MainActivity", "Starting CallMonitorService for phone call sync")
+        CallMonitorService.start(this)
+
         // Handle incoming/active call intent immediately
         // Only enable lock screen override if this is an incoming call
         val isIncomingCall = intent?.hasExtra("incoming_syncflow_call_id") == true ||
                 intent?.hasExtra("active_syncflow_call") == true ||
                 intent?.hasExtra("syncflow_call_action") == true
-        if (isIncomingCall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-            android.util.Log.d("MainActivity", "Enabled lock screen override for incoming call")
+        if (isIncomingCall) {
+            enableCallScreenOverLockScreen()
         }
         handleCallIntent(intent)
         handleShareIntent(intent)?.let { pendingSharePayload.value = it }
         handleConversationIntent(intent)?.let { pendingConversationLaunch.value = it }
+
+        // Register broadcast receivers for call dismissal (at Activity level for reliability)
+        registerCallBroadcastReceivers()
 
         android.util.Log.d("MainActivity", "Essential setup done in ${System.currentTimeMillis() - startTime}ms")
 
@@ -349,6 +471,18 @@ class MainActivity : ComponentActivity() {
                     kotlinx.coroutines.delay(1500)
                     requestDefaultDialerRole()
                 }
+            }
+
+            // Request call screening role to get phone numbers for incoming calls
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                kotlinx.coroutines.delay(500)
+                requestCallScreeningRole()
+            }
+
+            // Request battery optimization exemption for reliable background operation
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                kotlinx.coroutines.delay(500)
+                requestBatteryOptimizationExemption()
             }
 
             // Schedule background workers (low priority) - use appContext
@@ -432,6 +566,9 @@ class MainActivity : ComponentActivity() {
             val callState by callManager?.callState?.collectAsState() ?: remember { mutableStateOf(null) }
             val currentCall by callManager?.currentCall?.collectAsState() ?: remember { mutableStateOf(null) }
 
+            // Observe the service's pending incoming call flow directly (more reliable than broadcasts)
+            val servicePendingCall by SyncFlowCallService.pendingIncomingCallFlow.collectAsState()
+
             // Incoming call state
             var incomingCallId by remember { mutableStateOf<String?>(null) }
             var incomingCallerName by remember { mutableStateOf<String?>(null) }
@@ -439,6 +576,71 @@ class MainActivity : ComponentActivity() {
 
             // Active call state (when answering from notification)
             var showActiveCallScreen by remember { mutableStateOf(false) }
+
+            // Track if we launched from a locked screen - used to finish activity when call ends
+            var wasLaunchedFromLockedScreen by remember { mutableStateOf(false) }
+
+            // Check if device is currently locked
+            LaunchedEffect(Unit) {
+                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                wasLaunchedFromLockedScreen = keyguardManager.isKeyguardLocked
+                if (wasLaunchedFromLockedScreen) {
+                    android.util.Log.d("MainActivity", "App launched from locked screen")
+                }
+            }
+
+            // React to service's pending incoming call flow changes (most reliable method)
+            LaunchedEffect(servicePendingCall) {
+                android.util.Log.d("MainActivity", "📞 servicePendingCall changed: ${servicePendingCall?.id}")
+                if (servicePendingCall == null && incomingCallId != null) {
+                    // Service says no incoming call, but we're showing one - dismiss it
+                    android.util.Log.d("MainActivity", "📞 Service has no pending call, dismissing incoming call UI")
+                    incomingCallId = null
+                    incomingCallerName = null
+                    incomingIsVideo = false
+
+                    // If we were launched from locked screen just for this call, finish the activity
+                    if (wasLaunchedFromLockedScreen) {
+                        android.util.Log.d("MainActivity", "📞 Was launched from locked screen, finishing activity")
+                        finish()
+                    }
+                }
+            }
+
+            // React to dismiss call trigger from broadcast receiver (registered at Activity level)
+            val dismissTrigger by _dismissCallTrigger
+            LaunchedEffect(dismissTrigger) {
+                if (dismissTrigger > 0) {
+                    android.util.Log.d("MainActivity", "📞 Dismiss trigger received, clearing incoming call UI")
+                    incomingCallId = null
+                    incomingCallerName = null
+                    incomingIsVideo = false
+
+                    // If we were launched from locked screen just for this call, finish the activity
+                    if (wasLaunchedFromLockedScreen) {
+                        android.util.Log.d("MainActivity", "📞 Was launched from locked screen, finishing activity")
+                        finish()
+                    }
+                }
+            }
+
+            // React to call ended trigger from broadcast receiver (registered at Activity level)
+            val endCallTrigger by _endCallTrigger
+            LaunchedEffect(endCallTrigger) {
+                if (endCallTrigger > 0) {
+                    android.util.Log.d("MainActivity", "📞 End call trigger received, clearing all call UI")
+                    showActiveCallScreen = false
+                    incomingCallId = null
+                    incomingCallerName = null
+                    incomingIsVideo = false
+
+                    // If we were launched from locked screen just for this call, finish the activity
+                    if (wasLaunchedFromLockedScreen) {
+                        android.util.Log.d("MainActivity", "📞 Was launched from locked screen, finishing activity")
+                        finish()
+                    }
+                }
+            }
 
             // Observe the trigger for active calls from onNewIntent
             val activeCallTrigger by _activeCallTrigger
@@ -504,10 +706,38 @@ class MainActivity : ComponentActivity() {
                         incomingCallId = null // Clear incoming call UI
                     }
                     is SyncFlowCallManager.CallState.Ended,
+                    is SyncFlowCallManager.CallState.Failed -> {
+                        showActiveCallScreen = false
+                        // If we launched from a locked screen, finish the activity
+                        // so user returns to lock screen instead of seeing messages
+                        if (wasLaunchedFromLockedScreen) {
+                            android.util.Log.d("MainActivity", "Call ended on locked screen - finishing activity")
+                            // Small delay to let the UI update before finishing
+                            delay(500)
+                            this@MainActivity.finish()
+                        }
+                    }
                     is SyncFlowCallManager.CallState.Idle -> {
                         showActiveCallScreen = false
                     }
                     else -> {}
+                }
+            }
+
+            // Poll for call manager when showing active call screen but manager is null
+            // This handles race condition when answering from locked screen
+            LaunchedEffect(showActiveCallScreen) {
+                if (showActiveCallScreen && callManager == null) {
+                    android.util.Log.d("MainActivity", "Polling for call manager (answering from locked screen)")
+                    repeat(20) { attempt ->
+                        callManager = SyncFlowCallService.getCallManager()
+                        if (callManager != null) {
+                            android.util.Log.d("MainActivity", "Call manager found on attempt $attempt")
+                            return@LaunchedEffect
+                        }
+                        delay(100)
+                    }
+                    android.util.Log.w("MainActivity", "Failed to get call manager after 20 attempts")
                 }
             }
 
@@ -562,6 +792,11 @@ class MainActivity : ComponentActivity() {
                                     }
                                     startService(rejectIntent)
                                     incomingCallId = null
+                                    // If we launched from a locked screen, finish the activity
+                                    if (wasLaunchedFromLockedScreen) {
+                                        android.util.Log.d("MainActivity", "Call declined on locked screen - finishing activity")
+                                        this@MainActivity.finish()
+                                    }
                                 }
                             )
                         }
@@ -576,8 +811,13 @@ class MainActivity : ComponentActivity() {
                             SyncFlowCallScreen(
                                 callManager = currentCallManager,
                                 onCallEnded = {
-                                    android.util.Log.d("MainActivity", "Call ended")
+                                    android.util.Log.d("MainActivity", "Call ended from SyncFlowCallScreen")
                                     showActiveCallScreen = false
+                                    // If we launched from a locked screen, finish the activity
+                                    if (wasLaunchedFromLockedScreen) {
+                                        android.util.Log.d("MainActivity", "Finishing activity (was locked screen)")
+                                        this@MainActivity.finish()
+                                    }
                                 }
                             )
                         }
@@ -621,9 +861,8 @@ class MainActivity : ComponentActivity() {
         val isIncomingCall = intent.hasExtra("incoming_syncflow_call_id") ||
                 intent.getBooleanExtra("active_syncflow_call", false) ||
                 intent.hasExtra("syncflow_call_action")
-        if (isIncomingCall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
+        if (isIncomingCall) {
+            enableCallScreenOverLockScreen()
         }
 
         handleCallIntent(intent)
@@ -647,6 +886,14 @@ class MainActivity : ComponentActivity() {
             val callId = intent.getStringExtra("incoming_syncflow_call_id")
             val callerName = intent.getStringExtra("incoming_syncflow_call_name")
             val withVideo = intent.getBooleanExtra("syncflow_call_answer_video", true)
+            val dismissKeyguard = intent.getBooleanExtra("dismiss_keyguard", false)
+
+            Log.d("MainActivity", "Answer action: callId=$callId, dismissKeyguard=$dismissKeyguard")
+
+            // Enable lock screen override when answering from notification
+            if (dismissKeyguard) {
+                enableCallScreenOverLockScreen()
+            }
 
             if (callId != null) {
                 val answerIntent = Intent(this, SyncFlowCallService::class.java).apply {
@@ -664,14 +911,18 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Handle active call (answered from notification)
+        // Handle active call (answered from notification or service)
         val isActiveCall = intent.getBooleanExtra("active_syncflow_call", false)
         if (isActiveCall) {
             val callId = intent.getStringExtra("active_syncflow_call_id")
             val callerName = intent.getStringExtra("active_syncflow_call_name")
             val isVideo = intent.getBooleanExtra("active_syncflow_call_video", false)
+            val dismissKeyguard = intent.getBooleanExtra("dismiss_keyguard", false)
 
-            android.util.Log.d("MainActivity", "Handling active SyncFlow call: $callId from $callerName")
+            android.util.Log.d("MainActivity", "Handling active SyncFlow call: $callId from $callerName, dismissKeyguard: $dismissKeyguard")
+
+            // Enable lock screen override for active calls
+            enableCallScreenOverLockScreen()
 
             _pendingActiveCallId = callId
             _pendingActiveCallName = callerName
@@ -725,6 +976,51 @@ class MainActivity : ComponentActivity() {
         if (MEDIA_PERMISSIONS.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
             permissionLauncher.launch(MEDIA_PERMISSIONS)
         }
+    }
+
+    /**
+     * Enable the call screen to show over the lock screen.
+     * This is essential for incoming calls to be visible when the device is locked.
+     */
+    private fun enableCallScreenOverLockScreen() {
+        Log.d("MainActivity", "Enabling call screen over lock screen")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            // API 27+ approach
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            Log.d("MainActivity", "Used setShowWhenLocked/setTurnScreenOn")
+        } else {
+            // Older API approach using window flags
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
+            Log.d("MainActivity", "Used window flags for lock screen override")
+        }
+
+        // Request to dismiss the keyguard (unlock screen)
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            keyguardManager.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() {
+                    Log.d("MainActivity", "Keyguard dismissed successfully")
+                }
+
+                override fun onDismissCancelled() {
+                    Log.d("MainActivity", "Keyguard dismiss cancelled")
+                }
+
+                override fun onDismissError() {
+                    Log.d("MainActivity", "Keyguard dismiss error")
+                }
+            })
+        }
+
+        // Also keep screen on during call
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     // Request storage permissions when file features are used
