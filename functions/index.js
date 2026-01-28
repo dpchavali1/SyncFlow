@@ -7,11 +7,81 @@
 
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
+const { Resend } = require("resend");
 
 admin.initializeApp();
 const crypto = require("crypto");
 
 const PAIRING_TTL_MS = 5 * 60 * 1000;
+const ADMIN_EMAIL = "syncflow.contact@gmail.com";
+
+// Initialize Resend for email notifications
+const getResend = () => {
+    const config = typeof functions.config === "function" ? functions.config() : {};
+    const apiKey = config?.resend?.api_key || process.env.RESEND_API_KEY;
+    return apiKey ? new Resend(apiKey) : null;
+};
+
+/**
+ * Send cleanup report email
+ */
+const sendCleanupReportEmail = async (stats, type = "AUTO") => {
+    const resend = getResend();
+    if (!resend) {
+        console.log("Resend API key not configured, skipping email");
+        return false;
+    }
+
+    const timestamp = new Date().toLocaleString();
+    const totalCleaned = Object.values(stats).reduce((sum, count) => sum + (typeof count === 'number' ? count : 0), 0);
+
+    const report = `
+SYNCFLOW AUTO CLEANUP REPORT
+============================
+
+Report Generated: ${timestamp}
+Cleanup Type: ${type}
+
+CLEANUP STATISTICS
+==================
+Total Records Cleaned: ${totalCleaned}
+Users Processed: ${stats.usersProcessed || 0}
+
+Detailed Breakdown:
+• Stale Outgoing Messages: ${stats.outgoingMessages || 0}
+• Old Call Requests: ${stats.callRequests || 0}
+• Old Spam Messages: ${stats.spamMessages || 0}
+• Old Read Receipts: ${stats.readReceipts || 0}
+• Inactive Devices: ${stats.inactiveDevices || 0}
+• Old Notifications: ${stats.oldNotifications || 0}
+• Stale Typing Indicators: ${stats.staleTypingIndicators || 0}
+• Expired Sessions: ${stats.expiredSessions || 0}
+• Old File Transfers: ${stats.oldFileTransfers || 0}
+• Abandoned Pairings: ${stats.abandonedPairings || 0}
+
+NEXT CLEANUP SCHEDULED
+======================
+Auto cleanup runs daily at 3 AM UTC.
+
+---
+SyncFlow Admin System
+Automated Maintenance Report
+`;
+
+    try {
+        const result = await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: `[${type}] SyncFlow Cleanup Report - ${new Date().toLocaleDateString()}`,
+            text: report,
+        });
+        console.log("Cleanup report email sent:", result);
+        return true;
+    } catch (error) {
+        console.error("Failed to send cleanup report email:", error);
+        return false;
+    }
+};
 
 const requireAuth = (context) => {
     if (!context.auth) {
@@ -1413,6 +1483,10 @@ exports.scheduledDailyCleanup = functions.pubsub
             }
 
             console.log("Daily cleanup complete:", JSON.stringify(stats));
+
+            // Send email report
+            await sendCleanupReportEmail(stats, "AUTO");
+
             return stats;
         } catch (error) {
             console.error("Error in scheduled daily cleanup:", error);

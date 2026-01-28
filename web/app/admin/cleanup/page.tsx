@@ -64,7 +64,9 @@ import {
   OrphanCounts,
   CleanupStats,
   database,
+  auth,
 } from '@/lib/firebase'
+import { onAuthStateChanged } from 'firebase/auth'
 import { ref, update, serverTimestamp, get } from 'firebase/database'
 
 interface AdminSession {
@@ -817,39 +819,54 @@ export default function AdminCleanupPage() {
   // Initialize admin panel
   useEffect(() => {
     console.log('AdminCleanupPage: Initializing...')
-    const init = async () => {
-      try {
-        console.log('AdminCleanupPage: Checking session validity...')
-        if (!isValidAdminSession()) {
-          console.log('AdminCleanupPage: No valid session, redirecting to login')
-          router.push('/admin/login')
-          return
-        }
 
-        console.log('AdminCleanupPage: Session valid, setting up admin access')
-        setIsAuthorized(true)
-        setUserId('admin')
-        addLog('Admin panel initialized with system access')
-
-        // Load data but don't block UI loading
-        console.log('AdminCleanupPage: Loading system overview...')
-        loadSystemOverview().catch(error => {
-          console.error('System overview error:', error)
-          addLog('Failed to load system overview')
-        })
-
-        // Clear loading state immediately after auth check
-        setIsLoading(false)
-        console.log('AdminCleanupPage: Loading state cleared')
-
-      } catch (error) {
-        console.error('AdminCleanupPage: Initialization error:', error)
-        setIsLoading(false) // Ensure loading is cleared even on error
-        addLog('Admin panel initialization failed')
-      }
+    // Check localStorage session first
+    if (!isValidAdminSession()) {
+      console.log('AdminCleanupPage: No valid session, redirecting to login')
+      router.push('/admin/login')
+      return
     }
 
-    init()
+    // Wait for Firebase Auth state to be restored
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      console.log('AdminCleanupPage: Auth state changed, user:', user?.uid)
+
+      if (user) {
+        // Check if user has admin claim
+        user.getIdTokenResult().then((tokenResult) => {
+          console.log('AdminCleanupPage: Token claims:', tokenResult.claims)
+
+          if (tokenResult.claims.admin === true) {
+            console.log('AdminCleanupPage: Admin access confirmed')
+            setIsAuthorized(true)
+            setUserId(user.uid)
+            setIsLoading(false)
+            addLog('Admin panel initialized with system access')
+
+            // Load data after auth is confirmed
+            loadSystemOverview().catch(error => {
+              console.error('System overview error:', error)
+              addLog('Failed to load system overview')
+            })
+          } else {
+            console.log('AdminCleanupPage: User does not have admin claim')
+            setIsLoading(false)
+            setIsAuthorized(false)
+          }
+        }).catch((error) => {
+          console.error('AdminCleanupPage: Error getting token:', error)
+          setIsLoading(false)
+          setIsAuthorized(false)
+        })
+      } else {
+        console.log('AdminCleanupPage: No user signed in')
+        // No Firebase user, but localStorage session exists - need to re-login
+        setIsLoading(false)
+        setIsAuthorized(false)
+        localStorage.removeItem('syncflow_admin_session')
+        router.push('/admin/login')
+      }
+    })
 
     // Safety timeout to clear loading state
     const timeout = setTimeout(() => {
@@ -860,7 +877,10 @@ export default function AdminCleanupPage() {
       }
     }, 15000) // 15 seconds timeout
 
-    return () => clearTimeout(timeout)
+    return () => {
+      clearTimeout(timeout)
+      unsubscribe()
+    }
   }, [router])
 
   // Auto-scroll to top when new log entries are added

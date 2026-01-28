@@ -698,8 +698,6 @@ class DesktopSyncService(context: Context) {
             .child(userId)
             .child(SPAM_MESSAGES_PATH)
 
-        Log.d(TAG, "Setting up real-time spam listener for user: $userId")
-
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val list = mutableListOf<com.phoneintegration.app.data.database.SpamMessage>()
@@ -740,7 +738,6 @@ class DesktopSyncService(context: Context) {
                         Log.w(TAG, "Error parsing spam message ${child.key}", e)
                     }
                 }
-                Log.d(TAG, "Spam listener received ${list.size} messages")
                 trySend(list.sortedByDescending { it.date }).isSuccess
             }
 
@@ -751,8 +748,123 @@ class DesktopSyncService(context: Context) {
 
         spamRef.addValueEventListener(listener)
         awaitClose {
-            Log.d(TAG, "Removing spam listener")
             spamRef.removeEventListener(listener)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // SPAM WHITELIST/BLOCKLIST SYNC
+    // -------------------------------------------------------------------------
+
+    /**
+     * Sync whitelist (not spam) to cloud
+     */
+    suspend fun syncWhitelist(addresses: Set<String>) {
+        withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val userId = getCurrentUserId()
+                val whitelistRef = database.reference
+                    .child(USERS_PATH)
+                    .child(userId)
+                    .child("spam_whitelist")
+
+                whitelistRef.setValue(addresses.toList()).await()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing whitelist", e)
+            }
+        }
+    }
+
+    /**
+     * Sync blocklist (always spam) to cloud
+     */
+    suspend fun syncBlocklist(addresses: Set<String>) {
+        withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val userId = getCurrentUserId()
+                val blocklistRef = database.reference
+                    .child(USERS_PATH)
+                    .child(userId)
+                    .child("spam_blocklist")
+
+                blocklistRef.setValue(addresses.toList()).await()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing blocklist", e)
+            }
+        }
+    }
+
+    /**
+     * Listen for whitelist changes from cloud (e.g., when macOS marks as not spam)
+     */
+    fun listenForWhitelist(): Flow<Set<String>> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot listen for whitelist - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val whitelistRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child("spam_whitelist")
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val addresses = mutableSetOf<String>()
+                snapshot.children.forEach { child ->
+                    (child.getValue(String::class.java))?.let { addresses.add(it) }
+                }
+                trySend(addresses).isSuccess
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Whitelist listener cancelled: ${error.message}")
+            }
+        }
+
+        whitelistRef.addValueEventListener(listener)
+        awaitClose {
+            whitelistRef.removeEventListener(listener)
+        }
+    }
+
+    /**
+     * Listen for blocklist changes from cloud (e.g., when macOS marks as spam)
+     */
+    fun listenForBlocklist(): Flow<Set<String>> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot listen for blocklist - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val blocklistRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child("spam_blocklist")
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val addresses = mutableSetOf<String>()
+                snapshot.children.forEach { child ->
+                    (child.getValue(String::class.java))?.let { addresses.add(it) }
+                }
+                trySend(addresses).isSuccess
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Blocklist listener cancelled: ${error.message}")
+            }
+        }
+
+        blocklistRef.addValueEventListener(listener)
+        awaitClose {
+            blocklistRef.removeEventListener(listener)
         }
     }
 

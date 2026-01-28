@@ -275,6 +275,16 @@ struct ConversationListView: View {
                                     onSelect: {
                                         messageStore.selectedSpamAddress = spamConversation.address
                                         appState.selectedConversation = nil
+                                    },
+                                    onMarkNotSpam: {
+                                        Task {
+                                            await messageStore.markSpamAsNotSpam(address: spamConversation.address)
+                                        }
+                                    },
+                                    onDelete: {
+                                        Task {
+                                            await messageStore.deleteSpamMessages(for: spamConversation.address)
+                                        }
                                     }
                                 )
 
@@ -489,6 +499,8 @@ struct SpamConversationRow: View {
     let conversation: SpamConversation
     let isSelected: Bool
     let onSelect: () -> Void
+    let onMarkNotSpam: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         Button(action: onSelect) {
@@ -528,6 +540,17 @@ struct SpamConversationRow: View {
             .background(isSelected ? Color.red.opacity(0.08) : Color.clear)
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button(action: onMarkNotSpam) {
+                Label("Not Spam", systemImage: "checkmark.shield")
+            }
+
+            Divider()
+
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete", systemImage: "trash")
+            }
+        }
     }
 }
 

@@ -35,6 +35,28 @@ class SmsRepository(private val context: Context) {
         return perm == PackageManager.PERMISSION_GRANTED
     }
 
+    // Cache the user's profile name to avoid using it for other contacts
+    private var userProfileName: String? = null
+
+    private fun getUserProfileName(): String? {
+        if (userProfileName != null) return userProfileName
+        try {
+            resolver.query(
+                ContactsContract.Profile.CONTENT_URI,
+                arrayOf(ContactsContract.Profile.DISPLAY_NAME),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    userProfileName = cursor.getString(0)
+                    android.util.Log.d("SmsRepository", "User profile name: $userProfileName")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SmsRepository", "Could not get user profile name: ${e.message}")
+        }
+        return userProfileName
+    }
+
     // ---------------------------------------------------------------------
     //  PRE-LOAD ALL CONTACTS (Fast batch loading)
     // ---------------------------------------------------------------------
@@ -42,6 +64,7 @@ class SmsRepository(private val context: Context) {
         if (contactCachePreloaded) return
 
         val startTime = System.currentTimeMillis()
+        val profileName = getUserProfileName()
 
         try {
             val cursor = resolver.query(
@@ -64,6 +87,13 @@ class SmsRepository(private val context: Context) {
                     val name = if (nameIdx >= 0) c.getString(nameIdx) else continue
 
                     if (number != null && name != null) {
+                        // Skip entries where the contact name matches the user's profile name
+                        // This prevents the user's name from being associated with random numbers
+                        if (profileName != null && name.equals(profileName, ignoreCase = true)) {
+                            android.util.Log.d("SmsRepository", "Skipping user profile contact: $number -> $name")
+                            continue
+                        }
+
                         // Store with original format
                         contactCache[number] = name
                         // Also store normalized version (digits only)
@@ -164,7 +194,8 @@ class SmsRepository(private val context: Context) {
                         Telephony.Sms.ADDRESS,
                         Telephony.Sms.BODY,
                         Telephony.Sms.DATE,
-                        Telephony.Sms.TYPE
+                        Telephony.Sms.TYPE,
+                        Telephony.Sms.READ  // Include read status
                     ),
                     "${Telephony.Sms.THREAD_ID} = ?",
                     arrayOf(threadId.toString()),
@@ -175,7 +206,7 @@ class SmsRepository(private val context: Context) {
 
                 cursor.use { c ->
                     // Validate column indices
-                    if (c.columnCount < 5) {
+                    if (c.columnCount < 6) {
                         android.util.Log.e("SmsRepository", "Unexpected column count: ${c.columnCount}")
                         return@withContext emptyList()
                     }
@@ -188,7 +219,8 @@ class SmsRepository(private val context: Context) {
                                 body = c.getString(2) ?: "",
                                 date = c.getLong(3),
                                 type = c.getInt(4),
-                                contactName = cachedName
+                                contactName = cachedName,
+                                isRead = c.getInt(5) == 1  // READ: 1 = read, 0 = unread
                             )
 
                             sms.category = MessageCategorizer.categorizeMessage(sms)
@@ -231,6 +263,29 @@ class SmsRepository(private val context: Context) {
 
                 val list = mutableListOf<SmsMessage>()
 
+                // Get thread-level read status (Samsung tracks read at thread level)
+                val unreadThreads = mutableSetOf<Long>()
+                try {
+                    val threadsCursor = resolver.query(
+                        Uri.parse("content://mms-sms/conversations?simple=true"),
+                        arrayOf("_id", "read"),
+                        "read = 0",
+                        null,
+                        null
+                    )
+                    threadsCursor?.use { tc ->
+                        val idxId = tc.getColumnIndex("_id")
+                        while (tc.moveToNext()) {
+                            if (idxId >= 0) {
+                                unreadThreads.add(tc.getLong(idxId))
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsRepository", "Error getting unread threads", e)
+                }
+
+                // Get recent messages
                 val cursor = resolver.query(
                     Telephony.Sms.CONTENT_URI,
                     arrayOf(
@@ -238,7 +293,9 @@ class SmsRepository(private val context: Context) {
                         Telephony.Sms.ADDRESS,
                         Telephony.Sms.BODY,
                         Telephony.Sms.DATE,
-                        Telephony.Sms.TYPE
+                        Telephony.Sms.TYPE,
+                        Telephony.Sms.READ,
+                        Telephony.Sms.THREAD_ID
                     ),
                     null,
                     null,
@@ -246,35 +303,40 @@ class SmsRepository(private val context: Context) {
                 ) ?: return@withContext emptyList()
 
                 cursor.use { c ->
-                    // Validate column count
-                    if (c.columnCount < 5) {
+                    if (c.columnCount < 7) {
                         android.util.Log.e("SmsRepository", "Unexpected column count: ${c.columnCount}")
                         return@withContext emptyList()
                     }
 
                     while (c.moveToNext()) {
                         try {
+                            val msgType = c.getInt(4)
+                            val threadId = c.getLong(6)
+
+                            // Use thread-level read status (Samsung tracks at thread level)
+                            val isThreadUnread = unreadThreads.contains(threadId)
+                            val isRead = if (msgType == 1) !isThreadUnread else true
+
                             val sms = SmsMessage(
                                 id = c.getLong(0),
                                 address = c.getString(1) ?: "",
                                 body = c.getString(2) ?: "",
                                 date = c.getLong(3),
-                                type = c.getInt(4)
+                                type = msgType,
+                                isRead = isRead
                             )
                             list.add(sms)
 
-                            // Track memory usage for large datasets
                             if (list.size % 100 == 0) {
                                 memoryOptimizer.checkMemoryPressure()
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("SmsRepository", "Error parsing message row", e)
-                            continue // Skip this message
+                            continue
                         }
                     }
                 }
 
-                Log.d("SmsRepository", "Loaded ${list.size} messages (adjusted limit: $adjustedLimit, memory pressure: ${memoryStats.pressure})")
                 list
             } catch (e: Exception) {
                 android.util.Log.e("SmsRepository", "Error in getAllMessages", e)
@@ -391,6 +453,11 @@ class SmsRepository(private val context: Context) {
                                 addressesToResolve.add(address)
                             }
 
+                            // Use thread's read status if no individual message counts available
+                            // Samsung devices track read status at thread level, not message level
+                            val threadUnread = unreadCounts[threadId]
+                                ?: if (!isRead) 1 else 0  // Fallback to thread's read column
+
                             list.add(
                                 ConversationInfo(
                                     threadId = threadId,
@@ -398,7 +465,7 @@ class SmsRepository(private val context: Context) {
                                     contactName = contactCache[address] ?: address,
                                     lastMessage = snippet,
                                     timestamp = timestamp,
-                                    unreadCount = unreadCounts[threadId] ?: 0,
+                                    unreadCount = threadUnread,
                                     isGroupConversation = isGroup,
                                     recipientCount = recipientCount
                                 )
@@ -445,7 +512,8 @@ class SmsRepository(private val context: Context) {
                     resolvedList // Return without deduplication if it fails
                 }
 
-                android.util.Log.d("SmsRepository", "Loaded ${result.size} conversations (${list.size} before dedupe) in ${System.currentTimeMillis() - startTime}ms")
+                val totalUnread = result.sumOf { it.unreadCount }
+                android.util.Log.d("SmsRepository", "Loaded ${result.size} conversations (${list.size} before dedupe) in ${System.currentTimeMillis() - startTime}ms, totalUnread=$totalUnread")
                 return@withContext result
             } catch (e: Exception) {
                 android.util.Log.e("SmsRepository", "Critical error in getConversations", e)
@@ -456,6 +524,98 @@ class SmsRepository(private val context: Context) {
                     android.util.Log.e("SmsRepository", "Fallback also failed", fallbackError)
                     emptyList()
                 }
+            }
+        }
+
+    /**
+     * Get unread conversations (thread-level read status - works on Samsung)
+     * Uses the threads table directly which Samsung uses for tracking read status
+     */
+    suspend fun getUnreadConversations(limit: Int = 100): List<ConversationInfo> =
+        withContext(Dispatchers.IO) {
+            try {
+                if (!hasSmsPermission()) {
+                    Log.w("SmsRepository", "READ_SMS not granted; getUnreadConversations returning empty")
+                    return@withContext emptyList()
+                }
+
+                // Get unread thread IDs from threads table (Samsung tracks read at thread level)
+                val unreadThreadIds = mutableSetOf<Long>()
+                val threadsCursor = resolver.query(
+                    Uri.parse("content://mms-sms/conversations?simple=true"),
+                    arrayOf("_id", "read"),
+                    "read = 0",  // Thread-level unread
+                    null,
+                    null
+                )
+                threadsCursor?.use { c ->
+                    val idxId = c.getColumnIndex("_id")
+                    while (c.moveToNext()) {
+                        if (idxId >= 0) {
+                            unreadThreadIds.add(c.getLong(idxId))
+                        }
+                    }
+                }
+
+                android.util.Log.d("SmsRepository", "getUnreadConversations: Found ${unreadThreadIds.size} unread threads")
+
+                if (unreadThreadIds.isEmpty()) {
+                    return@withContext emptyList()
+                }
+
+                // Get full conversation info for these threads
+                val unreadConversations = mutableListOf<ConversationInfo>()
+                val threadIdList = unreadThreadIds.take(limit).joinToString(",")
+
+                // Query conversations with their latest message
+                val cursor = resolver.query(
+                    Uri.parse("content://mms-sms/conversations?simple=true"),
+                    arrayOf("_id", "snippet", "date", "recipient_ids"),
+                    "_id IN ($threadIdList)",
+                    null,
+                    "date DESC"
+                )
+
+                cursor?.use { c ->
+                    val idxId = c.getColumnIndex("_id")
+                    val idxSnippet = c.getColumnIndex("snippet")
+                    val idxDate = c.getColumnIndex("date")
+                    val idxRecipients = c.getColumnIndex("recipient_ids")
+
+                    while (c.moveToNext()) {
+                        try {
+                            val threadId = if (idxId >= 0) c.getLong(idxId) else continue
+                            val snippet = if (idxSnippet >= 0) c.getString(idxSnippet) else ""
+                            val date = if (idxDate >= 0) c.getLong(idxDate) else 0L
+                            val recipientIds = if (idxRecipients >= 0) c.getString(idxRecipients) else ""
+
+                            // Get address for this thread
+                            val address = getAddressForThread(threadId) ?: continue
+                            if (isRcsAddress(address)) continue
+
+                            val conversation = ConversationInfo(
+                                threadId = threadId,
+                                address = address,
+                                lastMessage = snippet ?: "",
+                                timestamp = date,
+                                unreadCount = 1  // Mark as unread
+                            )
+
+                            // Resolve contact name
+                            conversation.contactName = resolveContactName(address)
+
+                            unreadConversations.add(conversation)
+                        } catch (e: Exception) {
+                            android.util.Log.e("SmsRepository", "Error parsing unread conversation", e)
+                        }
+                    }
+                }
+
+                android.util.Log.d("SmsRepository", "getUnreadConversations: Returning ${unreadConversations.size} conversations")
+                unreadConversations
+            } catch (e: Exception) {
+                android.util.Log.e("SmsRepository", "Error getting unread conversations", e)
+                emptyList()
             }
         }
 
@@ -476,9 +636,15 @@ class SmsRepository(private val context: Context) {
             )
             smsCursor?.use { c ->
                 val threadIdIdx = c.getColumnIndex(Telephony.Sms.THREAD_ID)
+                var totalUnread = 0
                 while (c.moveToNext()) {
                     val threadId = if (threadIdIdx >= 0) c.getLong(threadIdIdx) else continue
                     counts[threadId] = (counts[threadId] ?: 0) + 1
+                    totalUnread++
+                }
+                android.util.Log.d("SmsRepository", "getUnreadCountsForThreads: Found $totalUnread unread SMS in ${counts.size} threads")
+                if (counts.isNotEmpty()) {
+                    android.util.Log.d("SmsRepository", "Unread threads: $counts")
                 }
             }
 
@@ -1784,7 +1950,8 @@ class SmsRepository(private val context: Context) {
                     Telephony.Sms.ADDRESS,
                     Telephony.Sms.BODY,
                     Telephony.Sms.DATE,
-                    Telephony.Sms.TYPE
+                    Telephony.Sms.TYPE,
+                    Telephony.Sms.READ  // Include read status
                 ),
                 "${Telephony.Sms.DATE} >= ?",
                 arrayOf(startDate.toString()),
@@ -1803,7 +1970,8 @@ class SmsRepository(private val context: Context) {
                         body = c.getString(2) ?: "",
                         date = c.getLong(3),
                         type = c.getInt(4),
-                        contactName = null
+                        contactName = null,
+                        isRead = c.getInt(5) == 1  // READ: 1 = read, 0 = unread
                     )
 
                     sms.category = MessageCategorizer.categorizeMessage(sms)
@@ -2090,12 +2258,13 @@ class SmsRepository(private val context: Context) {
                 put(Telephony.Sms.READ, 1)
                 put(Telephony.Sms.SEEN, 1)
             }
-            resolver.update(
+            val smsUpdated = resolver.update(
                 Telephony.Sms.CONTENT_URI,
                 smsValues,
                 "${Telephony.Sms.THREAD_ID} = ? AND ${Telephony.Sms.READ} = 0",
                 arrayOf(threadId.toString())
             )
+            android.util.Log.d("SmsRepository", "markThreadRead($threadId): Updated $smsUpdated SMS messages")
 
             val threadValues = ContentValues().apply {
                 put(Telephony.Threads.READ, 1)

@@ -2504,29 +2504,7 @@ export const runSmartGlobalCleanup = async (): Promise<{
     console.log('Smart global cleanup completed:', results)
     addAdminAuditLog('global_cleanup_complete', 'system', JSON.stringify(results))
 
-    // Send email report for manual cleanup
-    const cleanupStats: CleanupStats = {
-      outgoingMessages: results.emptyNodesDeleted,
-      pendingPairings: results.orphanedUsersDeleted,
-      callRequests: 0,
-      spamMessages: 0,
-      readReceipts: 0,
-      oldDevices: results.duplicatesDetected,
-      oldNotifications: 0,
-      staleTypingIndicators: 0,
-      expiredSessions: 0,
-      oldFileTransfers: 0,
-      abandonedPairings: 0,
-      orphanedMedia: 0
-    }
-
-    try {
-      await sendCleanupReport(cleanupStats, 'admin', 'MANUAL')
-      console.log('✅ Manual cleanup report email sent')
-    } catch (emailError) {
-      console.error('Failed to send cleanup report email:', emailError)
-    }
-
+    // Email report is sent by the caller (route handler) to avoid duplicates
     return results
   } catch (error) {
     console.error('Error in smart global cleanup:', error)

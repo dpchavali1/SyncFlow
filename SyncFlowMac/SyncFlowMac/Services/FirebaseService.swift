@@ -23,6 +23,11 @@ class FirebaseService {
     private let storage = Storage.storage()
     private let functions = Functions.functions(region: "us-central1")
 
+    /// Ensure Firebase database is online before write operations
+    private func ensureOnline() {
+        database.goOnline()
+    }
+
     // Sync Group Manager for device pairing
     let syncGroupManager = SyncGroupManager.shared
     private var _syncGroupId: String? {
@@ -50,6 +55,13 @@ class FirebaseService {
     }
 
     func getCurrentUser() -> String? {
+        // Prefer the stored paired user ID over the current auth user
+        // This prevents data being written to wrong location when auth session expires
+        // and app falls back to anonymous sign-in
+        if let storedUserId = UserDefaults.standard.string(forKey: "syncflow_user_id"),
+           !storedUserId.isEmpty {
+            return storedUserId
+        }
         return auth.currentUser?.uid
     }
 
@@ -901,6 +913,7 @@ class FirebaseService {
     }
 
     func deleteSpamMessage(userId: String, messageId: String) async throws {
+        ensureOnline()
         let spamRef = database.reference()
             .child("users")
             .child(userId)
@@ -910,6 +923,7 @@ class FirebaseService {
     }
 
     func clearAllSpamMessages(userId: String) async throws {
+        ensureOnline()
         let spamRef = database.reference()
             .child("users")
             .child(userId)
@@ -918,6 +932,7 @@ class FirebaseService {
     }
 
     func markMessageAsSpam(userId: String, message: Message) async throws {
+        ensureOnline()
         let messageId = Int64(message.id) ?? Int64(message.date)
         let spamRef = database.reference()
             .child("users")
@@ -940,11 +955,104 @@ class FirebaseService {
         ]
 
         try await spamRef.setValue(payload)
+
+        // Also add to blocklist for future detection
+        try await addToBlocklist(userId: userId, address: message.address)
+    }
+
+    // MARK: - Spam Whitelist/Blocklist
+
+    /// Add an address to the whitelist (marked as "not spam")
+    func addToWhitelist(userId: String, address: String) async throws {
+        ensureOnline()
+        let whitelistRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("spam_whitelist")
+
+        // Get current whitelist
+        let snapshot = try await whitelistRef.getData()
+        var addresses = (snapshot.value as? [String]) ?? []
+
+        // Normalize and add if not present
+        let normalized = normalizeAddress(address)
+        if !addresses.contains(normalized) {
+            addresses.append(normalized)
+            try await whitelistRef.setValue(addresses)
+        }
+
+        // Also remove from blocklist
+        try await removeFromBlocklist(userId: userId, address: address)
+    }
+
+    /// Remove an address from the whitelist
+    func removeFromWhitelist(userId: String, address: String) async throws {
+        ensureOnline()
+        let whitelistRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("spam_whitelist")
+
+        let snapshot = try await whitelistRef.getData()
+        var addresses = (snapshot.value as? [String]) ?? []
+
+        let normalized = normalizeAddress(address)
+        addresses.removeAll { $0 == normalized }
+        try await whitelistRef.setValue(addresses)
+    }
+
+    /// Add an address to the blocklist (always spam)
+    func addToBlocklist(userId: String, address: String) async throws {
+        ensureOnline()
+        let blocklistRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("spam_blocklist")
+
+        let snapshot = try await blocklistRef.getData()
+        var addresses = (snapshot.value as? [String]) ?? []
+
+        let normalized = normalizeAddress(address)
+        if !addresses.contains(normalized) {
+            addresses.append(normalized)
+            try await blocklistRef.setValue(addresses)
+        }
+
+        // Also remove from whitelist
+        try await removeFromWhitelist(userId: userId, address: address)
+    }
+
+    /// Remove an address from the blocklist
+    func removeFromBlocklist(userId: String, address: String) async throws {
+        ensureOnline()
+        let blocklistRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("spam_blocklist")
+
+        let snapshot = try await blocklistRef.getData()
+        var addresses = (snapshot.value as? [String]) ?? []
+
+        let normalized = normalizeAddress(address)
+        addresses.removeAll { $0 == normalized }
+        try await blocklistRef.setValue(addresses)
+    }
+
+    /// Normalize address for consistent matching
+    private func normalizeAddress(_ address: String) -> String {
+        // Keep last 10 digits for phone numbers
+        let digits = address.filter { $0.isNumber || $0 == "+" }
+        if digits.count >= 10 {
+            return String(digits.suffix(10))
+        }
+        return address.lowercased().trimmingCharacters(in: .whitespaces)
     }
 
     // MARK: - Send Message
 
     func sendMessage(userId: String, to address: String, body: String) async throws {
+        ensureOnline()
+
         let outgoingRef = database.reference()
             .child("users")
             .child(userId)
@@ -985,6 +1093,8 @@ class FirebaseService {
         contentType: String,
         attachmentType: String
     ) async throws {
+        ensureOnline()
+
         // Ensure user is authenticated for storage access
         var currentUser = auth.currentUser
         if currentUser == nil {
@@ -1178,6 +1288,8 @@ class FirebaseService {
 
     /// Send message and return message key for tracking
     func sendMessageWithKey(userId: String, to address: String, body: String) async throws -> String? {
+        ensureOnline()
+
         let outgoingRef = database.reference()
             .child("users")
             .child(userId)
@@ -1324,6 +1436,8 @@ class FirebaseService {
 
     /// Request Android to make a phone call with optional SIM selection
     func requestCall(userId: String, to phoneNumber: String, contactName: String? = nil, simSubscriptionId: Int? = nil) async throws {
+        ensureOnline()
+
         let callRequestRef = database.reference()
             .child("users")
             .child(userId)
@@ -1540,6 +1654,7 @@ class FirebaseService {
         photoBase64: String? = nil,
         source: String = "macos"
     ) async throws -> String {
+        ensureOnline()
         let contactId = PhoneNumberNormalizer.shared.getDeduplicationKey(phoneNumber: phoneNumber, displayName: displayName)
         let contactRef = database.reference()
             .child("users")
@@ -1575,6 +1690,7 @@ class FirebaseService {
         photoBase64: String? = nil,
         source: String = "macos"
     ) async throws {
+        ensureOnline()
         let contactRef = database.reference()
             .child("users")
             .child(userId)
@@ -1601,6 +1717,7 @@ class FirebaseService {
 
     /// Delete a contact from the universal contacts list
     func deleteContact(userId: String, contactId: String) async throws {
+        ensureOnline()
         let contactRef = database.reference()
             .child("users")
             .child(userId)
@@ -1608,7 +1725,6 @@ class FirebaseService {
             .child(contactId)
 
         try await contactRef.removeValue()
-        print("[Firebase] Contact deleted: \(contactId)")
     }
 
     private func buildContactPayload(
@@ -1799,6 +1915,8 @@ class FirebaseService {
 
     /// Send command to answer/reject call
     func sendCallCommand(userId: String, callId: String, command: String) async throws {
+        ensureOnline()
+
         let commandRef = database.reference()
             .child("users")
             .child(userId)
@@ -1817,6 +1935,8 @@ class FirebaseService {
 
     /// Make an outgoing call
     func makeCall(userId: String, phoneNumber: String, simSubscriptionId: Int? = nil) async throws {
+        ensureOnline()
+
         let callRequestRef = database.reference()
             .child("users")
             .child(userId)
@@ -1898,6 +2018,8 @@ class FirebaseService {
     }
 
     func setMessageReaction(userId: String, messageId: String, reaction: String?) async throws {
+        ensureOnline()
+
         let reactionRef = database.reference()
             .child("users")
             .child(userId)
@@ -1982,6 +2104,7 @@ class FirebaseService {
         readDeviceName: String?
     ) async throws {
         guard !messageIds.isEmpty else { return }
+        ensureOnline()
 
         var updates: [String: Any] = [:]
         for messageId in messageIds {
@@ -1999,6 +2122,8 @@ class FirebaseService {
 
     /// Delete a message from Firebase
     func deleteMessage(userId: String, messageId: String) async throws {
+        ensureOnline()
+
         // Delete the message from Firebase
         let messageRef = database.reference()
             .child("users")
@@ -2023,6 +2148,7 @@ class FirebaseService {
     /// Delete multiple messages from Firebase (and related metadata)
     func deleteMessages(userId: String, messageIds: [String]) async throws {
         guard !messageIds.isEmpty else { return }
+        ensureOnline()
 
         var updates: [String: Any] = [:]
         for messageId in messageIds {
@@ -2056,6 +2182,8 @@ class FirebaseService {
 
     /// Ring the phone to help locate it
     func ringPhone(userId: String) async throws {
+        ensureOnline()
+
         let findRef = database.reference()
             .child("users")
             .child(userId)
@@ -2070,11 +2198,12 @@ class FirebaseService {
         ]
 
         try await findRef.setValue(requestData)
-        print("[Firebase] Find My Phone: Ring request sent")
     }
 
     /// Stop ringing the phone
     func stopRingingPhone(userId: String) async throws {
+        ensureOnline()
+
         let findRef = database.reference()
             .child("users")
             .child(userId)
@@ -2089,13 +2218,14 @@ class FirebaseService {
         ]
 
         try await findRef.setValue(requestData)
-        print("[Firebase] Find My Phone: Stop request sent")
     }
 
     // MARK: - Link Sharing
 
     /// Send a URL to the phone to open in browser
     func sendLink(userId: String, url: String, title: String? = nil) async throws {
+        ensureOnline()
+
         let linkRef = database.reference()
             .child("users")
             .child(userId)
@@ -2114,7 +2244,6 @@ class FirebaseService {
         }
 
         try await linkRef.setValue(linkData)
-        print("[Firebase] Link shared to phone: \(url)")
     }
 }
 

@@ -208,6 +208,20 @@
           },
           ".indexOn": ["date", "timestamp"]
         },
+        "spam_whitelist": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$index": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+          }
+        },
+        "spam_blocklist": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$index": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 20"
+          }
+        },
         "file_transfers": {
           ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
@@ -838,6 +852,135 @@
             ".validate": "!newData.exists() || newData.isNumber()"
           }
         },
+        "find_my_phone": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$requestId": {
+            ".validate": "newData.hasChildren(['action', 'timestamp'])",
+            "action": {
+              ".validate": "newData.isString() && (newData.val() == 'ring' || newData.val() == 'stop')"
+            },
+            "timestamp": {
+              ".validate": "newData.isNumber()"
+            },
+            "source": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "shared_links": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$linkId": {
+            ".validate": "newData.hasChildren(['url', 'timestamp'])",
+            "url": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "title": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "timestamp": {
+              ".validate": "newData.isNumber()"
+            },
+            "source": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "hotspot_status": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)"
+        },
+        "hotspot_command": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "action": {
+            ".validate": "newData.isString() && (newData.val() == 'enable' || newData.val() == 'disable')"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
+        },
+        "dnd_status": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)"
+        },
+        "dnd_command": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "action": {
+            ".validate": "newData.isString() && (newData.val() == 'enable' || newData.val() == 'disable')"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          }
+        },
+        "scheduled_messages": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".indexOn": ["scheduledTime", "status"],
+          "$messageId": {
+            "address": {
+              ".validate": "newData.isString()"
+            },
+            "body": {
+              ".validate": "newData.isString()"
+            },
+            "scheduledTime": {
+              ".validate": "newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "voicemails": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".indexOn": ["date"],
+          "$voicemailId": {
+            "phoneNumber": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "date": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "duration": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "isRead": {
+              ".validate": "!newData.exists() || newData.isBoolean()"
+            }
+          }
+        },
+        "photos": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)"
+        },
+        "mirrored_notifications": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$notificationId": {
+            "appName": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "title": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "text": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "timestamp": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          }
+        },
         "recovery_info": {
           ".read": "auth != null && auth.uid == $uid",
           ".write": "auth != null && auth.uid == $uid",
@@ -1248,6 +1391,7 @@
       }
     },
     "subscription_records": {
+      ".read": "auth != null && auth.token.admin === true",
       "$uid": {
         ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
         ".write": "auth != null && (auth.uid == $uid || auth.token.admin === true)",

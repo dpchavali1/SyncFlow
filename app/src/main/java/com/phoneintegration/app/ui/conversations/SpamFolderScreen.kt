@@ -5,11 +5,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,6 +41,7 @@ fun SpamFolderScreen(
     val scope = rememberCoroutineScope()
     val database = remember { AppDatabase.getInstance(context) }
     val syncService = remember { com.phoneintegration.app.desktop.DesktopSyncService(context.applicationContext) }
+    val spamFilterService = remember { com.phoneintegration.app.spam.SpamFilterService.getInstance(context) }
 
     // Refresh spam from cloud when screen opens
     LaunchedEffect(Unit) {
@@ -46,6 +50,7 @@ fun SpamFolderScreen(
 
     val spamMessages by database.spamMessageDao().getAllSpam().collectAsState(initial = emptyList())
     var showClearAllDialog by remember { mutableStateOf(false) }
+    var selectedSpamConversation by remember { mutableStateOf<SpamConversation?>(null) }
 
     // Group spam by address
     val groupedSpam = remember(spamMessages) {
@@ -127,17 +132,22 @@ fun SpamFolderScreen(
                 items(groupedSpam, key = { it.address }) { conversation ->
                     SpamConversationItem(
                         conversation = conversation,
+                        onClick = {
+                            selectedSpamConversation = conversation
+                        },
                         onRestore = {
                             scope.launch {
                                 val ids = spamMessages
                                     .filter { it.address == conversation.address }
                                     .map { it.messageId }
+                                // Add to whitelist to prevent future detection
+                                spamFilterService.addToWhitelist(conversation.address)
                                 database.spamMessageDao().deleteByAddress(conversation.address)
                                 // Only sync to cloud if devices are paired
                                 if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
                                     ids.forEach { syncService.deleteSpamMessage(it) }
                                 }
-                                Toast.makeText(context, "Restored from spam", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Marked as not spam", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onDelete = {
@@ -157,6 +167,110 @@ fun SpamFolderScreen(
                 }
             }
         }
+    }
+
+    // Spam Message Detail Dialog
+    selectedSpamConversation?.let { conversation ->
+        val messagesForConversation = remember(conversation, spamMessages) {
+            spamMessages.filter { it.address == conversation.address }
+                .sortedByDescending { it.date }
+        }
+
+        AlertDialog(
+            onDismissRequest = { selectedSpamConversation = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(conversation.contactName)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    messagesForConversation.forEachIndexed { index, spam ->
+                        if (index > 0) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        }
+
+                        // Date
+                        Text(
+                            SimpleDateFormat("MMM d, yyyy h:mm a", Locale.getDefault())
+                                .format(Date(spam.date)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        // Full message body
+                        Text(
+                            spam.body,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        // Spam reasons if available
+                        if (!spam.spamReasons.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
+                                shape = MaterialTheme.shapes.small
+                            ) {
+                                Text(
+                                    "Spam reason: ${spam.spamReasons}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        // Confidence score
+                        Text(
+                            "Confidence: ${(spam.spamConfidence * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            val ids = messagesForConversation.map { it.messageId }
+                            // Add to whitelist to prevent future detection
+                            spamFilterService.addToWhitelist(conversation.address)
+                            database.spamMessageDao().deleteByAddress(conversation.address)
+                            if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                                ids.forEach { syncService.deleteSpamMessage(it) }
+                            }
+                            Toast.makeText(context, "Marked as not spam", Toast.LENGTH_SHORT).show()
+                        }
+                        selectedSpamConversation = null
+                    }
+                ) {
+                    Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Not Spam")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { selectedSpamConversation = null }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 
     // Clear All Dialog
@@ -201,11 +315,10 @@ private data class SpamConversation(
 @Composable
 private fun SpamConversationItem(
     conversation: SpamConversation,
+    onClick: () -> Unit,
     onRestore: () -> Unit,
     onDelete: () -> Unit
 ) {
-    var showActions by remember { mutableStateOf(false) }
-
     ListItem(
         headlineContent = {
             Text(
@@ -253,7 +366,7 @@ private fun SpamConversationItem(
                 }
             }
         },
-        modifier = Modifier.clickable { showActions = !showActions }
+        modifier = Modifier.clickable { onClick() }
     )
     HorizontalDivider()
 }

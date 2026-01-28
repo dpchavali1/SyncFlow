@@ -1523,9 +1523,15 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 repo.getMessagesByThreadId(conversation.threadId, limit = 1, offset = 0)
             }
             val latest = messages.firstOrNull() ?: return@launch
+            val address = conversation.address.ifBlank { latest.address }
+
+            // Add to blocked senders list for future scans
+            val spamFilterService = com.phoneintegration.app.spam.SpamFilterService.getInstance(getApplication())
+            spamFilterService.addBlockedSender(address)
+
             val spamMessage = SpamMessage(
                 messageId = latest.id,
-                address = conversation.address.ifBlank { latest.address },
+                address = address,
                 body = latest.body,
                 date = latest.date,
                 contactName = conversation.contactName ?: latest.contactName,

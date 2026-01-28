@@ -1039,20 +1039,28 @@ class MessageStore: ObservableObject {
         Task {
             do {
                 try await firebaseService.markMessageAsSpam(userId: userId, message: message)
-            } catch {
-                print("[MessageStore] Failed to mark message as spam: \(error)")
-            }
+            } catch { }
         }
     }
 
     func markConversationAsSpam(_ conversation: Conversation) {
         guard let latest = messages
             .filter({ $0.address == conversation.address })
-            .max(by: { $0.date < $1.date }) else {
-            print("[MessageStore] No messages found to mark as spam for \(conversation.address)")
-            return
-        }
+            .max(by: { $0.date < $1.date }) else { return }
         markMessageAsSpam(latest)
+    }
+
+    /// Mark a spam conversation as "not spam" - removes from spam and adds to whitelist
+    func markSpamAsNotSpam(address: String) async {
+        guard let userId = currentUserId else { return }
+
+        // Add to whitelist (this also removes from blocklist)
+        do {
+            try await firebaseService.addToWhitelist(userId: userId, address: address)
+        } catch { }
+
+        // Delete spam messages for this address
+        await deleteSpamMessages(for: address)
     }
 
     // MARK: - Search
