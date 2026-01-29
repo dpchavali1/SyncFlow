@@ -23,39 +23,234 @@ import java.net.URL
 import java.util.*
 
 /**
- * Service that syncs recent photos from Android to Firebase for display on macOS.
- * Photos are uploaded as thumbnails to save bandwidth and storage.
+ * PhotoSyncService.kt - Photo Thumbnail Synchronization Service for SyncFlow
  *
- * NOTE: Photo sync is a PREMIUM FEATURE. Only paid subscribers can sync photos.
- * Free/trial users will not have photo sync functionality.
+ * This service synchronizes recent photos from the Android device to Cloudflare R2
+ * for display on macOS/desktop clients. Photos are converted to compressed thumbnails
+ * to optimize bandwidth and storage costs.
+ *
+ * ## Premium Feature
+ *
+ * **IMPORTANT:** Photo sync is a PREMIUM-ONLY feature. Only users with active paid
+ * subscriptions (monthly, yearly, 3-year, or lifetime) can sync photos. Free tier
+ * and trial users will not have access to this functionality.
+ *
+ * ## Architecture Overview
+ *
+ * The photo sync system consists of:
+ *
+ * 1. **ContentObserver** - Monitors MediaStore for new photos
+ * 2. **Thumbnail Generator** - Creates compressed JPEG thumbnails (max 800px)
+ * 3. **R2 Upload Pipeline** - Uploads via presigned URLs from Cloud Functions
+ * 4. **Firebase Metadata** - Stores photo metadata for desktop client consumption
+ *
+ * ## Sync Flow
+ *
+ * 1. [ContentObserver] detects new photo in MediaStore
+ * 2. Premium access is verified via [hasPremiumAccess]
+ * 3. Recent photos are queried (limited to [MAX_PHOTOS_TO_SYNC])
+ * 4. For each new photo not in [syncedPhotoIds]:
+ *    a. Create thumbnail via [createThumbnail]
+ *    b. Compress to JPEG at [THUMBNAIL_QUALITY]
+ *    c. Get presigned upload URL from `getR2UploadUrl`
+ *    d. Upload to R2 via [uploadToR2]
+ *    e. Confirm upload via `confirmR2Upload`
+ * 5. Old photos beyond limit are cleaned up from R2 and Firebase
+ *
+ * ## Firebase Interaction Patterns
+ *
+ * **Photo Metadata Path:**
+ * `users/{userId}/photos/{photoId}`
+ *
+ * **Metadata Structure:**
+ * ```
+ * {
+ *   originalId: 12345,          // Android MediaStore ID
+ *   dateTaken: 1704067200000,   // Unix timestamp
+ *   width: 800,                  // Thumbnail width
+ *   height: 600,                 // Thumbnail height
+ *   size: 45678,                 // Original file size
+ *   mimeType: "image/jpeg",
+ *   r2Key: "photos/userId/...",
+ *   syncedAt: 1704067300000
+ * }
+ * ```
+ *
+ * **Cloud Functions Used:**
+ * - `getR2UploadUrl` - Get presigned PUT URL for thumbnail upload
+ * - `confirmR2Upload` - Confirm upload and store metadata
+ * - `deleteR2File` - Clean up old thumbnails from R2
+ *
+ * ## Battery Optimization Considerations
+ *
+ * - Uses [ContentObserver] instead of polling (efficient system-level monitoring)
+ * - Debounces sync operations by [SYNC_DEBOUNCE_MS] (2 seconds)
+ * - Initial sync delayed by 3 seconds to avoid startup load
+ * - Limits sync to [MAX_PHOTOS_TO_SYNC] (20) to bound processing time
+ * - Thumbnail compression reduces upload size significantly
+ *
+ * ## Duplicate Prevention
+ *
+ * - [syncedPhotoIds] tracks already-synced photo IDs (MediaStore _ID)
+ * - IDs are loaded from Firebase on startup via [loadSyncedPhotoIds]
+ * - Prevents re-uploading photos on app restart or reconnection
+ * - [cleanupDuplicates] handles race conditions that create duplicates
+ *
+ * ## WorkManager Integration
+ *
+ * Unlike SMS sync, photo sync does NOT use WorkManager periodic tasks because:
+ * 1. ContentObserver provides efficient real-time monitoring
+ * 2. Photos are less time-sensitive than messages
+ * 3. Premium-only feature reduces user base requiring background processing
+ *
+ * @see FileTransferService For full-resolution file transfers
+ * @see ClipboardSyncService For text sync
+ */
+
+// =============================================================================
+// REGION: PhotoSyncService - Main Service Class
+// =============================================================================
+
+/**
+ * Service that syncs recent photos from Android to Firebase for display on macOS.
+ *
+ * Photos are uploaded as compressed thumbnails (max 800px dimension, 80% JPEG quality)
+ * to minimize bandwidth and storage costs while maintaining visual quality for preview.
+ *
+ * ## Usage
+ *
+ * ```kotlin
+ * val service = PhotoSyncService(context)
+ * service.startSync()  // Starts ContentObserver and initial sync
+ *
+ * // Manual sync trigger
+ * service.syncRecentPhotos()
+ *
+ * // Force re-sync all photos
+ * service.forceSync()
+ *
+ * // Cleanup
+ * service.stopSync()
+ * ```
+ *
+ * ## Required Permissions
+ *
+ * - `READ_MEDIA_IMAGES` (Android 13+) or `READ_EXTERNAL_STORAGE` (older)
+ *
+ * @param context Application context for ContentResolver and system services
  */
 class PhotoSyncService(context: Context) {
+
+    // -------------------------------------------------------------------------
+    // Service Dependencies and State
+    // -------------------------------------------------------------------------
+
+    /** Application context for ContentResolver and system services */
     private val context: Context = context.applicationContext
+
+    /** Firebase Realtime Database for photo metadata storage */
     private val database = FirebaseDatabase.getInstance()
+
+    /** Firebase Cloud Functions for R2 presigned URL generation */
     private val functions = FirebaseFunctions.getInstance()
+
+    /** Unified identity manager for cross-platform user identification */
     private val unifiedIdentityManager = UnifiedIdentityManager.getInstance(context)
 
+    /** MediaStore observer for detecting new photos */
     private var contentObserver: ContentObserver? = null
+
+    /** Coroutine scope for async operations with SupervisorJob for independent failure handling */
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Track synced photos to avoid duplicates (loaded from Firebase on startup)
+    // -------------------------------------------------------------------------
+    // Duplicate Prevention State
+    // -------------------------------------------------------------------------
+
+    /**
+     * Set of MediaStore photo IDs that have already been synced.
+     * Loaded from Firebase on startup and updated as photos are synced.
+     * Prevents re-uploading the same photos on app restart.
+     */
     private val syncedPhotoIds = mutableSetOf<Long>()
+
+    /** Flag indicating whether [syncedPhotoIds] has been loaded from Firebase */
     private var syncedIdsLoaded = false
+
+    /** Timestamp of last sync operation (for debugging and future use) */
     private var lastSyncTimestamp: Long = 0
+
+    // -------------------------------------------------------------------------
+    // Companion Object: Constants and Configuration
+    // -------------------------------------------------------------------------
 
     companion object {
         private const val TAG = "PhotoSyncService"
+
+        /** Firebase Database path for photo metadata */
         private const val PHOTOS_PATH = "photos"
+
+        /** Firebase Database root path for user data */
         private const val USERS_PATH = "users"
+
+        /** Firebase Database path for usage/subscription data */
         private const val USAGE_PATH = "usage"
-        private const val MAX_THUMBNAIL_SIZE = 800 // Max dimension for thumbnails
-        private const val THUMBNAIL_QUALITY = 80 // JPEG quality
-        private const val MAX_PHOTOS_TO_SYNC = 20 // Max recent photos to keep
+
+        /**
+         * Maximum dimension (width or height) for generated thumbnails.
+         * Larger images are scaled down proportionally.
+         */
+        private const val MAX_THUMBNAIL_SIZE = 800
+
+        /**
+         * JPEG compression quality for thumbnails (0-100).
+         * 80 provides good visual quality with significant size reduction.
+         */
+        private const val THUMBNAIL_QUALITY = 80
+
+        /**
+         * Maximum number of recent photos to sync and keep in Firebase.
+         * Older photos beyond this limit are cleaned up.
+         */
+        private const val MAX_PHOTOS_TO_SYNC = 20
+
+        /**
+         * Debounce delay for sync operations in milliseconds.
+         * Prevents rapid-fire syncs when multiple photos are added quickly.
+         */
         private const val SYNC_DEBOUNCE_MS = 2000L
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Premium Subscription Validation
+    // -------------------------------------------------------------------------
+
     /**
-     * Check if user has a paid subscription (required for photo sync)
+     * Check if the current user has a paid subscription (required for photo sync).
+     *
+     * Queries the user's usage/subscription data in Firebase to determine
+     * access level. Photo sync is only available to paying subscribers.
+     *
+     * ## Subscription Tiers with Access
+     *
+     * - **lifetime** - Permanent access
+     * - **3year** - 3-year plan, permanent access
+     * - **monthly** - Access while subscription active
+     * - **yearly** - Access while subscription active
+     * - **paid** - Legacy paid status
+     *
+     * ## Tiers WITHOUT Access
+     *
+     * - **free** - No photo sync
+     * - **trial** - No photo sync (trial is for core features only)
+     *
+     * ## Firebase Path
+     *
+     * `users/{userId}/usage`
+     * - `plan`: Subscription tier name
+     * - `planExpiresAt`: Expiration timestamp (for monthly/yearly)
+     *
+     * @return true if user has premium access, false otherwise
      */
     private suspend fun hasPremiumAccess(): Boolean {
         val userId = unifiedIdentityManager.getUnifiedUserIdSync() ?: return false
@@ -82,8 +277,25 @@ class PhotoSyncService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Data Classes
+    // -------------------------------------------------------------------------
+
     /**
-     * Data class for photo metadata
+     * Data class for photo metadata stored in Firebase.
+     *
+     * Represents the synchronized photo information available to desktop clients.
+     *
+     * @property id Firebase document ID (UUID)
+     * @property originalId Android MediaStore _ID (for duplicate detection)
+     * @property fileName Generated filename (typically UUID.jpg)
+     * @property dateTaken Timestamp when photo was taken/added
+     * @property thumbnailUrl Presigned URL for thumbnail (if available)
+     * @property width Original photo width
+     * @property height Original photo height
+     * @property size Original file size in bytes
+     * @property mimeType Original MIME type (e.g., "image/jpeg")
+     * @property syncedAt Timestamp when photo was synced to Firebase
      */
     data class PhotoMetadata(
         val id: String,
@@ -98,9 +310,30 @@ class PhotoSyncService(context: Context) {
         val syncedAt: Long
     )
 
+    // -------------------------------------------------------------------------
+    // REGION: Service Lifecycle Management
+    // -------------------------------------------------------------------------
+
     /**
-     * Start photo sync - monitors for new photos
-     * NOTE: Requires premium subscription. Free/trial users will be blocked.
+     * Start photo sync - monitors for new photos and performs initial sync.
+     *
+     * ## Startup Sequence
+     *
+     * 1. Go online with Firebase
+     * 2. Wait 3 seconds for app initialization
+     * 3. Check premium subscription status
+     * 4. If premium: register ContentObserver, cleanup duplicates, sync photos
+     * 5. If not premium: log warning and return (no-op)
+     *
+     * ## Premium Requirement
+     *
+     * Photo sync is a premium-only feature. Free and trial users will see
+     * a log message but no error is thrown - the service simply doesn't activate.
+     *
+     * Call this when:
+     * - App starts and user is authenticated
+     * - Desktop sync feature is enabled
+     * - After [stopSync] to resume
      */
     fun startSync() {
         Log.d(TAG, "Starting photo sync")
@@ -126,7 +359,13 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Stop photo sync
+     * Stop photo sync and release all resources.
+     *
+     * Unregisters the ContentObserver and cancels the coroutine scope.
+     * Call this when:
+     * - User signs out
+     * - Desktop sync feature is disabled
+     * - App is being destroyed
      */
     fun stopSync() {
         Log.d(TAG, "Stopping photo sync")
@@ -134,8 +373,27 @@ class PhotoSyncService(context: Context) {
         scope.cancel()
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: ContentObserver Management
+    // -------------------------------------------------------------------------
+
     /**
-     * Register content observer for media changes
+     * Register a ContentObserver to monitor MediaStore for new photos.
+     *
+     * The observer monitors `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` for changes.
+     * When changes are detected, a debounced sync is triggered after [SYNC_DEBOUNCE_MS].
+     *
+     * ## Battery Optimization
+     *
+     * ContentObserver is more efficient than polling because:
+     * 1. System notifies us only when changes occur
+     * 2. No wake-up when device is idle and no photos are taken
+     * 3. Single registration covers all photo additions/changes
+     *
+     * ## Handler Configuration
+     *
+     * Observer runs on main looper to ensure proper ContentResolver callback delivery.
+     * Actual sync work is dispatched to [Dispatchers.IO] via coroutine scope.
      */
     private fun registerContentObserver() {
         contentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -167,8 +425,23 @@ class PhotoSyncService(context: Context) {
         contentObserver = null
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Duplicate Prevention
+    // -------------------------------------------------------------------------
+
     /**
-     * Load already synced photo IDs from Firebase to prevent duplicates
+     * Load already synced photo IDs from Firebase to prevent duplicate uploads.
+     *
+     * Called at the start of each sync operation to ensure [syncedPhotoIds]
+     * contains all photos already in Firebase. This prevents re-uploading
+     * photos that were synced in a previous session.
+     *
+     * ## Firebase Path
+     *
+     * Reads all children from `users/{userId}/photos` and extracts `originalId`
+     * (the MediaStore _ID) from each photo document.
+     *
+     * @param userId Current user's Firebase UID
      */
     private suspend fun loadSyncedPhotoIds(userId: String) {
         if (syncedIdsLoaded) return
@@ -198,9 +471,35 @@ class PhotoSyncService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Photo Sync Operations
+    // -------------------------------------------------------------------------
+
     /**
-     * Sync recent photos to Firebase
-     * NOTE: Requires premium subscription
+     * Sync recent photos to Firebase/R2.
+     *
+     * Main sync entry point. Validates premium access, loads existing synced IDs,
+     * queries recent photos, uploads new ones, and cleans up old photos.
+     *
+     * ## Sync Flow
+     *
+     * 1. Verify premium subscription
+     * 2. Load synced IDs from Firebase (if not already loaded)
+     * 3. Query [MAX_PHOTOS_TO_SYNC] most recent photos from MediaStore
+     * 4. For each photo not in [syncedPhotoIds]:
+     *    - Create thumbnail
+     *    - Upload to R2
+     *    - Update Firebase metadata
+     * 5. Clean up photos beyond limit
+     *
+     * ## Return Values
+     *
+     * - `Result.success("Photo sync completed successfully! N photos synced.")`
+     * - `Result.failure(Exception("Photo sync requires a premium subscription..."))`
+     * - `Result.failure(Exception("User authentication required"))`
+     * - `Result.failure(Exception("Photo sync failed: ..."))`
+     *
+     * @return Result indicating success with message or failure with exception
      */
     suspend fun syncRecentPhotos(): Result<String> {
         var syncedCount = 0
@@ -242,8 +541,33 @@ class PhotoSyncService(context: Context) {
         return Result.success("Photo sync completed successfully! $syncedCount photos synced.")
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: MediaStore Query Operations
+    // -------------------------------------------------------------------------
+
     /**
-     * Get recent photos from device
+     * Query recent photos from the device's MediaStore.
+     *
+     * Queries `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` for the most
+     * recent photos, sorted by DATE_TAKEN descending.
+     *
+     * ## Projection Columns
+     *
+     * - _ID: Unique MediaStore identifier
+     * - DISPLAY_NAME: File name
+     * - DATE_TAKEN: When photo was taken (camera timestamp)
+     * - DATE_ADDED: When file was added to MediaStore (fallback)
+     * - WIDTH/HEIGHT: Image dimensions
+     * - SIZE: File size in bytes
+     * - MIME_TYPE: Content type
+     *
+     * ## Date Handling
+     *
+     * Uses DATE_TAKEN when available, falls back to DATE_ADDED (converted
+     * from seconds to milliseconds) for photos without EXIF data.
+     *
+     * @param limit Maximum number of photos to return
+     * @return List of [LocalPhoto] objects with metadata and content URIs
      */
     private fun getRecentPhotos(limit: Int): List<LocalPhoto> {
         val photos = mutableListOf<LocalPhoto>()
@@ -316,8 +640,59 @@ class PhotoSyncService(context: Context) {
         return photos
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: R2 Upload Operations
+    // -------------------------------------------------------------------------
+
     /**
-     * Upload a photo to R2 storage via Cloud Functions
+     * Upload a photo thumbnail to Cloudflare R2 storage.
+     *
+     * ## Upload Flow
+     *
+     * 1. Create thumbnail from photo URI via [createThumbnail]
+     * 2. Compress to JPEG bytes via [compressThumbnail]
+     * 3. Get presigned upload URL from `getR2UploadUrl` Cloud Function
+     * 4. Upload directly to R2 via HTTP PUT
+     * 5. Confirm upload via `confirmR2Upload` (stores metadata in Firebase)
+     *
+     * ## Cloud Function: getR2UploadUrl
+     *
+     * **Request:**
+     * ```
+     * {
+     *   fileName: "uuid.jpg",
+     *   contentType: "image/jpeg",
+     *   fileSize: 45678,
+     *   transferType: "photo"
+     * }
+     * ```
+     *
+     * **Response:**
+     * ```
+     * {
+     *   uploadUrl: "https://r2.cloudflarestorage.com/...",
+     *   r2Key: "photos/userId/uuid.jpg",
+     *   fileId: "uuid"
+     * }
+     * ```
+     *
+     * ## Cloud Function: confirmR2Upload
+     *
+     * **Request:**
+     * ```
+     * {
+     *   fileId: "uuid",
+     *   r2Key: "photos/userId/...",
+     *   fileName: "uuid.jpg",
+     *   fileSize: 45678,
+     *   contentType: "image/jpeg",
+     *   transferType: "photo",
+     *   photoMetadata: { originalId, dateTaken, width, height, size, mimeType }
+     * }
+     * ```
+     *
+     * @param userId Current user's Firebase UID
+     * @param photo Local photo metadata with content URI
      */
     private suspend fun uploadPhoto(userId: String, photo: LocalPhoto) {
         try {
@@ -395,7 +770,21 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Upload bytes directly to R2 via presigned URL
+     * Upload raw bytes directly to Cloudflare R2 via presigned URL.
+     *
+     * Performs a simple HTTP PUT request to the presigned URL with the
+     * provided content type and data.
+     *
+     * ## Network Configuration
+     *
+     * - Connect timeout: 30 seconds
+     * - Read timeout: 60 seconds
+     * - Accepts HTTP 2xx responses only
+     *
+     * @param uploadUrl Presigned PUT URL from getR2UploadUrl Cloud Function
+     * @param data Raw bytes to upload (thumbnail JPEG data)
+     * @param contentType MIME type for Content-Type header
+     * @return true if upload succeeded (2xx response), false otherwise
      */
     private fun uploadToR2(uploadUrl: String, data: ByteArray, contentType: String): Boolean {
         var connection: HttpURLConnection? = null
@@ -424,8 +813,30 @@ class PhotoSyncService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Thumbnail Generation
+    // -------------------------------------------------------------------------
+
     /**
-     * Create a thumbnail from an image URI
+     * Create a thumbnail bitmap from an image content URI.
+     *
+     * Uses BitmapFactory with inSampleSize to efficiently decode large images
+     * without loading full resolution into memory.
+     *
+     * ## Algorithm
+     *
+     * 1. First pass: Decode with inJustDecodeBounds=true to get dimensions
+     * 2. Calculate sample size to get image within [MAX_THUMBNAIL_SIZE]
+     * 3. Second pass: Decode with calculated sample size
+     *
+     * ## Memory Optimization
+     *
+     * Using inSampleSize avoids loading full-resolution images (which can be
+     * 20+ MB for modern phone cameras) into memory. Sample size of 2 loads
+     * 1/4 the pixels, sample size of 4 loads 1/16, etc.
+     *
+     * @param uri Content URI of the image (from MediaStore)
+     * @return Thumbnail bitmap or null if decoding fails
      */
     private fun createThumbnail(uri: Uri): Bitmap? {
         return try {
@@ -467,7 +878,13 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Compress bitmap to JPEG bytes
+     * Compress a bitmap to JPEG format with configured quality.
+     *
+     * Uses [THUMBNAIL_QUALITY] (80%) which provides good visual quality
+     * while achieving significant file size reduction.
+     *
+     * @param bitmap Source bitmap to compress
+     * @return JPEG-compressed byte array
      */
     private fun compressThumbnail(bitmap: Bitmap): ByteArray {
         val outputStream = ByteArrayOutputStream()
@@ -475,8 +892,31 @@ class PhotoSyncService(context: Context) {
         return outputStream.toByteArray()
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Cleanup Operations
+    // -------------------------------------------------------------------------
+
     /**
-     * Clean up old photos from R2 and database (keep only recent ones)
+     * Clean up old photos from R2 and Firebase, keeping only the most recent.
+     *
+     * When the number of synced photos exceeds [MAX_PHOTOS_TO_SYNC], this
+     * method deletes the oldest photos (by syncedAt timestamp) from both
+     * R2 storage and Firebase Database.
+     *
+     * ## Deletion Order
+     *
+     * Photos are ordered by syncedAt ascending, so oldest synced photos
+     * are deleted first regardless of when they were originally taken.
+     *
+     * ## Cleanup Flow
+     *
+     * 1. Query all photos ordered by syncedAt
+     * 2. Calculate how many to delete (count - MAX_PHOTOS_TO_SYNC)
+     * 3. For each photo to delete:
+     *    a. Delete from R2 via `deleteR2File` Cloud Function
+     *    b. Delete metadata from Firebase Database
+     *
+     * @param userId Current user's Firebase UID
      */
     private suspend fun cleanupOldPhotos(userId: String) {
         try {
@@ -523,8 +963,18 @@ class PhotoSyncService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Manual Sync Operations
+    // -------------------------------------------------------------------------
+
     /**
-     * Force sync all recent photos (re-checks Firebase for already synced photos)
+     * Force a complete re-sync of recent photos.
+     *
+     * Clears the local [syncedPhotoIds] cache and reloads from Firebase,
+     * then performs a full sync. Use this when:
+     * - User manually requests a refresh
+     * - Suspected data inconsistency
+     * - After clearing Firebase data
      */
     suspend fun forceSync() {
         syncedPhotoIds.clear()
@@ -533,7 +983,30 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Clean up duplicate photos in R2 and database (keeps only the most recent upload for each originalId)
+     * Clean up duplicate photos in R2 and Firebase Database.
+     *
+     * Finds photos with the same originalId (MediaStore _ID) and keeps only
+     * the most recently synced one, deleting older duplicates.
+     *
+     * ## Why Duplicates Occur
+     *
+     * - Race conditions during rapid photo taking
+     * - App restart during sync operation
+     * - Network failures causing retry uploads
+     * - Multiple devices syncing same photo library (rare)
+     *
+     * ## Cleanup Algorithm
+     *
+     * 1. Query all photos from Firebase
+     * 2. Group by originalId
+     * 3. For groups with >1 photo:
+     *    a. Sort by syncedAt descending
+     *    b. Keep the first (most recent)
+     *    c. Delete all others from R2 and Firebase
+     *
+     * ## Idempotency
+     *
+     * Safe to call multiple times - will only delete actual duplicates.
      */
     suspend fun cleanupDuplicates() {
         try {
@@ -603,8 +1076,23 @@ class PhotoSyncService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Internal Data Classes
+    // -------------------------------------------------------------------------
+
     /**
-     * Local photo data class
+     * Local photo metadata retrieved from MediaStore.
+     *
+     * Used internally to pass photo information between query and upload methods.
+     *
+     * @property id MediaStore _ID (unique identifier in device's photo library)
+     * @property name Display name (filename)
+     * @property dateTaken Timestamp when photo was taken
+     * @property width Original image width in pixels
+     * @property height Original image height in pixels
+     * @property size File size in bytes
+     * @property mimeType MIME type (e.g., "image/jpeg", "image/png")
+     * @property contentUri Content URI for accessing the photo via ContentResolver
      */
     private data class LocalPhoto(
         val id: Long,

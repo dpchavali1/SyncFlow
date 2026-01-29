@@ -1,8 +1,48 @@
+/**
+ * AIAssistant.tsx - Intelligent Message Analysis Component
+ *
+ * This component provides an AI-powered assistant that analyzes SMS/MMS messages
+ * to extract financial insights, track packages, identify OTP codes, and more.
+ *
+ * KEY FEATURES:
+ * - Transaction parsing: Extracts spending data from bank SMS notifications
+ * - Bill tracking: Identifies upcoming bills and due dates
+ * - Balance monitoring: Detects account balance information
+ * - Subscription detection: Finds recurring charges and calculates monthly costs
+ * - Package tracking: Identifies delivery status from shipping notifications
+ * - OTP extraction: Finds verification codes from recent messages
+ *
+ * ARCHITECTURE:
+ * - All analysis is performed client-side using pattern matching (no external AI API)
+ * - Uses React memoization (useMemo) to optimize expensive parsing operations
+ * - Supports multiple currencies (USD, INR) with automatic detection
+ * - Maintains conversation history for contextual follow-up queries
+ *
+ * DATA FLOW:
+ * 1. Parent component passes array of Message objects
+ * 2. Component parses messages into structured data (transactions, bills, etc.)
+ * 3. User queries trigger the generateResponse function
+ * 4. Response is rendered with suggested follow-up queries
+ *
+ * @module components/AIAssistant
+ * @requires react
+ * @requires lucide-react
+ */
+
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Send, Brain, X, TrendingUp, Calendar, Package, CreditCard, Key, ListTodo, Copy, Check, RefreshCw, ArrowUpDown, Repeat, Plus } from 'lucide-react'
 
+/**
+ * Represents an SMS/MMS message from the user's phone
+ * @property id - Unique identifier for the message
+ * @property address - Phone number or sender address
+ * @property body - The text content of the message
+ * @property date - Unix timestamp of when the message was received
+ * @property type - Message type (1=received, 2=sent)
+ * @property contactName - Optional display name from contacts
+ */
 interface Message {
   id: string | number
   address: string
@@ -12,11 +52,20 @@ interface Message {
   contactName?: string
 }
 
+/**
+ * Props for the AIAssistant component
+ * @property messages - Array of SMS/MMS messages to analyze
+ * @property onClose - Optional callback when the assistant modal is closed
+ */
 interface AIAssistantProps {
   messages: Message[]
   onClose?: () => void
 }
 
+/**
+ * Represents a parsed financial transaction extracted from an SMS
+ * Used for spending analysis and merchant tracking
+ */
 interface ParsedTransaction {
   amount: number
   currency: string
@@ -25,6 +74,10 @@ interface ParsedTransaction {
   message: string
 }
 
+/**
+ * Represents a bill or payment reminder extracted from messages
+ * Includes due date parsing and overdue status detection
+ */
 interface BillReminder {
   billType: string
   dueDate: Date | null
@@ -36,6 +89,9 @@ interface BillReminder {
   isOverdue: boolean
 }
 
+/**
+ * Represents account balance information from bank SMS notifications
+ */
 interface BalanceInfo {
   accountType: string
   balance: number | null
@@ -45,6 +101,10 @@ interface BalanceInfo {
   date: number
 }
 
+/**
+ * Represents a detected recurring expense or subscription
+ * Includes frequency detection and monthly cost estimation
+ */
 interface RecurringExpense {
   merchant: string
   amount: number
@@ -54,6 +114,10 @@ interface RecurringExpense {
   occurrences: number
 }
 
+/**
+ * Aggregated financial summary for the smart digest feature
+ * Provides month-over-month comparisons and key metrics
+ */
 interface SmartDigest {
   totalSpentThisMonth: number
   totalSpentLastMonth: number
@@ -66,7 +130,10 @@ interface SmartDigest {
   currency: string
 }
 
-// Quick action buttons
+/**
+ * Quick action buttons displayed on the assistant home screen
+ * Each action maps to a pre-defined query that users can click
+ */
 const QUICK_ACTIONS = [
   { icon: TrendingUp, title: 'Spending', query: 'How much did I spend this month?', color: 'blue' },
   { icon: Calendar, title: 'Bills', query: 'Show my upcoming bills', color: 'orange' },
@@ -76,7 +143,11 @@ const QUICK_ACTIONS = [
   { icon: ListTodo, title: 'Transactions', query: 'List my transactions', color: 'teal' },
 ]
 
-// Known merchants with aliases
+/**
+ * Mapping of merchant names to their common aliases and abbreviations
+ * Used for fuzzy matching when extracting merchant names from SMS text
+ * Key: canonical merchant name, Value: array of aliases to match
+ */
 const MERCHANT_ALIASES: Record<string, string[]> = {
   'amazon': ['amazon', 'amzn', 'amazn', 'amz'],
   'flipkart': ['flipkart', 'fkrt', 'flip'],
@@ -100,26 +171,64 @@ const MERCHANT_ALIASES: Record<string, string[]> = {
   'bestbuy': ['best buy', 'bestbuy'],
 }
 
-// Transaction keywords that MUST be present for valid debit
+/**
+ * Keywords that MUST be present in a message to be classified as a debit transaction
+ * These help filter out non-spending messages that might contain amounts
+ */
 const DEBIT_KEYWORDS = [
   'debited', 'spent', 'paid', 'charged', 'purchase', 'payment',
   'debit', 'deducted', 'txn', 'transaction', 'pos', 'withdrawn'
 ]
 
-// Keywords that indicate NOT a spending
+/**
+ * Keywords that indicate a message is a credit (NOT a spending)
+ * Messages containing these are excluded from spending calculations
+ */
 const CREDIT_KEYWORDS = [
   'credited', 'received', 'refund', 'reversal', 'cashback',
   'credit', 'deposit', 'deposited', 'added', 'bonus', 'reward'
 ]
 
+/**
+ * AIAssistant - Main component for the intelligent message analysis assistant
+ *
+ * Provides a chat-like interface for users to query their SMS messages.
+ * All analysis is performed locally using pattern matching and heuristics.
+ *
+ * @param messages - Array of SMS/MMS messages to analyze
+ * @param onClose - Optional callback when the modal is closed
+ *
+ * @example
+ * ```tsx
+ * <AIAssistant
+ *   messages={userMessages}
+ *   onClose={() => setShowAssistant(false)}
+ * />
+ * ```
+ */
 export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
+  // User's current input query
   const [query, setQuery] = useState('')
+
+  // Conversation history for contextual chat experience
   const [conversation, setConversation] = useState<Array<{ role: 'user' | 'assistant', content: string }>>([])
+
+  // Loading state during response generation
   const [isLoading, setIsLoading] = useState(false)
+
+  // Track which response was copied (for copy button feedback)
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
+
+  // Whether to show the smart digest card on home screen
   const [showDigest, setShowDigest] = useState(true)
+
+  // Track timeout IDs for cleanup on unmount
   const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([])
 
+  /**
+   * Cleanup effect - clears all pending timeouts when component unmounts
+   * Prevents memory leaks and state updates on unmounted components
+   */
   useEffect(() => {
     return () => {
       timeoutsRef.current.forEach((id) => clearTimeout(id))
@@ -127,7 +236,13 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     }
   }, [])
 
-  // Extract merchant from query
+  /**
+   * Extracts a known merchant name from the user's query
+   * Used to filter transactions by merchant when user asks "Amazon spending"
+   *
+   * @param query - The user's input query string
+   * @returns The canonical merchant name if found, null otherwise
+   */
   const extractMerchantFromQuery = (query: string): string | null => {
     const lowerQuery = query.toLowerCase()
     for (const [merchant, aliases] of Object.entries(MERCHANT_ALIASES)) {
@@ -138,7 +253,17 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return null
   }
 
-  // Extract merchant from message body
+  /**
+   * Extracts merchant/institution name from an SMS message body
+   * Uses multiple pattern matching strategies:
+   * 1. Known merchant aliases lookup
+   * 2. Bank name patterns (e.g., "HDFC Bank", "SBI Alert")
+   * 3. SMS sender code patterns (e.g., "VK-HDFCBK")
+   * 4. General merchant extraction patterns
+   *
+   * @param body - The raw SMS message body text
+   * @returns Extracted merchant name or null if not found
+   */
   const extractMerchantFromMessage = (body: string): string | null => {
     const bodyLower = body.toLowerCase()
 
@@ -206,16 +331,28 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return null
   }
 
-  // Parse transactions with strict filtering
+  /**
+   * Parses all messages to extract financial transactions
+   * Memoized for performance - only recalculates when messages change
+   *
+   * FILTERING RULES:
+   * - Must contain at least one DEBIT_KEYWORD
+   * - Must NOT contain any CREDIT_KEYWORD (excludes refunds, deposits)
+   * - Amount must be positive and less than 10,000,000 (filters reference numbers)
+   *
+   * @returns Array of ParsedTransaction objects sorted by date (newest first)
+   */
   const parseTransactions = useMemo((): ParsedTransaction[] => {
     const transactions: ParsedTransaction[] = []
 
+    // Regex patterns for extracting monetary amounts
+    // Supports INR (Rs, Rupees symbol) and USD ($ symbol)
     const amountPatterns = [
-      // INR patterns
+      // INR patterns: "Rs.1,234.56" or "Rs 1234"
       /(?:rs\.?|₹|inr)\s*([0-9,]+(?:\.\d{1,2})?)/i,
-      // USD patterns
+      // USD patterns: "$1,234.56"
       /(?:\$|usd)\s*([0-9,]+(?:\.\d{1,2})?)/i,
-      // Amount followed by currency
+      // Amount followed by currency: "1,234.56 Rs"
       /([0-9,]+(?:\.\d{1,2})?)\s*(?:rs\.?|₹|inr)/i,
     ]
 
@@ -267,7 +404,18 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return transactions.sort((a, b) => b.date - a.date)
   }, [messages])
 
-  // Parse bills from messages
+  /**
+   * Parses messages to extract bill and payment reminders
+   * Memoized for performance optimization
+   *
+   * EXTRACTED DATA:
+   * - Bill type (Credit Card, Utility, Subscription, Loan, Insurance)
+   * - Due date (parsed from various date formats)
+   * - Amount due
+   * - Overdue status (compared against current date)
+   *
+   * @returns Array of BillReminder objects sorted by due date (upcoming first)
+   */
   const parseBills = useMemo((): BillReminder[] => {
     const bills: BillReminder[] = []
     const billKeywords = ['due', 'payment due', 'bill', 'minimum payment', 'pay by', 'statement', 'balance due', 'amount due']
@@ -344,7 +492,19 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     })
   }, [messages])
 
-  // Parse balance info from messages
+  /**
+   * Parses messages to extract account balance information
+   * Memoized for performance optimization
+   *
+   * Handles various bank SMS formats including:
+   * - "Avl Bal: $1,234.56"
+   * - "Available Balance: Rs.1,234.56"
+   * - Balance notifications from multiple institutions
+   *
+   * Deduplication: Keeps only the most recent balance per institution/account type
+   *
+   * @returns Array of BalanceInfo objects (deduplicated by institution)
+   */
   const parseBalances = useMemo((): BalanceInfo[] => {
     const balances: BalanceInfo[] = []
     const balanceKeywords = ['balance', 'avl bal', 'avl', 'available', 'a/c bal', 'current bal']
@@ -436,7 +596,24 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return Array.from(seen.values())
   }, [messages])
 
-  // Detect recurring expenses (subscriptions)
+  /**
+   * Detects recurring expenses and subscriptions from transaction patterns
+   * Memoized and depends on parseTransactions
+   *
+   * DETECTION ALGORITHM:
+   * 1. Group transactions by merchant
+   * 2. Filter merchants with 2+ transactions
+   * 3. Check if amounts are similar (within 10% variance)
+   * 4. Analyze charge intervals to determine frequency
+   * 5. Known subscription services (Netflix, Spotify, etc.) get priority matching
+   *
+   * FREQUENCY DETECTION:
+   * - Weekly: 5-10 day intervals
+   * - Monthly: 25-35 day intervals
+   * - Yearly: 350-380 day intervals
+   *
+   * @returns Array of RecurringExpense objects sorted by amount (highest first)
+   */
   const detectRecurringExpenses = useMemo((): RecurringExpense[] => {
     const transactions = parseTransactions
     const merchantGroups: Record<string, ParsedTransaction[]> = {}
@@ -507,7 +684,21 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return recurring.sort((a, b) => b.amount - a.amount)
   }, [parseTransactions])
 
-  // Generate smart digest
+  /**
+   * Generates a comprehensive financial digest/summary
+   * Memoized and aggregates data from multiple parsed sources
+   *
+   * INCLUDED METRICS:
+   * - Total spending this month vs last month
+   * - Month-over-month spending change percentage
+   * - Transaction count
+   * - Upcoming bills count
+   * - Recent package deliveries
+   * - Estimated monthly subscription cost
+   * - Top spending merchant
+   *
+   * @returns SmartDigest object with aggregated financial metrics
+   */
   const generateSmartDigest = useMemo((): SmartDigest => {
     const transactions = parseTransactions
     const now = Date.now()
@@ -553,7 +744,14 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     }
   }, [parseTransactions, parseBills, detectRecurringExpenses, messages])
 
-  // Filter transactions by merchant
+  /**
+   * Filters transactions by merchant name
+   * Matches against both extracted merchant name and raw message body
+   *
+   * @param transactions - Array of transactions to filter
+   * @param merchant - Merchant name to filter by
+   * @returns Filtered array of transactions
+   */
   const filterByMerchant = (transactions: ParsedTransaction[], merchant: string): ParsedTransaction[] => {
     const lowerMerchant = merchant.toLowerCase()
     return transactions.filter(txn =>
@@ -562,7 +760,14 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     )
   }
 
-  // Apply time filter
+  /**
+   * Applies time-based filtering to transactions based on query keywords
+   * Supports: today, week/7 day, month/30 day, year
+   *
+   * @param transactions - Array of transactions to filter
+   * @param query - User query containing time keywords
+   * @returns Filtered array of transactions within the time period
+   */
   const applyTimeFilter = (transactions: ParsedTransaction[], query: string): ParsedTransaction[] => {
     const lowerQuery = query.toLowerCase()
     const now = Date.now()
@@ -585,7 +790,12 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return transactions
   }
 
-  // Get time period label
+  /**
+   * Converts time-related keywords in query to human-readable labels
+   *
+   * @param query - User query to analyze
+   * @returns Human-readable time period label (e.g., "This Month")
+   */
   const getTimePeriodLabel = (query: string): string => {
     const lowerQuery = query.toLowerCase()
     if (lowerQuery.includes('today')) return 'Today'
@@ -595,7 +805,13 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return ''
   }
 
-  // Get suggested follow-up queries based on the response content
+  /**
+   * Generates contextual follow-up query suggestions based on the assistant's response
+   * Analyzes response content to suggest related queries the user might want to ask
+   *
+   * @param responseContent - The assistant's response text
+   * @returns Array of up to 3 suggested follow-up queries
+   */
   const getSuggestedFollowUps = (responseContent: string): string[] => {
     const suggestions: string[] = []
 
@@ -643,22 +859,57 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return suggestions.slice(0, 3)
   }
 
-  // Legacy function for backward compatibility
+  /**
+   * Legacy function maintained for backward compatibility
+   * @deprecated Use parseTransactions directly
+   */
   const analyzeSpending = () => parseTransactions
 
-  // Helper function to format date
+  /**
+   * Formats a Unix timestamp into a readable date string
+   *
+   * @param timestamp - Unix timestamp in milliseconds
+   * @returns Formatted date string (e.g., "Jan 15, 2024")
+   */
   const formatDate = (timestamp: number): string => {
     const date = new Date(timestamp)
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   }
 
-  // Format currency based on type
+  /**
+   * Formats a numeric amount with the appropriate currency symbol
+   *
+   * @param amount - Numeric amount to format
+   * @param currency - Currency code ('USD' or 'INR')
+   * @returns Formatted currency string (e.g., "$1,234.56" or "Rs.1,234.56")
+   */
   const formatCurrency = (amount: number, currency: string): string => {
     const symbol = currency === 'USD' ? '$' : '₹'
     return `${symbol}${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   }
 
-  // Generate response based on query
+  /**
+   * Main response generation function - the "brain" of the AI assistant
+   * Analyzes the user's query and returns an appropriate response
+   *
+   * SUPPORTED QUERY TYPES:
+   * - Merchant-specific spending (e.g., "Amazon spending")
+   * - Transaction listing
+   * - OTP/verification code lookup
+   * - Top merchants analysis
+   * - Category-based spending breakdown
+   * - Subscription/recurring expense detection
+   * - Financial summary/digest
+   * - Spending trends and comparisons
+   * - Message search
+   * - Bill and payment reminders
+   * - Account balance lookup
+   * - Package/delivery tracking
+   * - General spending analysis
+   *
+   * @param userQuery - The user's natural language query
+   * @returns Formatted response string with analysis results
+   */
   const generateResponse = (userQuery: string): string => {
     const lowerQuery = userQuery.toLowerCase()
 
@@ -1116,6 +1367,12 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return "I can help you analyze your messages! Try asking:\n\n💰 Spending:\n• \"How much did I spend this month?\"\n• \"Amazon spending\" or \"Amazon transactions\"\n• \"Spent at Swiggy this week\"\n• \"List my transactions\"\n• \"Show spending by category\"\n• \"Top merchants\"\n\n📅 Bills & Payments:\n• \"Show my upcoming bills\"\n• \"Any payment due?\"\n• \"Credit card due date\"\n\n💳 Account Info:\n• \"What's my account balance?\"\n• \"Show my bank balance\"\n\n📦 Packages:\n• \"Track my packages\"\n• \"Show delivery updates\"\n\n🔐 OTP Codes:\n• \"Find my OTP codes\"\n• \"Show verification codes\"\n\n📊 Statistics:\n• \"How many messages do I have?\"\n• \"Who do I text most?\""
   }
 
+  /**
+   * Handles form submission when user sends a query
+   * Adds the query to conversation, generates response, and updates state
+   *
+   * @param e - Form submission event
+   */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!query.trim() || isLoading) return
@@ -1124,10 +1381,11 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     setQuery('')
     setIsLoading(true)
 
-    // Add user message to conversation
+    // Add user message to conversation history
     setConversation(prev => [...prev, { role: 'user', content: userMessage }])
 
-    // Simulate thinking delay
+    // Simulate thinking delay for better UX (feels more natural than instant response)
+    // Also prevents UI jank from synchronous heavy computation
     const timeoutId = setTimeout(() => {
       const response = generateResponse(userMessage)
       setConversation(prev => [...prev, { role: 'assistant', content: response }])

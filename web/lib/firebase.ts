@@ -1,3 +1,43 @@
+/**
+ * firebase.ts - Firebase Integration Layer
+ *
+ * This module provides the complete Firebase integration for the SyncFlow web application.
+ * It handles authentication, real-time database operations, cloud storage, and cloud functions.
+ *
+ * ARCHITECTURE OVERVIEW:
+ * - Firebase Realtime Database for message sync and user data
+ * - Firebase Authentication with anonymous and custom token auth
+ * - Firebase Cloud Functions for secure server-side operations
+ * - Firebase Storage for MMS attachments and file transfers
+ * - End-to-End Encryption (E2EE) integration for message security
+ *
+ * KEY FEATURES:
+ * - Device pairing (QR code-based, supports V1 and V2 pairing flows)
+ * - Real-time message synchronization with E2EE decryption
+ * - SMS/MMS sending with delivery tracking
+ * - Contact management with cross-device sync
+ * - Usage quota management (trial/paid tiers)
+ * - Admin cleanup operations for cost optimization
+ * - Spam message detection and management
+ *
+ * DATABASE STRUCTURE:
+ * /users/{userId}/
+ *   /messages - Synced SMS/MMS messages
+ *   /devices - Paired devices
+ *   /contacts - User contacts
+ *   /outgoing_messages - Messages queued to send
+ *   /spam_messages - Detected spam
+ *   /read_receipts - Message read status
+ *   /usage - Quota tracking
+ *
+ * SECURITY:
+ * - Custom tokens for authenticated operations
+ * - Device-based encryption keys
+ * - Plan-based access control
+ *
+ * @module lib/firebase
+ */
+
 import { initializeApp, getApps } from 'firebase/app'
 import { getAuth, signInAnonymously, signInWithCustomToken } from 'firebase/auth'
 import {
@@ -17,7 +57,17 @@ import { getStorage } from 'firebase/storage'
 import { decryptDataKey, decryptMessageBody, getOrCreateDeviceId, getPublicKeyX963Base64 } from './e2ee'
 import { PhoneNumberNormalizer } from './phoneNumberNormalizer'
 
-// Normalize phone number for comparison (same logic as ConversationList)
+/**
+ * Normalizes a phone number for consistent comparison across formats
+ * Handles international prefixes and various formatting styles
+ *
+ * @param address - Phone number or sender address to normalize
+ * @returns Normalized phone number (last 10 digits) or lowercase address for non-phone formats
+ *
+ * @example
+ * normalizePhoneNumber("+1 (555) 123-4567") // Returns "5551234567"
+ * normalizePhoneNumber("support@company.com") // Returns "support@company.com"
+ */
 function normalizePhoneNumber(address: string): string {
   // Skip non-phone addresses (email, short codes, etc.)
   if (address.includes('@') || address.length < 6) {
@@ -34,8 +84,19 @@ function normalizePhoneNumber(address: string): string {
   return digitsOnly
 }
 
-// Firebase configuration
-// TODO: Replace with your Firebase project configuration from Firebase Console
+/**
+ * Firebase configuration loaded from environment variables
+ * All values are prefixed with NEXT_PUBLIC_ to be available client-side
+ *
+ * REQUIRED ENVIRONMENT VARIABLES:
+ * - NEXT_PUBLIC_FIREBASE_API_KEY
+ * - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+ * - NEXT_PUBLIC_FIREBASE_DATABASE_URL
+ * - NEXT_PUBLIC_FIREBASE_PROJECT_ID
+ * - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+ * - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+ * - NEXT_PUBLIC_FIREBASE_APP_ID
+ */
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -46,18 +107,42 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 }
 
-// Initialize Firebase
+// ============================================
+// FIREBASE INITIALIZATION
+// ============================================
+
+/**
+ * Firebase app instance - singleton pattern
+ * Reuses existing app if already initialized (important for Next.js hot reloading)
+ */
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
+
+/** Firebase Authentication instance */
 const auth = getAuth(app)
 
-// Enable auth state persistence (default is 'local' which persists across browser sessions)
+// Auth state persistence is set to 'local' by default, which persists across browser sessions
 // This ensures users stay authenticated even after closing the browser
 
+/** Firebase Realtime Database instance */
 const database = getDatabase(app)
+
+/** Firebase Cloud Storage instance for file uploads */
 const storage = getStorage(app)
+
+/** Firebase Cloud Functions instance for server-side operations */
 const functions = getFunctions(app)
 
-// Authentication
+// ============================================
+// AUTHENTICATION FUNCTIONS
+// ============================================
+
+/**
+ * Signs in the user anonymously
+ * Used for initial setup before device pairing is complete
+ *
+ * @returns The authenticated Firebase User object
+ * @throws Error if sign-in fails
+ */
 export const signInAnon = async () => {
   try {
     const result = await signInAnonymously(auth)
@@ -68,6 +153,14 @@ export const signInAnon = async () => {
   }
 }
 
+/**
+ * Authenticates an admin user with username/password
+ * Calls a Cloud Function that validates credentials and returns a custom token
+ *
+ * @param username - Admin username
+ * @param password - Admin password
+ * @returns Object containing customToken and admin uid
+ */
 export const adminLogin = async (username: string, password: string) => {
   const call = httpsCallable(functions, 'adminLogin')
   const result = await call({ username, password })
@@ -76,6 +169,16 @@ export const adminLogin = async (username: string, password: string) => {
   return data
 }
 
+/**
+ * Redeems a pairing token to link web client to an Android device
+ * This is part of the V1 pairing flow (Android-generated token)
+ *
+ * COST OPTIMIZATION: Supports device/user reuse to avoid creating duplicate accounts
+ *
+ * @param token - The pairing token from the QR code
+ * @param deviceName - Name for this web device
+ * @returns Object containing customToken, pairedUid, and deviceId
+ */
 export const redeemPairingToken = async (token: string, deviceName: string) => {
   // Get existing device ID and user ID to enable device/user reuse - COST OPTIMIZATION
   const existingDeviceId = typeof window !== 'undefined' ? localStorage.getItem('syncflow_device_id') : null
@@ -95,26 +198,61 @@ export const redeemPairingToken = async (token: string, deviceName: string) => {
   return data
 }
 
-// Database path for pending pairings (needed early for pairing functions)
+// ============================================
+// DEVICE PAIRING SYSTEM
+// ============================================
+
+/** Database path for V1 pending pairings */
 const PENDING_PAIRINGS_PATH = 'pending_pairings'
 
-// New pairing flow: Web generates QR code, Android scans
+/**
+ * Represents an active pairing session
+ * Used when web client generates a QR code for Android to scan
+ */
 export interface PairingSession {
+  /** Unique token identifying this pairing session */
   token: string
+  /** Encoded payload for QR code generation */
   qrPayload: string
+  /** Unix timestamp when this session expires */
   expiresAt: number
+  /** Optional sync group for multi-device sync */
   syncGroupId?: string
 }
 
+/**
+ * Status updates received during the pairing process
+ * Sent by Android after scanning QR code
+ */
 export interface PairingStatus {
+  /** Current status of the pairing attempt */
   status: 'pending' | 'approved' | 'rejected' | 'expired'
+  /** User ID to pair with (set on approval) */
   pairedUid?: string
+  /** Device ID assigned to this web client */
   deviceId?: string
+  /** Custom token for authentication (set on approval) */
   customToken?: string
 }
 
-// Initiate pairing from Web (generates QR code data)
-// Uses V2 pairing with persistent device IDs when available
+/**
+ * Initiates a pairing session from the web client
+ * Generates a QR code that the Android app can scan
+ *
+ * PAIRING FLOW (V2 - preferred):
+ * 1. Web calls initiatePairingV2 Cloud Function
+ * 2. Cloud Function creates pairing request in database
+ * 3. Web displays QR code with token
+ * 4. Android scans QR, approves pairing
+ * 5. Cloud Function creates custom token
+ * 6. Web signs in with custom token
+ *
+ * FALLBACK: Falls back to V1 pairing if V2 is unavailable
+ *
+ * @param deviceName - Optional name for this web device
+ * @param syncGroupId - Optional sync group for multi-device scenarios
+ * @returns PairingSession with token and QR payload
+ */
 export const initiatePairing = async (deviceName?: string, syncGroupId?: string): Promise<PairingSession> => {
   // Sign in anonymously first if not already authenticated
   // This is needed to listen to Firebase Database for pairing status updates
@@ -169,8 +307,20 @@ export const initiatePairing = async (deviceName?: string, syncGroupId?: string)
   return result.data as PairingSession
 }
 
-// Listen for pairing approval (after Android user scans and approves)
-// Supports both V1 (pending_pairings) and V2 (pairing_requests) paths
+/**
+ * Listens for pairing approval status changes in real-time
+ * Sets up listeners on both V1 and V2 database paths for compatibility
+ *
+ * The callback is invoked whenever the pairing status changes:
+ * - 'pending': Waiting for Android user to approve
+ * - 'approved': User approved, contains customToken for sign-in
+ * - 'rejected': User rejected the pairing request
+ * - 'expired': Pairing session timed out
+ *
+ * @param token - The pairing session token
+ * @param callback - Function called with status updates
+ * @returns Unsubscribe function to stop listening
+ */
 export const listenForPairingApproval = (
   token: string,
   callback: (status: PairingStatus) => void
@@ -252,12 +402,20 @@ export const listenForPairingApproval = (
   }
 }
 
-// Get current user ID
+/**
+ * Gets the current authenticated user's ID
+ * @returns User ID string or null if not authenticated
+ */
 export const getCurrentUserId = () => {
   return auth.currentUser?.uid || null
 }
 
-// Wait for Firebase auth to be ready and return current user
+/**
+ * Returns a promise that resolves when Firebase Auth is ready
+ * Useful for initial page load to wait for auth state restoration
+ *
+ * @returns Promise resolving to user ID or null
+ */
 export const waitForAuth = (): Promise<string | null> => {
   return new Promise((resolve) => {
     const unsubscribe = auth.onAuthStateChanged((user) => {
@@ -267,29 +425,52 @@ export const waitForAuth = (): Promise<string | null> => {
   })
 }
 
-// Database paths
+// ============================================
+// DATABASE PATH CONSTANTS
+// ============================================
+
+/** Root path for all user data */
 const USERS_PATH = 'users'
+/** Path for synced messages */
 const MESSAGES_PATH = 'messages'
+/** Path for paired devices */
 const DEVICES_PATH = 'devices'
-// PENDING_PAIRINGS_PATH is defined earlier (needed for pairing functions)
+// Note: PENDING_PAIRINGS_PATH is defined earlier (needed for pairing functions)
+/** Path for messages queued to send */
 const OUTGOING_MESSAGES_PATH = 'outgoing_messages'
+/** Path for user contacts */
 const CONTACTS_PATH = 'contacts'
+/** Path for usage/quota tracking */
 const USAGE_PATH = 'usage'
+/** Path for message read receipts */
 const READ_RECEIPTS_PATH = 'read_receipts'
 
-const TRIAL_DAYS = 7 // 7 day trial
+// ============================================
+// QUOTA AND PLAN CONFIGURATION
+// ============================================
 
-// Trial/Free tier: 500MB upload/month, 1GB storage
+/** Free trial duration in days */
+const TRIAL_DAYS = 7
+
+/** Trial/Free tier: 500MB upload limit per month */
 const TRIAL_MONTHLY_UPLOAD_BYTES = 500 * 1024 * 1024
+/** Trial/Free tier: 1GB total storage limit */
 const TRIAL_STORAGE_BYTES = 1 * 1024 * 1024 * 1024
 
-// Paid tier: 3GB upload/month, 15GB storage
+/** Paid tier: 3GB upload limit per month */
 const PAID_MONTHLY_UPLOAD_BYTES = 3 * 1024 * 1024 * 1024
+/** Paid tier: 15GB total storage limit */
 const PAID_STORAGE_BYTES = 15 * 1024 * 1024 * 1024
 
-// COST OPTIMIZATION: Cleanup grace periods by plan type
-// Free/Trial users: aggressive cleanup to reduce storage costs
-// Paid users: balanced approach to preserve data
+/**
+ * COST OPTIMIZATION: Cleanup configuration by plan type
+ *
+ * Different retention periods for free vs paid users to optimize storage costs:
+ * - Free/Trial users: Aggressive cleanup to minimize storage expenses
+ * - Paid users: Longer retention to preserve user data and value
+ *
+ * These values are used by the admin cleanup functions and scheduled jobs
+ */
 const CLEANUP_CONFIG = {
   free: {
     // Delete inactive users faster on free tier
@@ -331,12 +512,23 @@ const CLEANUP_CONFIG = {
   }
 }
 
-// Helper to get cleanup config for a user plan
+/**
+ * Returns the appropriate cleanup configuration based on user's plan
+ *
+ * @param plan - User's current plan (free, monthly, yearly, lifetime)
+ * @returns Cleanup configuration object with retention periods
+ */
 const getCleanupConfig = (plan: string | null) => {
   const isPaid = plan && (plan.toLowerCase() === 'monthly' || plan.toLowerCase() === 'yearly' || plan.toLowerCase() === 'lifetime')
   return isPaid ? CLEANUP_CONFIG.paid : CLEANUP_CONFIG.free
 }
 
+/**
+ * Generates the current billing period key in YYYYMM format
+ * Used for tracking monthly upload quotas
+ *
+ * @returns Period key string (e.g., "202401")
+ */
 const currentPeriodKey = () => {
   const now = new Date()
   const year = now.getUTCFullYear()
@@ -344,8 +536,19 @@ const currentPeriodKey = () => {
   return `${year}${month}`
 }
 
+/**
+ * Normalizes plan names to lowercase for consistent comparison
+ */
 const normalizePlan = (plan?: string | null) => (plan ? plan.toLowerCase() : null)
 
+/**
+ * Determines if a user has an active paid subscription
+ *
+ * @param plan - User's plan type
+ * @param planExpiresAt - Expiration timestamp (null for lifetime)
+ * @param nowMs - Current timestamp for comparison
+ * @returns true if user has active paid access
+ */
 const isPaidPlan = (plan: string | null, planExpiresAt: number | null, nowMs: number) => {
   if (!plan) return false
   if (plan === 'lifetime') return true
@@ -355,12 +558,26 @@ const isPaidPlan = (plan: string | null, planExpiresAt: number | null, nowMs: nu
   return false
 }
 
+/**
+ * Ensures the user's trial period has been initialized
+ * Creates the trialStartedAt timestamp if it doesn't exist
+ *
+ * @param userId - User ID to check
+ * @param trialStartedAt - Existing trial start timestamp (if any)
+ * @returns Trial start timestamp
+ */
 const ensureTrialStarted = async (userId: string, trialStartedAt?: number | null) => {
   if (trialStartedAt) return trialStartedAt
   await set(ref(database, `${USERS_PATH}/${userId}/${USAGE_PATH}/trialStartedAt`), serverTimestamp())
   return Date.now()
 }
 
+/**
+ * Returns a user-friendly error message for quota violations
+ *
+ * @param reason - The quota violation reason code
+ * @returns Human-readable error message
+ */
 const usageLimitMessage = (reason?: string | null) => {
   switch (reason) {
     case 'trial_expired':
@@ -374,6 +591,15 @@ const usageLimitMessage = (reason?: string | null) => {
   }
 }
 
+/**
+ * Checks if a user has sufficient quota for an upload
+ * Validates against trial expiration, monthly upload limit, and storage limit
+ *
+ * @param userId - User ID to check
+ * @param bytes - Size of the upload in bytes
+ * @param countsTowardStorage - Whether this upload counts against storage quota
+ * @returns Object with allowed (boolean) and reason (string if not allowed)
+ */
 const checkUploadQuota = async (userId: string, bytes: number, countsTowardStorage: boolean) => {
   if (bytes <= 0) return { allowed: true, reason: null }
 
@@ -412,6 +638,15 @@ const checkUploadQuota = async (userId: string, bytes: number, countsTowardStora
   return { allowed: true, reason: null }
 }
 
+/**
+ * Records an upload against the user's usage quota
+ * Updates monthly upload bytes and optionally storage bytes
+ *
+ * @param userId - User ID to record against
+ * @param bytes - Size of the upload in bytes
+ * @param category - Type of upload ('mms' or 'file')
+ * @param countsTowardStorage - Whether to increment storage quota
+ */
 const recordUpload = async (
   userId: string,
   bytes: number,
@@ -439,12 +674,30 @@ const recordUpload = async (
   await update(ref(database, `${USERS_PATH}/${userId}/${USAGE_PATH}`), updates)
 }
 
+/**
+ * Generates a descriptive name for the web device based on platform
+ * Used for device identification in pairing and sync
+ *
+ * @returns Device name string (e.g., "Web (macOS)")
+ */
 const getWebDeviceName = () => {
   if (typeof window === 'undefined') return 'Web'
   const platform = (navigator as any).userAgentData?.platform || navigator.platform
   return platform ? `Web (${platform})` : 'Web'
 }
 
+// ============================================
+// READ RECEIPTS
+// ============================================
+
+/**
+ * Subscribes to real-time updates of message read receipts
+ * Used to show which messages have been read on other devices
+ *
+ * @param userId - User ID to listen for
+ * @param callback - Function called with updated receipts
+ * @returns Unsubscribe function
+ */
 export const listenToReadReceipts = (
   userId: string,
   callback: (receipts: Record<string, any>) => void
@@ -482,6 +735,13 @@ export const listenToReadReceipts = (
   })
 }
 
+/**
+ * Marks messages as read and syncs the read status to all devices
+ *
+ * @param userId - User ID
+ * @param messageIds - Array of message IDs to mark as read
+ * @param conversationAddress - The conversation/contact address
+ */
 export const markMessagesRead = async (
   userId: string,
   messageIds: string[],
@@ -504,20 +764,46 @@ export const markMessagesRead = async (
   await update(ref(database), updates)
 }
 
+// ============================================
+// USAGE AND QUOTA TRACKING
+// ============================================
+
+/**
+ * Summary of a user's current usage and quota status
+ * Used in settings pages and quota enforcement
+ */
 export interface UsageSummary {
+  /** Display label for the plan (e.g., "Monthly", "Trial") */
   planLabel: string
+  /** When the paid plan expires (null for lifetime or trial) */
   planExpiresAt: number | null
+  /** Days remaining in free trial (null for paid users) */
   trialDaysRemaining: number | null
+  /** Bytes uploaded this billing period */
   monthlyUsedBytes: number
+  /** Maximum bytes allowed per billing period */
   monthlyLimitBytes: number
+  /** Total storage bytes currently used */
   storageUsedBytes: number
+  /** Maximum storage bytes allowed */
   storageLimitBytes: number
+  /** MMS-specific upload bytes this period */
   mmsBytes: number
+  /** File transfer bytes this period */
   fileBytes: number
+  /** Last time usage was updated */
   lastUpdatedAt: number | null
+  /** Whether user has active paid subscription */
   isPaid: boolean
 }
 
+/**
+ * Retrieves a user's current usage summary
+ * Includes quota limits based on plan type
+ *
+ * @param userId - User ID to get summary for
+ * @returns UsageSummary object with current usage and limits
+ */
 export const getUsageSummary = async (userId: string): Promise<UsageSummary> => {
   const snapshot = await get(ref(database, `${USERS_PATH}/${userId}/${USAGE_PATH}`))
   const usage = snapshot.exists() ? snapshot.val() : {}
@@ -577,7 +863,25 @@ export const getUsageSummary = async (userId: string): Promise<UsageSummary> => 
   }
 }
 
-// Listen for messages
+// ============================================
+// MESSAGE SYNCHRONIZATION
+// ============================================
+
+/**
+ * Subscribes to real-time message updates for a user
+ * Handles E2EE decryption automatically for encrypted messages
+ *
+ * DECRYPTION FLOW:
+ * 1. Check if message is encrypted (message.encrypted === true)
+ * 2. Look up device's encryption key in message.keyMap
+ * 3. Decrypt the data key using device's private key
+ * 4. Decrypt message body using the data key
+ * 5. If decryption fails, mark message with placeholder text
+ *
+ * @param userId - User ID to listen for
+ * @param callback - Function called with updated messages array
+ * @returns Unsubscribe function to stop listening
+ */
 export const listenToMessages = (userId: string, callback: (messages: any[]) => void) => {
   const messagesRef = ref(database, `${USERS_PATH}/${userId}/${MESSAGES_PATH}`)
 
@@ -637,7 +941,17 @@ export const listenToMessages = (userId: string, callback: (messages: any[]) => 
   })
 }
 
-// Listen for spam messages
+// ============================================
+// SPAM MESSAGE MANAGEMENT
+// ============================================
+
+/**
+ * Subscribes to real-time updates of spam-flagged messages
+ *
+ * @param userId - User ID to listen for
+ * @param callback - Function called with spam messages array
+ * @returns Unsubscribe function
+ */
 export const listenToSpamMessages = (userId: string, callback: (messages: any[]) => void) => {
   const spamRef = ref(database, `${USERS_PATH}/${userId}/spam_messages`)
 
@@ -666,7 +980,13 @@ export const listenToSpamMessages = (userId: string, callback: (messages: any[])
   })
 }
 
-// Mark a message as spam (syncs to all devices)
+/**
+ * Marks a message as spam and syncs to all devices
+ * The message is moved to the spam_messages collection
+ *
+ * @param userId - User ID
+ * @param message - Message object to mark as spam
+ */
 export const markMessageAsSpam = async (
   userId: string,
   message: {
@@ -698,32 +1018,66 @@ export const markMessageAsSpam = async (
   console.log('Message marked as spam:', messageId)
 }
 
-// Delete a spam message (syncs to all devices)
+/**
+ * Permanently deletes a spam message from the database
+ *
+ * @param userId - User ID
+ * @param messageId - Spam message ID to delete
+ */
 export const deleteSpamMessage = async (userId: string, messageId: string): Promise<void> => {
   const spamRef = ref(database, `${USERS_PATH}/${userId}/spam_messages/${messageId}`)
   await remove(spamRef)
   console.log('Spam message deleted:', messageId)
 }
 
-// Unmark a message as spam (move back to inbox)
+/**
+ * Unmarks a message as spam, effectively moving it back to the inbox
+ * Currently implemented as deletion from spam collection
+ *
+ * @param userId - User ID
+ * @param messageId - Message ID to unmark
+ */
 export const unmarkMessageAsSpam = async (userId: string, messageId: string): Promise<void> => {
   await deleteSpamMessage(userId, messageId)
   console.log('Message unmarked as spam:', messageId)
 }
 
-// Delivery status tracking types
+// ============================================
+// MESSAGE SENDING AND DELIVERY TRACKING
+// ============================================
+
+/**
+ * Possible states for outgoing message delivery
+ * - pending: Queued for sending
+ * - sending: Being processed by Android device
+ * - sent: Successfully sent
+ * - failed: Delivery failed
+ * - delivered: Confirmed delivery (carrier dependent)
+ */
 export type DeliveryStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'delivered'
 
+/**
+ * Result of a message send operation with delivery tracking
+ */
 export interface DeliveryResult {
   messageId: string
   status: DeliveryStatus
   error?: string
 }
 
-// Default delivery timeout in milliseconds (60 seconds)
+/** Default timeout for waiting on message delivery confirmation (60 seconds) */
 const DELIVERY_TIMEOUT_MS = 60000
 
-// Listen for message delivery status with timeout
+/**
+ * Waits for a message to be delivered with timeout
+ * Sets up a listener on the outgoing message and resolves when
+ * the status changes to sent/delivered/failed or times out
+ *
+ * @param userId - User ID
+ * @param messageId - Outgoing message ID to track
+ * @param timeoutMs - Timeout in milliseconds (default: 60 seconds)
+ * @returns Promise resolving to DeliveryResult
+ */
 export const waitForDelivery = (
   userId: string,
   messageId: string,
@@ -777,7 +1131,15 @@ export const waitForDelivery = (
   })
 }
 
-// Send SMS from web
+/**
+ * Sends an SMS message from the web client
+ * Creates an outgoing_messages entry that the Android app will pick up and send
+ *
+ * @param userId - User ID
+ * @param address - Recipient phone number
+ * @param body - Message text content
+ * @returns The message key/ID for tracking
+ */
 export const sendSmsFromWeb = async (userId: string, address: string, body: string) => {
   const outgoingRef = ref(database, `${USERS_PATH}/${userId}/${OUTGOING_MESSAGES_PATH}`)
   const newMessageRef = push(outgoingRef)
@@ -793,7 +1155,16 @@ export const sendSmsFromWeb = async (userId: string, address: string, body: stri
   return newMessageRef.key
 }
 
-// Send SMS with delivery tracking
+/**
+ * Sends an SMS and waits for delivery confirmation
+ * Combines sendSmsFromWeb with waitForDelivery for a complete send flow
+ *
+ * @param userId - User ID
+ * @param address - Recipient phone number
+ * @param body - Message text content
+ * @param onStatusChange - Optional callback for status updates
+ * @returns Promise resolving to DeliveryResult
+ */
 export const sendSmsWithDeliveryTracking = async (
   userId: string,
   address: string,
@@ -813,7 +1184,15 @@ export const sendSmsWithDeliveryTracking = async (
   return result
 }
 
-// Upload image for MMS
+/**
+ * Uploads an image file for MMS attachment
+ * Checks quota before uploading and records usage after
+ *
+ * @param userId - User ID
+ * @param file - File object to upload
+ * @returns Object with url, contentType, and fileName
+ * @throws Error if quota exceeded or upload fails
+ */
 export const uploadMmsImage = async (
   userId: string,
   file: File
@@ -854,7 +1233,16 @@ export const uploadMmsImage = async (
   }
 }
 
-// Send MMS from web (with image attachments)
+/**
+ * Sends an MMS message with attachments from the web client
+ * Creates an outgoing_messages entry with attachment URLs for Android to send
+ *
+ * @param userId - User ID
+ * @param address - Recipient phone number
+ * @param body - Message text content (can be empty for image-only)
+ * @param attachments - Array of uploaded attachment objects
+ * @returns The message key/ID for tracking
+ */
 export const sendMmsFromWeb = async (
   userId: string,
   address: string,
@@ -889,7 +1277,17 @@ export const sendMmsFromWeb = async (
   return newMessageRef.key
 }
 
-// Generate pairing token (WEB SIDE - shows QR code)
+// ============================================
+// LEGACY PAIRING FUNCTIONS (V1)
+// ============================================
+
+/**
+ * Generates a pairing token for QR code display (V1 flow)
+ * Creates a pending_pairings entry that the Android app will complete
+ *
+ * @deprecated Use initiatePairing() for V2 pairing flow
+ * @returns Token string for QR code
+ */
 export const generatePairingToken = async () => {
   const timestamp = Date.now()
   const randomToken = Math.random().toString(36).substring(2, 15)
@@ -906,7 +1304,14 @@ export const generatePairingToken = async () => {
   return token
 }
 
-// Listen for pairing completion (WEB SIDE - waits for phone to scan and pair)
+/**
+ * Listens for V1 pairing completion
+ *
+ * @deprecated Use listenForPairingApproval() for V2 flow
+ * @param token - Pairing token to listen for
+ * @param callback - Called with userId when pairing completes
+ * @returns Unsubscribe function
+ */
 export const listenForPairingCompletion = (
   token: string,
   callback: (userId: string | null) => void
@@ -926,7 +1331,16 @@ export const listenForPairingCompletion = (
   return unsubscribe
 }
 
-// Pair device with token (PHONE SIDE - scans QR code)
+/**
+ * Completes device pairing from the phone side (V1 flow)
+ * Called by Android after scanning the QR code
+ *
+ * @param token - Pairing token from QR code
+ * @param userId - Android user's ID to pair with
+ * @param deviceName - Name for the web device
+ * @returns Object with userId and deviceId
+ * @throws Error if token is invalid or expired
+ */
 export const pairDeviceWithToken = async (token: string, userId: string, deviceName: string) => {
   try {
     // Update the pending pairing with userId
@@ -971,7 +1385,17 @@ export const pairDeviceWithToken = async (token: string, userId: string, deviceN
   }
 }
 
-// Listen for paired devices
+// ============================================
+// DEVICE MANAGEMENT
+// ============================================
+
+/**
+ * Subscribes to real-time updates of paired devices for a user
+ *
+ * @param userId - User ID to listen for
+ * @param callback - Function called with devices array on updates
+ * @returns Unsubscribe function
+ */
 export const listenToPairedDevices = (userId: string, callback: (devices: any[]) => void) => {
   const devicesRef = ref(database, `${USERS_PATH}/${userId}/${DEVICES_PATH}`)
 
@@ -989,6 +1413,14 @@ export const listenToPairedDevices = (userId: string, callback: (devices: any[])
   })
 }
 
+/**
+ * Ensures the current web device is registered in the user's devices list
+ * Creates or updates the device entry with current timestamp
+ *
+ * @param userId - User ID to register device for
+ * @param deviceName - Optional device name
+ * @returns Device ID or null if registration failed
+ */
 export const ensureWebDeviceRegistered = async (userId: string, deviceName?: string) => {
   const deviceId = getOrCreateDeviceId()
   if (!deviceId) return null
@@ -1006,6 +1438,12 @@ export const ensureWebDeviceRegistered = async (userId: string, deviceName?: str
   return deviceId
 }
 
+/**
+ * Publishes the web device's E2EE public key to the database
+ * Required for other devices to encrypt messages for this device
+ *
+ * @param userId - User ID to publish key for
+ */
 export const ensureWebE2EEKeyPublished = async (userId: string) => {
   const deviceId = getOrCreateDeviceId()
   if (!deviceId) return
@@ -1022,6 +1460,14 @@ export const ensureWebE2EEKeyPublished = async (userId: string) => {
   })
 }
 
+/**
+ * Listens for changes to the current device's pairing status
+ * Used to detect if the device has been unpaired remotely
+ *
+ * @param userId - User ID
+ * @param callback - Called with isPaired boolean on status changes
+ * @returns Unsubscribe function
+ */
 export const listenToDeviceStatus = (
   userId: string,
   callback: (isPaired: boolean) => void
@@ -1045,8 +1491,13 @@ export const listenToDeviceStatus = (
   })
 }
 
-// ===== CONTACTS FUNCTIONS =====
+// ============================================
+// CONTACTS MANAGEMENT
+// ============================================
 
+/**
+ * Contact photo data with optional thumbnail and storage reference
+ */
 export interface ContactPhoto {
   thumbnailBase64?: string
   hash?: string
@@ -1054,21 +1505,38 @@ export interface ContactPhoto {
   updatedAt?: number
 }
 
+/**
+ * Tracks which platforms have contributed to a contact's data
+ */
 export interface ContactSources {
   android?: boolean
   web?: boolean
   macos?: boolean
 }
 
+/**
+ * Metadata for contact synchronization across devices
+ * Used for conflict resolution and sync status tracking
+ */
 export interface ContactSyncMetadata {
+  /** Unix timestamp of last update */
   lastUpdatedAt: number
+  /** Unix timestamp of last successful sync to Android */
   lastSyncedAt?: number
+  /** Platform that made the last update ('android', 'web', 'macos') */
   lastUpdatedBy: string
+  /** Incrementing version for conflict detection */
   version: number
+  /** Whether changes need to be synced to Android */
   pendingAndroidSync: boolean
+  /** Whether contact was created on desktop (not from Android) */
   desktopOnly: boolean
 }
 
+/**
+ * Complete contact object with all properties
+ * Designed for cross-platform sync between Android, web, and macOS
+ */
 export interface Contact {
   id: string
   displayName: string
@@ -1083,6 +1551,13 @@ export interface Contact {
   androidContactId?: number
 }
 
+/**
+ * Transforms raw Firebase snapshot data into typed Contact objects
+ * Handles nested phone numbers, emails, and photos structures
+ *
+ * @param data - Raw data from Firebase snapshot
+ * @returns Array of typed Contact objects
+ */
 const contactsFromSnapshot = (data: Record<string, any>): Contact[] => {
   return Object.entries(data).map(([key, value]) => {
     const contactData = value || {}
@@ -1131,6 +1606,14 @@ const contactsFromSnapshot = (data: Record<string, any>): Contact[] => {
   })
 }
 
+/**
+ * Subscribes to real-time contact updates for a user
+ * Contacts are sorted alphabetically by display name
+ *
+ * @param userId - User ID to listen for
+ * @param callback - Function called with sorted contacts array
+ * @returns Unsubscribe function
+ */
 export const listenToContacts = (userId: string, callback: (contacts: Contact[]) => void) => {
   const contactsRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}`)
 
@@ -1146,6 +1629,20 @@ export const listenToContacts = (userId: string, callback: (contacts: Contact[])
   })
 }
 
+/**
+ * Builds a contact payload object for database operations
+ * Handles merging with existing data, normalization, and sync metadata
+ *
+ * @param existingData - Existing contact data (null for new contacts)
+ * @param displayName - Contact display name
+ * @param phoneNumber - Primary phone number
+ * @param phoneType - Phone type label (Mobile, Work, Home, etc.)
+ * @param email - Optional email address
+ * @param notes - Optional notes
+ * @param photoBase64 - Optional base64-encoded photo thumbnail
+ * @param source - Platform creating/updating ('web' or 'macos')
+ * @returns Complete contact payload for database write
+ */
 const buildContactPayload = async (
   existingData: Record<string, any> | null,
   displayName: string,
@@ -1235,6 +1732,20 @@ const buildContactPayload = async (
   return payload
 }
 
+/**
+ * Creates a new contact in the database
+ * Contact ID is generated using phone number normalization for deduplication
+ *
+ * @param userId - User ID to create contact for
+ * @param displayName - Contact display name
+ * @param phoneNumber - Primary phone number
+ * @param phoneType - Phone type label (default: 'Mobile')
+ * @param email - Optional email address
+ * @param notes - Optional notes
+ * @param photoBase64 - Optional base64-encoded photo
+ * @param source - Platform creating the contact
+ * @returns The generated contact ID
+ */
 export const createContact = async (
   userId: string,
   displayName: string,
@@ -1261,6 +1772,20 @@ export const createContact = async (
   return contactId
 }
 
+/**
+ * Updates an existing contact in the database
+ * Merges with existing data and increments version for sync tracking
+ *
+ * @param userId - User ID
+ * @param contactId - ID of contact to update
+ * @param displayName - Updated display name
+ * @param phoneNumber - Updated phone number
+ * @param phoneType - Updated phone type
+ * @param email - Updated email (optional)
+ * @param notes - Updated notes (optional)
+ * @param photoBase64 - Updated photo (optional)
+ * @param source - Platform making the update
+ */
 export const updateContact = async (
   userId: string,
   contactId: string,
@@ -1288,16 +1813,28 @@ export const updateContact = async (
   await set(contactRef, payload)
 }
 
+/**
+ * Deletes a contact from the database
+ *
+ * @param userId - User ID
+ * @param contactId - ID of contact to delete
+ */
 export const deleteContact = async (userId: string, contactId: string) => {
   const contactRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}/${contactId}`)
   await remove(contactRef)
 }
 
 // ============================================
-// ============================================
 // ADMIN CLEANUP FUNCTIONS
 // ============================================
+// These functions are used by the admin panel for system maintenance
+// and cost optimization. They clean up orphaned data, expired records,
+// and enforce retention policies based on user plans.
 
+/**
+ * Statistics returned from cleanup operations
+ * Each field represents the count of records cleaned in that category
+ */
 export interface CleanupStats {
   outgoingMessages: number
   pendingPairings: number
@@ -1305,7 +1842,6 @@ export interface CleanupStats {
   spamMessages: number
   readReceipts: number
   oldDevices: number
-  // New cleanup categories
   oldNotifications: number
   staleTypingIndicators: number
   expiredSessions: number
@@ -1314,6 +1850,10 @@ export interface CleanupStats {
   orphanedMedia: number
 }
 
+/**
+ * Counts of orphaned/stale data found during scanning
+ * Used to preview cleanup impact before execution
+ */
 export interface OrphanCounts {
   staleOutgoingMessages: number
   expiredPairings: number
@@ -1321,19 +1861,33 @@ export interface OrphanCounts {
   oldSpamMessages: number
   oldReadReceipts: number
   inactiveDevices: number
-  // New cleanup categories
   oldNotifications: number
   staleTypingIndicators: number
   expiredSessions: number
   oldFileTransfers: number
   abandonedPairings: number
   orphanedMedia: number
-  // Cost optimization - NEW
+  /** User nodes with no data that can be safely deleted */
   emptyUserNodes: number
+  /** Users with no messages inactive for 30+ days */
   orphanedUsers: number
 }
 
-// Get counts of orphan/stale data - FIXED: Now actually detects orphaned nodes
+/**
+ * Scans the database to count orphaned and stale data
+ * Used by admin panel to preview cleanup impact and estimate cost savings
+ *
+ * SCAN CATEGORIES:
+ * - Expired pairing requests (V1 and V2)
+ * - Stale outgoing messages (>24 hours old)
+ * - Old call requests, spam messages, read receipts
+ * - Inactive devices, notifications, typing indicators
+ * - Expired sessions, old file transfers
+ * - Empty user nodes (no data)
+ * - Orphaned users (inactive 30+ days)
+ *
+ * @returns OrphanCounts object with counts for each category
+ */
 export const getOrphanCounts = async (): Promise<OrphanCounts> => {
   const counts: OrphanCounts = {
     staleOutgoingMessages: 0,

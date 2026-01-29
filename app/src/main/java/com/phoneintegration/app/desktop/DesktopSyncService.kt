@@ -1,3 +1,73 @@
+/**
+ * DesktopSyncService.kt
+ *
+ * Core synchronization service that enables SMS/MMS messages to be accessed from desktop
+ * (macOS, Windows) and web clients. This service acts as the bridge between the Android
+ * device's local message storage and Firebase Realtime Database.
+ *
+ * ## Architecture Overview
+ *
+ * The service follows a unidirectional data flow pattern:
+ * ```
+ * Android Device -> DesktopSyncService -> Firebase Cloud Functions -> Firebase RTDB
+ *                                              |
+ * Desktop/Web <--------------------------- Firebase RTDB (listeners)
+ * ```
+ *
+ * ## Key Responsibilities
+ *
+ * 1. **Message Synchronization**: Syncs SMS/MMS messages to Firebase with optional E2EE encryption
+ * 2. **Device Pairing**: Manages QR-code based pairing between phone and desktop clients
+ * 3. **Attachment Handling**: Uploads MMS attachments to R2 storage with encryption
+ * 4. **Bidirectional Sync**: Listens for outgoing messages from desktop to send via Android
+ * 5. **Spam Sync**: Synchronizes spam messages and whitelist/blocklist across devices
+ * 6. **Call Events**: Syncs call state for desktop call monitoring
+ *
+ * ## Firebase Data Structure
+ *
+ * ```
+ * users/
+ *   {userId}/
+ *     messages/           - Synced SMS/MMS messages
+ *     outgoing_messages/  - Messages queued from desktop to send
+ *     devices/            - Paired desktop/web devices
+ *     spam_messages/      - Detected spam messages
+ *     spam_whitelist/     - User-marked safe senders
+ *     spam_blocklist/     - User-marked spam senders
+ *     groups/             - Group chat information
+ *     calls/              - Call event history
+ *     sync_requests/      - History sync requests from clients
+ * ```
+ *
+ * ## Security Model
+ *
+ * - End-to-End Encryption (E2EE) is optional and managed via SignalProtocolManager
+ * - When enabled, message bodies are encrypted with per-device key maps
+ * - Attachments are encrypted before upload to R2 storage
+ * - All Firebase writes use Cloud Functions to prevent OOM from auto-sync
+ *
+ * ## Memory Considerations
+ *
+ * - Uses Cloud Functions for all reads to avoid Firebase SDK's eager data sync
+ * - Processes messages in batched chunks (50 at a time) to limit memory usage
+ * - Always uses applicationContext to prevent Activity memory leaks
+ *
+ * ## Dependencies
+ *
+ * - Firebase Auth: User authentication
+ * - Firebase Realtime Database: Message storage and real-time listeners
+ * - Firebase Cloud Functions: Secure message writes and device management
+ * - Firebase Storage / R2: Attachment storage
+ * - SignalProtocolManager: E2EE encryption/decryption
+ * - AuthManager: Authentication state management
+ * - UsageTracker: Rate limiting and usage quotas
+ *
+ * @param context Android context (applicationContext is used internally)
+ *
+ * @see SignalProtocolManager for E2EE implementation details
+ * @see OutgoingMessageService for desktop-to-Android message sending
+ * @see SyncFlowMessagingService for FCM push notification handling
+ */
 package com.phoneintegration.app.desktop
 
 import android.content.Context
@@ -46,20 +116,47 @@ import java.security.SecureRandom
  * Note: Always uses applicationContext internally to prevent memory leaks.
  */
 class DesktopSyncService(context: Context) {
+
+    // ==========================================
+    // REGION: Instance Variables
+    // ==========================================
+
     // Always use applicationContext to prevent Activity memory leaks
     private val context: Context = context.applicationContext
 
+    /** Manages Firebase Auth and anonymous sign-in */
     private val authManager = AuthManager.getInstance(context)
+
+    /** Firebase Authentication instance for user identity */
     private val auth = FirebaseAuth.getInstance()
+
+    /** Firebase Realtime Database for message storage and real-time sync */
     private val database = FirebaseDatabase.getInstance()
+
+    /** Firebase Storage (legacy, R2 preferred for attachments) */
     private val storage = FirebaseStorage.getInstance()
+
+    /** Firebase Cloud Functions for secure server-side operations */
     private val functions = FirebaseFunctions.getInstance()
+
+    /** End-to-end encryption manager using Signal Protocol */
     private val e2eeManager = SignalProtocolManager(this.context)
+
+    /** User preferences including E2EE toggle state */
     private val preferencesManager = PreferencesManager(this.context)
+
+    /** Tracks upload/download usage for quota enforcement */
     private val usageTracker = UsageTracker(database)
+
+    /** Manages SIM card information for phone number detection */
     private val simManager = SimManager(this.context)
 
-    // Cache of user's own phone numbers (normalized, last 10 digits) for filtering
+    /**
+     * Cache of user's own phone numbers (normalized to last 10 digits).
+     * Used to filter out messages where the address is the user's own number,
+     * which can happen with some Android implementations storing sender instead
+     * of recipient for sent messages.
+     */
     private val userPhoneNumbers: Set<String> by lazy {
         val numbers = mutableSetOf<String>()
         try {
@@ -79,8 +176,14 @@ class DesktopSyncService(context: Context) {
         numbers
     }
 
+    // ==========================================
+    // REGION: Companion Object - Constants and Static Methods
+    // ==========================================
+
     companion object {
         private const val TAG = "DesktopSyncService"
+
+        // Firebase database path constants
         private const val MESSAGES_PATH = "messages"
         private const val DEVICES_PATH = "devices"
         private const val USERS_PATH = "users"
@@ -90,7 +193,8 @@ class DesktopSyncService(context: Context) {
         private const val SPAM_MESSAGES_PATH = "spam_messages"
         private const val SYNC_REQUESTS_PATH = "sync_requests"
 
-        // Cached paired devices status for fast checks
+        // SharedPreferences keys for cached paired device status
+        // This avoids hitting Firebase on every sync check
         private const val PREFS_NAME = "desktop_sync_prefs"
         private const val KEY_HAS_PAIRED_DEVICES = "has_paired_devices"
         private const val KEY_PAIRED_DEVICES_COUNT = "paired_devices_count"
@@ -138,8 +242,13 @@ class DesktopSyncService(context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Initialization
+    // ==========================================
+
     init {
         // Initialize E2EE keys if not already done
+        // This generates the device's key pair for end-to-end encryption
         e2eeManager.initializeKeys()
     }
 
@@ -172,11 +281,27 @@ class DesktopSyncService(context: Context) {
         return result.getOrNull() ?: throw Exception("Authentication failed")
     }
 
+    // ==========================================
+    // REGION: Address Resolution
+    // ==========================================
+
     /**
      * Get the "conversation partner" address for a message.
-     * For received messages (type=1), this is the sender's address.
-     * For sent messages (type=2), we need to find the recipient from the thread.
-     * Returns null only if the final resolved address is the user's own number.
+     *
+     * This method resolves the correct phone number for the other party in a conversation,
+     * handling the complexities of Android's SMS/MMS storage where sent message addresses
+     * may incorrectly contain the sender's own number instead of the recipient.
+     *
+     * ## Resolution Strategy
+     *
+     * 1. For received messages (type=1): Return the address directly (it's the sender)
+     * 2. For sent MMS: Query MMS recipients table, filter out user's own number
+     * 3. For sent SMS: Query the Threads table to find the true recipient
+     * 4. Fallback: Look for received messages in same thread to infer recipient
+     *
+     * @param message The SMS/MMS message to resolve the address for
+     * @return The conversation partner's phone number, or null if the address
+     *         resolves to the user's own number (message should be skipped)
      */
     private suspend fun getConversationAddress(message: SmsMessage): String? {
         // For received messages, the address is already the other party
@@ -367,8 +492,36 @@ class DesktopSyncService(context: Context) {
         return isMatch
     }
 
+    // ==========================================
+    // REGION: Message Synchronization
+    // ==========================================
+
     /**
-     * Sync a message to Firebase with E2EE encryption
+     * Syncs a single SMS/MMS message to Firebase with optional E2EE encryption.
+     *
+     * This is the core sync method that handles:
+     * - Network connectivity checks (skips sync if offline)
+     * - RCS/RBM message filtering (these are handled differently)
+     * - E2EE encryption when enabled (encrypts body and creates per-device key maps)
+     * - MMS attachment processing and upload
+     * - Writing to Firebase via Cloud Function (prevents OOM from direct writes)
+     *
+     * ## E2EE Encryption Flow
+     *
+     * When E2EE is enabled:
+     * 1. Generate a random 32-byte data key for this message
+     * 2. Encrypt message body with the data key
+     * 3. For each paired device, encrypt the data key with that device's public key
+     * 4. Store encrypted body + nonce + keyMap in Firebase
+     *
+     * ## Error Handling
+     *
+     * - If E2EE encryption fails, message is synced as plaintext with e2eeFailed flag
+     * - If Cloud Function fails, error is logged but doesn't throw (prevents crashes)
+     * - Attachment upload failures are logged and skipped (message still syncs)
+     *
+     * @param message The SMS/MMS message to sync
+     * @param skipAttachments If true, skips MMS attachment processing (used for history sync)
      */
     suspend fun syncMessage(message: SmsMessage, skipAttachments: Boolean = false) {
         try {
@@ -539,6 +692,15 @@ class DesktopSyncService(context: Context) {
         }
     }
 
+    /**
+     * Sets or removes a reaction (emoji) for a message.
+     *
+     * Reactions are synced across all devices in real-time. When a user reacts
+     * to a message on Android, the reaction appears on desktop/web clients.
+     *
+     * @param messageId The local message ID to react to
+     * @param reaction The emoji reaction string, or null to remove the reaction
+     */
     suspend fun setMessageReaction(messageId: Long, reaction: String?) {
         val userId = getCurrentUserId()
         val reactionRef = database.reference
@@ -561,8 +723,20 @@ class DesktopSyncService(context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Spam Message Synchronization
+    // ==========================================
+
     /**
-     * Sync a spam message to Firebase so it persists across reinstalls/devices.
+     * Syncs a spam message to Firebase for cross-device persistence.
+     *
+     * When a message is detected as spam (either automatically or user-marked),
+     * it's synced to Firebase so the spam classification persists across:
+     * - App reinstalls
+     * - Device migrations
+     * - Desktop/web clients
+     *
+     * @param message The spam message entity containing classification details
      */
     suspend fun syncSpamMessage(message: com.phoneintegration.app.data.database.SpamMessage) {
         withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
@@ -683,8 +857,17 @@ class DesktopSyncService(context: Context) {
 
     /**
      * Real-time listener for spam messages from Firebase.
-     * This enables bidirectional sync - when Mac/Web marks a message as spam,
-     * Android will receive the update in real-time.
+     *
+     * This enables bidirectional spam sync - when Mac/Web marks a message as spam,
+     * Android will receive the update in real-time and update its local database.
+     *
+     * ## Flow Behavior
+     *
+     * - Emits the full list of spam messages whenever any change occurs
+     * - Returns sorted by date descending (newest first)
+     * - Closes the flow if user is not authenticated
+     *
+     * @return Flow emitting List<SpamMessage> on each Firebase update
      */
     fun listenForSpamMessages(): Flow<List<com.phoneintegration.app.data.database.SpamMessage>> = callbackFlow {
         val userId = try {
@@ -754,12 +937,18 @@ class DesktopSyncService(context: Context) {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // SPAM WHITELIST/BLOCKLIST SYNC
-    // -------------------------------------------------------------------------
+    // ==========================================
+    // REGION: Spam Whitelist/Blocklist Sync
+    // ==========================================
 
     /**
-     * Sync whitelist (not spam) to cloud
+     * Syncs the spam whitelist (safe senders) to Firebase.
+     *
+     * When a user marks a sender as "not spam", their address is added to the
+     * whitelist. This list syncs to Firebase so the classification persists
+     * across devices and reinstalls.
+     *
+     * @param addresses Set of phone numbers/addresses marked as safe
      */
     suspend fun syncWhitelist(addresses: Set<String>) {
         withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
@@ -778,7 +967,13 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Sync blocklist (always spam) to cloud
+     * Syncs the spam blocklist (always-spam senders) to Firebase.
+     *
+     * When a user explicitly marks a sender as spam, their address is added
+     * to the blocklist. Future messages from this sender will be automatically
+     * classified as spam.
+     *
+     * @param addresses Set of phone numbers/addresses marked as spam
      */
     suspend fun syncBlocklist(addresses: Set<String>) {
         withContext(NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
@@ -902,9 +1097,35 @@ class DesktopSyncService(context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: MMS Attachment Handling
+    // ==========================================
+
     /**
-     * Upload MMS attachments to R2 storage with E2EE encryption
-     * Returns a list of attachment metadata including R2 keys
+     * Uploads MMS attachments to Cloudflare R2 storage with optional E2EE encryption.
+     *
+     * This method handles the complete attachment upload flow:
+     * 1. Reads attachment bytes from ContentProvider or cached data
+     * 2. Encrypts the data if E2EE is enabled
+     * 3. Gets a presigned upload URL from R2 via Cloud Function
+     * 4. Uploads directly to R2 using HTTP PUT
+     * 5. Confirms the upload with Cloud Function
+     * 6. Falls back to inline Base64 data for small files if R2 fails
+     *
+     * ## Usage Tracking
+     *
+     * Uploads are checked against user's quota before proceeding. If the user
+     * has exceeded their storage/bandwidth limit, attachments are skipped.
+     *
+     * ## Supported Types
+     *
+     * Only images and videos are uploaded to R2. Other attachment types
+     * (like vCards) have only metadata stored.
+     *
+     * @param userId Current user's Firebase UID
+     * @param messageId The MMS message ID for logging/tracking
+     * @param attachments List of MMS attachments to upload
+     * @return List of attachment metadata maps including R2 keys or inline data
      */
     private suspend fun uploadMmsAttachments(
         userId: String,
@@ -1258,8 +1479,20 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Sync multiple messages to Firebase using batched writes for better performance.
-     * Messages are processed in parallel chunks with a concurrency limit.
+     * Syncs multiple messages to Firebase using batched parallel writes.
+     *
+     * This method is optimized for bulk sync operations (like initial sync or
+     * history sync requests). Messages are processed in parallel chunks to
+     * balance throughput with memory usage.
+     *
+     * ## Processing Strategy
+     *
+     * 1. Pre-filter RCS/RBM messages (not supported)
+     * 2. Split remaining messages into chunks of 50
+     * 3. Process each chunk in parallel using coroutines
+     * 4. Add 100ms delay between chunks to avoid Firebase rate limits
+     *
+     * @param messages List of SMS/MMS messages to sync
      */
     suspend fun syncMessages(messages: List<SmsMessage>) {
         // Early exit if no network - avoid looping through messages
@@ -1383,10 +1616,28 @@ class DesktopSyncService(context: Context) {
         return this
     }
 
+    // ==========================================
+    // REGION: Outgoing Message Handling (Desktop -> Android)
+    // ==========================================
+
     /**
-     * Listen for new messages from desktop (user sending SMS from web)
-     * Returns a Flow that emits message data with message ID included
-     * Outgoing messages from web are NOT encrypted (web sends plaintext)
+     * Listens for outgoing messages queued from desktop/web clients.
+     *
+     * When a user composes and sends a message from the web interface or macOS
+     * app, the message is written to Firebase's outgoing_messages node. This
+     * method listens for those messages and emits them so OutgoingMessageService
+     * can send them via Android's SMS/MMS APIs.
+     *
+     * ## Message Flow
+     *
+     * 1. User types message on desktop/web
+     * 2. Desktop writes to Firebase: users/{uid}/outgoing_messages/{messageId}
+     * 3. This listener detects the new child
+     * 4. OutgoingMessageService processes the message
+     * 5. Android sends the SMS/MMS
+     * 6. Message is deleted from outgoing_messages and written to messages
+     *
+     * @return Flow emitting Map<String, Any?> for each new outgoing message
      */
     fun listenForOutgoingMessages(): Flow<Map<String, Any?>> = callbackFlow {
         val userId = runCatching { getCurrentUserId() }.getOrNull()
@@ -1435,19 +1686,24 @@ class DesktopSyncService(context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Device Pairing Management
+    // ==========================================
+
     /**
-     * Get paired devices
+     * Retrieves the list of paired desktop/web devices.
      *
-     * Uses NonCancellable to prevent the query from being cancelled when
-     * the user navigates away from the screen. This ensures the query completes
-     * and returns actual data instead of empty list due to cancellation.
-     */
-    /**
-     * Get paired devices using Cloud Function (no direct Firebase reads to avoid OOM)
+     * Uses Cloud Functions instead of direct Firebase reads to avoid OOM issues.
+     * The Firebase SDK eagerly syncs all data under a node, which can cause
+     * out-of-memory crashes with large message histories.
      *
-     * IMPORTANT: Android should NEVER read directly from Firebase Realtime Database
-     * because it tries to sync ALL data and causes OOM with large datasets.
-     * Always use Cloud Functions for reads - they run on server and can paginate.
+     * ## Implementation Notes
+     *
+     * - Uses NonCancellable to ensure the query completes even if the UI navigates away
+     * - Filters out Android devices (we only show desktop/web clients)
+     * - Updates the local cache for fast hasPairedDevices() checks
+     *
+     * @return List of PairedDevice objects representing connected desktop/web clients
      */
     suspend fun getPairedDevices(): List<PairedDevice> = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
         try {
@@ -1613,9 +1869,28 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Complete pairing after scanning QR code from Web/macOS
-     * Called when Android user approves the pairing request
-     * Supports both V1 and V2 pairing protocols
+     * Completes a device pairing request after scanning QR code from Web/macOS.
+     *
+     * This is called when the user scans a pairing QR code displayed on the
+     * desktop/web client and taps "Approve" or "Reject" on the Android device.
+     *
+     * ## Pairing Flow
+     *
+     * 1. Desktop/web displays QR code containing pairing token
+     * 2. User scans QR code with Android app
+     * 3. App displays pairing request dialog
+     * 4. User approves or rejects
+     * 5. This method calls Cloud Function to complete pairing
+     * 6. Desktop receives notification and starts syncing
+     *
+     * ## Protocol Versions
+     *
+     * - V2 (preferred): Supports device limits, persistent device IDs
+     * - V1 (fallback): Legacy protocol for older web/desktop clients
+     *
+     * @param token The pairing token from the QR code
+     * @param approved True if user approved, false if rejected
+     * @return CompletePairingResult indicating success, rejection, or error
      */
     suspend fun completePairing(token: String, approved: Boolean): CompletePairingResult {
         Log.d(TAG, "=== COMPLETE PAIRING START ===")
@@ -2115,13 +2390,25 @@ class DesktopSyncService(context: Context) {
         }
     }
 
-    // =========================================================================
-    // SYNC HISTORY REQUESTS - Load older messages on demand from Mac/Web
-    // =========================================================================
+    // ==========================================
+    // REGION: Sync History Requests
+    // ==========================================
 
     /**
-     * Listen for sync history requests from Mac/Web clients.
-     * When a request comes in, load the requested messages and sync them.
+     * Listens for sync history requests from Mac/Web clients.
+     *
+     * Desktop clients can request older message history to be synced on-demand.
+     * This is more efficient than syncing all history upfront, especially for
+     * users with large message archives.
+     *
+     * ## Request Processing
+     *
+     * 1. Client creates request at: users/{uid}/sync_requests/{requestId}
+     * 2. This listener detects the new request
+     * 3. processSyncHistoryRequest() loads and syncs the messages
+     * 4. Status updates are written back to the request node
+     *
+     * @return Flow emitting SyncHistoryRequest for each new pending request
      */
     fun listenForSyncRequests(): Flow<SyncHistoryRequest> = callbackFlow {
         val userId = runCatching { getCurrentUserId() }.getOrNull()
@@ -2270,8 +2557,17 @@ class DesktopSyncService(context: Context) {
     }
 }
 
+// ==========================================
+// REGION: Data Classes
+// ==========================================
+
 /**
- * Sync history request from Mac/Web
+ * Represents a sync history request from a Mac/Web client.
+ *
+ * @property id Unique request identifier
+ * @property days Number of days of history to sync (-1 for all history)
+ * @property requestedAt Timestamp when the request was created
+ * @property requestedBy Device ID that initiated the request
  */
 data class SyncHistoryRequest(
     val id: String,
@@ -2281,7 +2577,10 @@ data class SyncHistoryRequest(
 )
 
 /**
- * Sync settings
+ * User's sync settings stored in Firebase.
+ *
+ * @property lastSyncDays Number of days synced in the last sync operation
+ * @property lastFullSyncAt Timestamp of the last complete history sync
  */
 data class SyncSettings(
     val lastSyncDays: Int = 30,
@@ -2289,7 +2588,13 @@ data class SyncSettings(
 )
 
 /**
- * Represents a paired device
+ * Represents a paired desktop or web device.
+ *
+ * @property id Unique device identifier (persistent across sessions)
+ * @property name User-friendly device name (e.g., "MacBook Pro", "Chrome Browser")
+ * @property platform Device platform: "macos", "windows", "web"
+ * @property lastSeen Timestamp of last activity from this device
+ * @property syncStatus Optional sync progress information
  */
 data class PairedDevice(
     val id: String,
@@ -2300,7 +2605,14 @@ data class PairedDevice(
 )
 
 /**
- * Sync status for a device
+ * Sync progress status for a paired device.
+ *
+ * @property status Current state: "idle", "starting", "syncing", "completed", "failed"
+ * @property syncedMessages Number of messages synced so far
+ * @property totalMessages Total messages to sync
+ * @property lastSyncAttempt Timestamp of the last sync attempt
+ * @property lastSyncCompleted Timestamp of the last successful sync
+ * @property errorMessage Error message if status is "failed"
  */
 data class SyncStatus(
     val status: String, // "idle", "starting", "syncing", "completed", "failed"
@@ -2312,7 +2624,11 @@ data class SyncStatus(
 )
 
 /**
- * Result of completing a pairing request
+ * Sealed class representing the result of a pairing completion attempt.
+ *
+ * - [Approved]: Pairing was successful, deviceId contains the new device's ID
+ * - [Rejected]: User declined the pairing request
+ * - [Error]: Pairing failed due to an error (e.g., device limit reached)
  */
 sealed class CompletePairingResult {
     data class Approved(val deviceId: String?) : CompletePairingResult()
@@ -2321,7 +2637,16 @@ sealed class CompletePairingResult {
 }
 
 /**
- * Result of getDeviceInfo call
+ * Result from the getDeviceInfoV2 Cloud Function.
+ *
+ * Contains device count, limits based on subscription plan, and the list
+ * of currently paired devices.
+ *
+ * @property deviceCount Current number of paired devices
+ * @property deviceLimit Maximum allowed devices for user's plan
+ * @property plan Subscription plan: "free", "pro", etc.
+ * @property canAddDevice True if user can pair another device
+ * @property devices List of currently paired devices
  */
 data class DeviceInfoResult(
     val deviceCount: Int,
@@ -2332,7 +2657,13 @@ data class DeviceInfoResult(
 )
 
 /**
- * Data parsed from a pairing QR code
+ * Data parsed from a pairing QR code displayed by desktop/web clients.
+ *
+ * @property token Unique pairing token for this session
+ * @property name Device name to display in the pairing dialog
+ * @property platform Client platform: "macos", "windows", "web"
+ * @property version Client app version for compatibility checking
+ * @property syncGroupId Optional sync group for enterprise deployments
  */
 data class PairingQrData(
     val token: String,

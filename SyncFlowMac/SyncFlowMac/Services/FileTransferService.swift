@@ -2,9 +2,57 @@
 //  FileTransferService.swift
 //  SyncFlowMac
 //
-//  Handles file transfers between Mac and Android via Cloudflare R2.
-//  - Uploads files to R2 via presigned URLs and notifies Android via Realtime Database.
-//  - Listens for incoming files from Android and downloads them from R2.
+//  Created for SyncFlow cross-platform file transfer functionality.
+//
+//  OVERVIEW:
+//  =========
+//  This service handles bidirectional file transfers between macOS and Android devices
+//  using Cloudflare R2 for cloud storage and Firebase Realtime Database for coordination.
+//
+//  SYNC MECHANISM:
+//  ===============
+//  1. Mac to Android (Upload):
+//     - User initiates file upload via sendFile(url:)
+//     - Service requests a presigned upload URL from R2 via Cloud Functions
+//     - File is uploaded directly to R2 using the presigned URL
+//     - Upload is confirmed via Cloud Function to record usage metrics
+//     - Transfer record is created in Firebase Realtime Database under users/{userId}/file_transfers
+//     - Android device listens for this record and downloads the file
+//
+//  2. Android to Mac (Download):
+//     - Service maintains a real-time listener on users/{userId}/file_transfers
+//     - When Android creates a transfer record with source="android" and status="pending",
+//       the listener triggers handleIncomingTransfer()
+//     - Service requests presigned download URL from R2 via Cloud Functions
+//     - File is downloaded and saved to ~/Downloads/SyncFlow/
+//     - Status is updated in Firebase, and the R2 file is deleted after successful download
+//
+//  FIREBASE REAL-TIME LISTENER PATTERNS:
+//  =====================================
+//  - Uses .childAdded observer on file_transfers node to detect new incoming files
+//  - Listener is started when user is configured and stopped on user change or logout
+//  - Only processes transfers where source="android" and status="pending"
+//  - Includes a 5-minute recency check to ignore stale transfer records
+//
+//  THREADING/ASYNC CONSIDERATIONS:
+//  ===============================
+//  - Firebase listeners fire on the main thread by default
+//  - Async Task blocks are used for download/upload operations to avoid blocking
+//  - UI state updates (latestTransfer, incomingFiles) are dispatched to main thread
+//  - processingFileIds Set prevents duplicate processing of the same transfer
+//
+//  ERROR HANDLING:
+//  ===============
+//  - File size validation occurs before upload/download
+//  - Network errors are caught and reflected in TransferStatus
+//  - Failed transfers update status in Firebase with error message
+//  - User notifications are shown for both success and failure states
+//
+//  RETRY/CONFLICT RESOLUTION:
+//  ==========================
+//  - No automatic retry mechanism implemented; failures require user re-initiation
+//  - Duplicate file name conflicts are resolved by appending " (n)" suffix
+//  - processingFileIds Set prevents concurrent processing of the same transfer
 //
 
 import Foundation
@@ -15,17 +63,49 @@ import FirebaseFunctions
 import UniformTypeIdentifiers
 import UserNotifications
 
+// MARK: - FileTransferService
+
+/// Service responsible for bidirectional file transfers between macOS and Android.
+///
+/// This singleton service manages:
+/// - Uploading files from Mac to Android via Cloudflare R2
+/// - Downloading files from Android to Mac via Cloudflare R2
+/// - Transfer progress tracking and status updates
+/// - File size limit enforcement based on subscription tier
+///
+/// Usage:
+/// ```swift
+/// // Configure with user ID after authentication
+/// FileTransferService.shared.configure(userId: "user123")
+///
+/// // Send a file to Android
+/// FileTransferService.shared.sendFile(url: fileURL)
+///
+/// // Observe transfer status
+/// FileTransferService.shared.$latestTransfer
+///     .sink { status in /* handle status updates */ }
+/// ```
 class FileTransferService: ObservableObject {
+
+    // MARK: - Singleton
+
+    /// Shared singleton instance for app-wide file transfer operations
     static let shared = FileTransferService()
 
+    // MARK: - Types
+
+    /// Represents the current state of a file transfer operation.
+    /// Used to track progress and display appropriate UI feedback.
     enum TransferState: String {
-        case uploading
-        case downloading
-        case sent
-        case received
-        case failed
+        case uploading      // File is being uploaded to R2
+        case downloading    // File is being downloaded from R2
+        case sent           // Upload completed successfully
+        case received       // Download completed successfully
+        case failed         // Transfer failed with error
     }
 
+    /// Tracks the status of an active or completed transfer.
+    /// Published via latestTransfer for UI observation.
     struct TransferStatus: Identifiable {
         let id: String
         let fileName: String
@@ -35,41 +115,70 @@ class FileTransferService: ObservableObject {
         let error: String?
     }
 
+    /// Represents a file transfer initiated from Android that is pending download.
+    /// Parsed from Firebase Realtime Database transfer records.
     struct IncomingFile: Identifiable {
-        let id: String
-        let fileName: String
-        let fileSize: Int64
-        let contentType: String
-        let r2Key: String
-        let timestamp: Date
+        let id: String          // Firebase record key
+        let fileName: String    // Original file name from Android
+        let fileSize: Int64     // File size in bytes
+        let contentType: String // MIME type (e.g., "image/jpeg")
+        let r2Key: String       // R2 storage key for download
+        let timestamp: Date     // When the transfer was initiated
     }
-
-    // Tiered limits (no daily limits - R2 has free egress)
-    static let maxFileSizeFree: Int64 = 50 * 1024 * 1024      // 50MB for free users
-    static let maxFileSizePro: Int64 = 1024 * 1024 * 1024     // 1GB for pro users
-
-    struct TransferLimits {
-        let maxFileSize: Int64
-        let isPro: Bool
-    }
-
-    @Published private(set) var latestTransfer: TransferStatus?
-    @Published private(set) var incomingFiles: [IncomingFile] = []
-    @Published private(set) var transferLimits: TransferLimits?
-
-    private let auth = Auth.auth()
-    private let database = Database.database()
-    private let functions = Functions.functions()
-    private let maxFileSize: Int64 = 50 * 1024 * 1024  // Legacy, use tiered limits
-
-    private var currentUserId: String?
-    private var fileTransferListener: DatabaseHandle?
-    private var processingFileIds: Set<String> = []
-
-    private init() {}
 
     // MARK: - Transfer Limits
 
+    // Tiered limits (no daily limits - R2 has free egress)
+    /// Maximum file size for free tier users (50MB)
+    static let maxFileSizeFree: Int64 = 50 * 1024 * 1024      // 50MB for free users
+    /// Maximum file size for pro/paid tier users (1GB)
+    static let maxFileSizePro: Int64 = 1024 * 1024 * 1024     // 1GB for pro users
+
+    /// Encapsulates the current user's transfer limits based on subscription
+    struct TransferLimits {
+        let maxFileSize: Int64  // Maximum allowed file size in bytes
+        let isPro: Bool         // Whether user has pro subscription
+    }
+
+    // MARK: - Published Properties
+
+    /// The most recent transfer status, observed by UI for progress/status display
+    @Published private(set) var latestTransfer: TransferStatus?
+    /// List of files pending download from Android (currently unused but available for UI)
+    @Published private(set) var incomingFiles: [IncomingFile] = []
+    /// Current user's transfer limits based on subscription tier
+    @Published private(set) var transferLimits: TransferLimits?
+
+    // MARK: - Private Properties
+
+    /// Firebase Auth instance for authentication state
+    private let auth = Auth.auth()
+    /// Firebase Realtime Database instance for transfer coordination
+    private let database = Database.database()
+    /// Firebase Cloud Functions instance for R2 presigned URL generation
+    private let functions = Functions.functions()
+    /// Legacy max file size (use tiered limits instead via transferLimits)
+    private let maxFileSize: Int64 = 50 * 1024 * 1024  // Legacy, use tiered limits
+
+    /// Current authenticated user's ID (sync group user ID)
+    private var currentUserId: String?
+    /// Handle for the Firebase listener on incoming file transfers
+    private var fileTransferListener: DatabaseHandle?
+    /// Set of file IDs currently being processed to prevent duplicate downloads
+    /// This is important because Firebase may deliver the same childAdded event multiple times
+    private var processingFileIds: Set<String> = []
+
+    // MARK: - Initialization
+
+    /// Private initializer enforces singleton pattern
+    private init() {}
+
+    // MARK: - Transfer Limit Validation
+
+    /// Refreshes the user's transfer limits by checking their subscription status.
+    /// Called before each transfer to ensure limits are current.
+    ///
+    /// Threading: Uses MainActor.run to update published property on main thread.
     func refreshLimits() async {
         let isPro = await checkIsPro()
         let maxSize = isPro ? Self.maxFileSizePro : Self.maxFileSizeFree
@@ -82,6 +191,11 @@ class FileTransferService: ObservableObject {
         }
     }
 
+    /// Checks Firebase to determine if user has a pro subscription.
+    /// Reads from users/{userId}/subscription/plan in Realtime Database.
+    ///
+    /// - Returns: true if user has any non-free plan, false otherwise
+    /// - Note: Defaults to true on connectivity errors to allow transfers
     private func checkIsPro() async -> Bool {
         guard let userId = currentUserId else { return false }
 
@@ -105,6 +219,11 @@ class FileTransferService: ObservableObject {
         }
     }
 
+    /// Validates whether a file of the given size can be transferred.
+    /// Refreshes limits before checking to ensure current subscription status.
+    ///
+    /// - Parameter fileSize: Size of the file in bytes
+    /// - Returns: Tuple indicating if transfer is allowed and reason if not
     func canTransfer(fileSize: Int64) async -> (allowed: Bool, reason: String?) {
         await refreshLimits()
 
@@ -121,6 +240,17 @@ class FileTransferService: ObservableObject {
         return (true, nil)
     }
 
+    // MARK: - Configuration
+
+    /// Configures the service for a specific user.
+    /// Call this after user authentication or when sync group changes.
+    ///
+    /// - Parameter userId: The sync group user ID, or nil to stop listening
+    ///
+    /// Behavior:
+    /// - If userId changes, stops existing listener before starting new one
+    /// - If userId is nil, only stops listener (logout scenario)
+    /// - If userId is the same, no action is taken
     func configure(userId: String?) {
         // Stop existing listener if user changed
         if currentUserId != userId {
@@ -134,8 +264,16 @@ class FileTransferService: ObservableObject {
         }
     }
 
-    // MARK: - Incoming File Listener (Android → Mac)
+    // MARK: - Firebase Real-Time Listeners (Android to Mac)
 
+    /// Starts the Firebase listener for incoming file transfers from Android.
+    ///
+    /// Firebase Listener Pattern:
+    /// - Observes .childAdded on users/{userId}/file_transfers
+    /// - Each new child triggers handleIncomingTransfer()
+    /// - Only one listener active at a time (checked via fileTransferListener != nil)
+    ///
+    /// Threading: Firebase callbacks execute on main thread by default
     private func startListening() {
         guard let userId = currentUserId else { return }
         guard fileTransferListener == nil else { return }
@@ -152,6 +290,8 @@ class FileTransferService: ObservableObject {
         print("[FileTransfer] Started listening for incoming files")
     }
 
+    /// Stops the Firebase listener and cleans up the observer handle.
+    /// Safe to call even if no listener is active.
     private func stopListening() {
         guard let userId = currentUserId, let handle = fileTransferListener else { return }
 
@@ -165,6 +305,18 @@ class FileTransferService: ObservableObject {
         print("[FileTransfer] Stopped listening for incoming files")
     }
 
+    // MARK: - Incoming Transfer Processing
+
+    /// Handles a new transfer record from Firebase.
+    ///
+    /// Validation checks:
+    /// 1. Data must be valid dictionary with required fields
+    /// 2. Source must be "android" (ignore Mac-initiated transfers)
+    /// 3. Status must be "pending" (ignore already-processed transfers)
+    /// 4. File ID must not be in processingFileIds (prevent duplicates)
+    /// 5. Transfer must be recent (within 5 minutes) to ignore stale records
+    ///
+    /// - Parameter snapshot: Firebase DataSnapshot containing transfer record
     private func handleIncomingTransfer(_ snapshot: DataSnapshot) {
         guard let data = snapshot.value as? [String: Any] else { return }
 
@@ -215,6 +367,34 @@ class FileTransferService: ObservableObject {
         }
     }
 
+    // MARK: - Download Logic
+
+    /// Downloads a file from R2 storage to the local Downloads folder.
+    ///
+    /// Download Flow:
+    /// 1. Validate file size against maxFileSize limit
+    /// 2. Update Firebase status to "downloading"
+    /// 3. Get presigned download URL (from R2 via Cloud Function or legacy Firebase Storage)
+    /// 4. Download file to temp directory using URLSession
+    /// 5. Move file to ~/Downloads/SyncFlow/ with duplicate name handling
+    /// 6. Update Firebase status to "downloaded"
+    /// 7. Delete file from R2 to free storage
+    /// 8. Clean up transfer record after 5 second delay
+    ///
+    /// Error Handling:
+    /// - File size exceeded: Updates status to "failed" in Firebase
+    /// - Download failures: Caught and reflected in status with error message
+    /// - Notifications shown for both success and failure
+    ///
+    /// Threading: Runs in async Task context, UI updates via DispatchQueue.main
+    ///
+    /// - Parameters:
+    ///   - fileId: Unique identifier for this transfer
+    ///   - fileName: Original file name from Android
+    ///   - fileSize: Expected file size in bytes
+    ///   - contentType: MIME type of the file
+    ///   - r2Key: R2 storage key (nil if using legacy Firebase Storage)
+    ///   - legacyDownloadUrl: Direct download URL for legacy transfers
     private func downloadIncomingFile(
         fileId: String,
         fileName: String,
@@ -332,6 +512,15 @@ class FileTransferService: ObservableObject {
         }
     }
 
+    // MARK: - Firebase Status Updates
+
+    /// Updates the status of an incoming transfer in Firebase.
+    /// Used to coordinate state between devices (e.g., "downloading", "downloaded", "failed").
+    ///
+    /// - Parameters:
+    ///   - fileId: The transfer record ID
+    ///   - status: New status string
+    ///   - error: Optional error message for failed transfers
     private func updateIncomingStatus(fileId: String, status: String, error: String? = nil) async {
         guard let userId = currentUserId else { return }
 
@@ -348,6 +537,14 @@ class FileTransferService: ObservableObject {
             .updateChildValues(updates)
     }
 
+    // MARK: - User Notifications
+
+    /// Displays a local macOS notification to the user.
+    /// Used to notify of transfer progress, completion, or failure.
+    ///
+    /// - Parameters:
+    ///   - title: Notification title
+    ///   - body: Notification body text
     private func showNotification(title: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title
@@ -363,12 +560,38 @@ class FileTransferService: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
+    // MARK: - Upload Logic (Mac to Android)
+
+    /// Public entry point for sending a file to Android.
+    /// Initiates an async upload task.
+    ///
+    /// - Parameter url: Local file URL to upload
     func sendFile(url: URL) {
         Task {
             await uploadFile(url: url)
         }
     }
 
+    /// Uploads a file to R2 storage and creates a transfer record in Firebase.
+    ///
+    /// Upload Flow:
+    /// 1. Validate user is paired and authenticated
+    /// 2. Validate file exists and get file size
+    /// 3. Check file size against tiered limits (canTransfer)
+    /// 4. Get presigned upload URL from R2 via Cloud Function
+    /// 5. Upload file directly to R2 using PUT request
+    /// 6. Confirm upload via Cloud Function (records usage metrics)
+    /// 7. Create transfer record in Firebase with source="macos", status="pending"
+    /// 8. Android device listens for this record and initiates download
+    ///
+    /// Error Handling:
+    /// - Pre-flight validation errors fail immediately with status update
+    /// - Cloud Function errors are parsed for user-friendly messages
+    /// - Network errors caught and reflected in TransferStatus
+    ///
+    /// Threading: Async function, UI updates dispatched to main thread
+    ///
+    /// - Parameter url: Local file URL to upload
     private func uploadFile(url: URL) async {
         guard let userId = currentUserId else {
             updateStatus(id: UUID().uuidString, fileName: url.lastPathComponent, state: .failed, error: "Not paired")
@@ -486,6 +709,17 @@ class FileTransferService: ObservableObject {
         }
     }
 
+    // MARK: - UI State Management
+
+    /// Updates the published latestTransfer property for UI observation.
+    /// Dispatches to main thread to ensure safe UI updates.
+    ///
+    /// - Parameters:
+    ///   - id: Transfer identifier
+    ///   - fileName: Name of the file being transferred
+    ///   - state: Current transfer state
+    ///   - progress: Progress value from 0.0 to 1.0
+    ///   - error: Error message if transfer failed
     private func updateStatus(
         id: String,
         fileName: String,

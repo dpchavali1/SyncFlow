@@ -1,3 +1,30 @@
+/**
+ * SettingsScreen.kt
+ *
+ * This file implements the main settings screen for the SyncFlow app. It provides
+ * access to all app configuration options organized into logical sections.
+ *
+ * Key Sections:
+ * - Desktop & Web Access: Pairing, web access, sync, file transfer
+ * - App Settings: Theme, notifications, appearance, privacy, usage
+ * - Messages: Message settings, quick reply templates, backup, blocked numbers, spam filter
+ * - Help & Support: AI support chat
+ * - Account: Delete account (for paired users only)
+ * - About: App version info
+ *
+ * Architecture:
+ * - Pure navigation hub with minimal business logic
+ * - Uses PreferencesManager for settings values
+ * - All sub-screens accessed via hoisted callbacks
+ * - Conditional sections based on app state (default SMS, paired devices)
+ *
+ * Navigation:
+ * - Entry point from main screen via overflow menu
+ * - Navigates to numerous sub-settings screens
+ *
+ * @see PreferencesManager for settings storage
+ * @see DesktopSyncService for pairing state
+ */
 package com.phoneintegration.app.ui.settings
 
 import android.content.Intent
@@ -21,6 +48,42 @@ import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.utils.DefaultSmsHelper
 
+// =============================================================================
+// region MAIN SETTINGS SCREEN
+// =============================================================================
+
+/**
+ * Main settings screen composable.
+ *
+ * Displays a scrollable list of settings options organized into sections.
+ * Includes a card prompting users to set the app as default SMS app when needed.
+ * Shows conditional sections based on paired device status.
+ *
+ * State Hoisting Pattern:
+ * - PreferencesManager passed in for current settings values
+ * - All navigation callbacks hoisted to parent
+ * - Local UI state for dialogs and checks
+ *
+ * Side Effects:
+ * - LaunchedEffect to check default SMS app status and paired devices on mount
+ *
+ * @param prefsManager The PreferencesManager instance for reading settings
+ * @param onBack Callback to navigate back
+ * @param onNavigateToTheme Callback to navigate to theme settings
+ * @param onNavigateToNotifications Callback to navigate to notification settings
+ * @param onNavigateToAppearance Callback to navigate to appearance settings
+ * @param onNavigateToPrivacy Callback to navigate to privacy settings
+ * @param onNavigateToMessages Callback to navigate to message settings
+ * @param onNavigateToTemplates Callback to navigate to quick reply templates
+ * @param onNavigateToBackup Callback to navigate to backup/restore
+ * @param onNavigateToDesktop Callback to navigate to desktop pairing
+ * @param onNavigateToUsage Callback to navigate to usage/limits
+ * @param onNavigateToSync Callback to navigate to message history sync
+ * @param onNavigateToSpamFilter Callback to navigate to spam filter settings
+ * @param onNavigateToSupport Callback to navigate to AI support chat
+ * @param onNavigateToFileTransfer Callback to navigate to file transfer
+ * @param onNavigateToDeleteAccount Callback to navigate to delete account
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -304,6 +367,21 @@ fun SettingsScreen(
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region HELPER COMPONENTS
+// =============================================================================
+
+/**
+ * Section header for grouping related settings items.
+ *
+ * Displays a title with consistent styling and spacing.
+ *
+ * @param title The section title text
+ */
 @Composable
 private fun SettingsSection(title: String) {
     Text(
@@ -313,6 +391,17 @@ private fun SettingsSection(title: String) {
     )
 }
 
+/**
+ * Individual settings item with icon, title, subtitle, and navigation arrow.
+ *
+ * Displays a clickable list item that navigates to a sub-settings screen.
+ * Uses Material 3 ListItem component for consistent styling.
+ *
+ * @param icon Leading icon to display
+ * @param title Primary text for the setting
+ * @param subtitle Secondary text describing current value or setting purpose
+ * @param onClick Callback when the item is tapped
+ */
 @Composable
 private fun SettingsItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -328,3 +417,7 @@ private fun SettingsItem(
         modifier = Modifier.clickable(onClick = onClick)
     )
 }
+
+// =============================================================================
+// endregion
+// =============================================================================

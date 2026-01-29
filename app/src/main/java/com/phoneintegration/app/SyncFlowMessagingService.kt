@@ -1,3 +1,59 @@
+/**
+ * SyncFlowMessagingService.kt
+ *
+ * Firebase Cloud Messaging (FCM) service that handles push notifications for the SyncFlow app.
+ * This service enables real-time communication between the server and the Android app without
+ * requiring persistent connections or polling.
+ *
+ * ## Architecture Overview
+ *
+ * ```
+ * Firebase Cloud Functions
+ *         |
+ *         v (FCM Push)
+ * SyncFlowMessagingService
+ *         |
+ *         +-- handleIncomingCall() --> SyncFlowCallService
+ *         +-- handleOutgoingMessage() --> OutgoingMessageService
+ *         +-- handleE2EEMessage() --> SMS ContentProvider
+ *         +-- handleMakePhoneCall() --> CallMonitorService
+ * ```
+ *
+ * ## Key Responsibilities
+ *
+ * 1. **Incoming Calls**: Receives call notifications from desktop, starts ringtone/vibration
+ * 2. **Outgoing Messages**: Wakes up OutgoingMessageService to send queued SMS/MMS
+ * 3. **E2EE Messages**: Decrypts incoming encrypted messages and stores in SMS inbox
+ * 4. **Call Control**: Handles call cancelled/ended/status changed notifications
+ * 5. **Phone Calls**: Initiates phone calls requested from desktop
+ *
+ * ## FCM Message Types
+ *
+ * | Type                  | Description                                    |
+ * |-----------------------|------------------------------------------------|
+ * | `e2ee_message`        | Encrypted incoming message                     |
+ * | `incoming_call`       | SyncFlow call notification                     |
+ * | `call_cancelled`      | Call was cancelled before answering            |
+ * | `call_status_changed` | Call state transition (ringing -> answered)    |
+ * | `call_ended_by_remote`| Remote party ended the call                    |
+ * | `outgoing_message`    | Desktop queued a message to send               |
+ * | `make_phone_call`     | Desktop requested a phone call                 |
+ *
+ * ## Lifecycle
+ *
+ * - Created by the Android system when an FCM message arrives
+ * - Uses SupervisorJob + Dispatchers.IO for async operations
+ * - Automatically destroyed when message processing completes
+ * - Scope is cancelled in onDestroy() to prevent leaks
+ *
+ * ## Notification Channels
+ *
+ * - `syncflow_calls`: High-priority channel for incoming call notifications
+ *
+ * @see SyncFlowCallService for call handling logic
+ * @see OutgoingMessageService for SMS/MMS sending
+ * @see SignalProtocolManager for E2EE decryption
+ */
 package com.phoneintegration.app
 
 import android.app.NotificationChannel
@@ -24,28 +80,60 @@ import kotlinx.coroutines.tasks.await
 
 class SyncFlowMessagingService : FirebaseMessagingService() {
 
+    // ==========================================
+    // REGION: Constants
+    // ==========================================
+
     companion object {
         private const val TAG = "SyncFlowMessaging"
         private const val CALL_CHANNEL_ID = "syncflow_calls"
         private const val CALL_NOTIFICATION_ID = 3001
     }
 
+    // ==========================================
+    // REGION: Instance Variables
+    // ==========================================
+
+    /** Handles E2EE decryption for incoming encrypted messages */
     private lateinit var signalProtocolManager: SignalProtocolManager
+
+    /** Firebase Realtime Database for looking up user phone numbers */
     private val firebaseDatabase = FirebaseDatabase.getInstance()
+
+    /** Firebase Auth for getting current user */
     private val auth = FirebaseAuth.getInstance()
+
+    /**
+     * Coroutine scope for async operations within this service.
+     * Uses SupervisorJob so one failure doesn't cancel other operations.
+     */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // ==========================================
+    // REGION: Lifecycle Methods
+    // ==========================================
 
     override fun onCreate() {
         super.onCreate()
+        // Initialize E2EE manager for decrypting incoming messages
         signalProtocolManager = SignalProtocolManager(applicationContext)
         createNotificationChannel()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        // Cancel all pending coroutines to prevent leaks
         serviceScope.cancel()
     }
 
+    /**
+     * Creates the notification channel for incoming SyncFlow calls.
+     *
+     * This channel is configured for high priority with:
+     * - Ringtone sound
+     * - Vibration pattern
+     * - Lock screen visibility
+     */
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ringtoneUri = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_RINGTONE)
@@ -71,11 +159,26 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         }
     }
 
+    // ==========================================
+    // REGION: FCM Message Handling
+    // ==========================================
+
+    /**
+     * Main entry point for all FCM messages.
+     *
+     * Routes messages to appropriate handlers based on the "type" field in the data payload.
+     * All FCM messages from SyncFlow use data-only payloads (no notification payload)
+     * to ensure the app can process them even when in the background.
+     *
+     * @param remoteMessage The FCM message containing the data payload
+     */
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         super.onMessageReceived(remoteMessage)
         Log.d(TAG, "FCM message received: ${remoteMessage.data}")
 
         val data = remoteMessage.data
+
+        // Route to appropriate handler based on message type
         when (data["type"]) {
             "e2ee_message" -> handleE2EEMessage(data)
             "incoming_call" -> handleIncomingCall(data)
@@ -88,15 +191,25 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         }
     }
 
+    /**
+     * Handles end-to-end encrypted messages received via FCM.
+     *
+     * Decrypts the message body using the SignalProtocolManager and inserts
+     * it into the SMS inbox so it appears in the conversation list.
+     *
+     * @param data FCM data containing senderId and encryptedBody
+     */
     private fun handleE2EEMessage(data: Map<String, String>) {
         val senderId = data["senderId"]
         val encryptedBody = data["encryptedBody"]
 
         if (senderId != null && encryptedBody != null) {
             try {
+                // Decrypt using the Signal Protocol
                 val decryptedBody = signalProtocolManager.decryptMessage(encryptedBody)
                 if (decryptedBody != null) {
                     Log.d(TAG, "Decrypted message: $decryptedBody")
+                    // Insert into SMS inbox so it shows in conversations
                     insertSms(senderId, decryptedBody)
                 } else {
                     Log.e(TAG, "Failed to decrypt message")
@@ -107,6 +220,26 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         }
     }
 
+    // ==========================================
+    // REGION: Call Handling
+    // ==========================================
+
+    /**
+     * Handles incoming SyncFlow call notifications.
+     *
+     * When a user initiates a call from the desktop/web client, this notification
+     * is sent to wake up the Android device and display the incoming call UI.
+     *
+     * ## Call Flow
+     *
+     * 1. FCM message arrives with call details
+     * 2. Start SyncFlowCallService as foreground service
+     * 3. Service shows full-screen incoming call notification
+     * 4. Service plays ringtone and vibrates
+     * 5. User answers or declines
+     *
+     * @param data FCM data containing callId, callerName, callerPhone, isVideo
+     */
     private fun handleIncomingCall(data: Map<String, String>) {
         val callId = data["callId"] ?: return
         val callerName = data["callerName"] ?: "Unknown"
@@ -125,6 +258,8 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
             putExtra(SyncFlowCallService.EXTRA_CALLER_PHONE, callerPhone)
             putExtra(SyncFlowCallService.EXTRA_IS_VIDEO, isVideo)
         }
+
+        // Use startForegroundService on Android O+ for reliability
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
         } else {
@@ -139,15 +274,30 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         // We don't show a separate notification here to avoid duplicate sounds
     }
 
+    /**
+     * Handles call cancellation (caller hung up before answering).
+     *
+     * @param data FCM data containing the callId
+     */
     private fun handleCallCancelled(data: Map<String, String>) {
         val callId = data["callId"] ?: return
         Log.d(TAG, "Call cancelled: $callId")
 
-        // Dismiss the notification
+        // Dismiss the incoming call notification
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.cancel(CALL_NOTIFICATION_ID)
     }
 
+    /**
+     * Handles call status changes (ringing -> answered, etc.).
+     *
+     * When a call transitions from "ringing" to any other state, we need to:
+     * 1. Cancel all call-related notifications
+     * 2. Stop the ringtone
+     * 3. Update the UI state
+     *
+     * @param data FCM data containing callId and status
+     */
     private fun handleCallStatusChanged(data: Map<String, String>) {
         val callId = data["callId"] ?: return
         val status = data["status"] ?: return
@@ -193,6 +343,14 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         }
     }
 
+    /**
+     * Handles call ended by the remote party.
+     *
+     * This is sent when the other party ends the call. We need to clean up
+     * the call UI and notify the call service to release resources.
+     *
+     * @param data FCM data containing the callId
+     */
     private fun handleCallEndedByRemote(data: Map<String, String>) {
         val callId = data["callId"] ?: return
         Log.d(TAG, "📞 Call ended by remote: callId=$callId")
@@ -234,6 +392,18 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         }
     }
 
+    // ==========================================
+    // REGION: Message Handling
+    // ==========================================
+
+    /**
+     * Handles outgoing message notifications from desktop/web.
+     *
+     * When a user sends a message from the desktop client, this notification
+     * wakes up the OutgoingMessageService to process the pending message queue.
+     *
+     * @param data FCM data containing messageId and address (for logging)
+     */
     private fun handleOutgoingMessage(data: Map<String, String>) {
         val messageId = data["messageId"] ?: return
         val address = data["address"] ?: ""
@@ -245,9 +415,18 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         OutgoingMessageService.start(this)
     }
 
+    // ==========================================
+    // REGION: Phone Call Initiation
+    // ==========================================
+
     /**
-     * Handle make phone call request from Mac/Web via FCM
-     * This allows making calls without keeping CallMonitorService running constantly
+     * Handles phone call initiation request from Mac/Web via FCM.
+     *
+     * This allows users to make phone calls from the desktop without keeping
+     * CallMonitorService running constantly. The FCM notification wakes up
+     * the service to process the call request.
+     *
+     * @param data FCM data containing phoneNumber and requestId
      */
     private fun handleMakePhoneCall(data: Map<String, String>) {
         val phoneNumber = data["phoneNumber"] ?: return
@@ -262,6 +441,19 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         Log.d(TAG, "📞 FCM: Started CallMonitorService for outgoing call")
     }
 
+    // ==========================================
+    // REGION: SMS Insertion
+    // ==========================================
+
+    /**
+     * Inserts a received SMS into the inbox ContentProvider.
+     *
+     * After decrypting an E2EE message, we insert it into the SMS inbox
+     * so it appears in the conversation list alongside regular SMS messages.
+     *
+     * @param senderId The Firebase UID of the sender
+     * @param body The decrypted message body
+     */
     private fun insertSms(senderId: String, body: String) {
         serviceScope.launch {
             val address = getAddressForUid(senderId)
@@ -277,6 +469,15 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         }
     }
 
+    /**
+     * Resolves a Firebase UID to a phone number.
+     *
+     * Looks up the user's registered phone number in Firebase to use as
+     * the "from" address when inserting the SMS.
+     *
+     * @param uid Firebase UID of the sender
+     * @return The sender's phone number, or null if not found
+     */
     private suspend fun getAddressForUid(uid: String): String? {
         return try {
             val dataSnapshot = firebaseDatabase.getReference("users").child(uid).child("phoneNumber").get().await()
@@ -288,11 +489,34 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
     }
 
 
+    // ==========================================
+    // REGION: FCM Token Management
+    // ==========================================
+
+    /**
+     * Called when FCM token is refreshed.
+     *
+     * FCM tokens can change when:
+     * - App is restored to a new device
+     * - User uninstalls/reinstalls the app
+     * - User clears app data
+     * - Token is periodically refreshed by FCM
+     *
+     * @param token The new FCM token
+     */
     override fun onNewToken(token: String) {
         super.onNewToken(token)
         sendTokenToServer(token)
     }
 
+    /**
+     * Sends the FCM token to Firebase for server-side push notifications.
+     *
+     * The token is stored at fcm_tokens/{userId} so Cloud Functions can
+     * look it up when sending push notifications to this device.
+     *
+     * @param token The FCM token to register
+     */
     private fun sendTokenToServer(token: String) {
         val uid = auth.currentUser?.uid
         if (uid != null) {

@@ -1,5 +1,69 @@
 package com.phoneintegration.app
 
+// =============================================================================
+// ARCHITECTURE OVERVIEW
+// =============================================================================
+//
+// MainActivity is the primary entry point Activity for the SyncFlow Android app.
+// It serves as the host for the Jetpack Compose UI and coordinates the various
+// services, permissions, and features of the application.
+//
+// ARCHITECTURE PATTERN:
+// ---------------------
+// The app follows the MVVM (Model-View-ViewModel) architecture:
+// - View: Jetpack Compose UI defined in setContent{}
+// - ViewModel: SmsViewModel for SMS data and business logic
+// - Model: Repository layer and Firebase Realtime Database
+//
+// INITIALIZATION FLOW:
+// --------------------
+// onCreate() performs the following in order:
+// 1. Essential setup (PreferencesManager, AuthManager, RecoveryCodeManager)
+// 2. Permission checking (request if core permissions missing)
+// 3. Intent handling (calls, shares, conversation launches)
+// 4. Broadcast receiver registration (call dismissal events)
+// 5. Background initialization (Signal Protocol, FCM, MobileAds)
+// 6. Service management (via BatteryAwareServiceManager)
+// 7. UI composition (setContent with PhoneIntegrationTheme)
+//
+// PERMISSION STRATEGY:
+// --------------------
+// Uses a minimal permission approach to reduce antivirus false positives:
+// - CORE_PERMISSIONS: Essential for SMS sync (requested at startup)
+// - CALL_PERMISSIONS: Requested when using call features
+// - MEDIA_PERMISSIONS: Requested when starting video calls
+// - STORAGE_PERMISSIONS: Requested when attaching files
+//
+// SERVICE MANAGEMENT:
+// -------------------
+// Services are managed by BatteryAwareServiceManager for optimal battery:
+// - Services start/stop based on battery level and charging status
+// - Network-dependent operations prefer WiFi over mobile data
+// - SyncFlowCallService starts on-demand via FCM push notifications
+//
+// INTENT HANDLING:
+// ----------------
+// MainActivity handles multiple intent types:
+// - Incoming calls (from FCM/notification): Shows call UI over lock screen
+// - Active calls (already answered): Shows ongoing call screen
+// - Share intents: Opens conversation with shared content
+// - Conversation launches: Opens specific message thread
+//
+// LIFECYCLE CONSIDERATIONS:
+// -------------------------
+// - onResume: Updates auth activity, reconciles deleted messages
+// - onDestroy: Unregisters broadcast receivers, cleans up services
+// - onNewIntent: Handles new intents while activity is running
+//
+// LOCK SCREEN INTEGRATION:
+// ------------------------
+// For incoming calls, the activity can display over the lock screen using:
+// - setShowWhenLocked(true) on API 27+
+// - FLAG_SHOW_WHEN_LOCKED flag on older APIs
+// - KeyguardManager.requestDismissKeyguard() to unlock if needed
+//
+// =============================================================================
+
 import android.Manifest
 import android.app.KeyguardManager
 import android.app.role.RoleManager
@@ -49,51 +113,116 @@ import com.phoneintegration.app.ui.theme.PhoneIntegrationTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/**
+ * Main Activity and entry point for the SyncFlow Android application.
+ *
+ * This activity hosts the Jetpack Compose UI and coordinates between various
+ * services, permissions, and system features. It handles:
+ * - Permission requests and runtime permission management
+ * - System role requests (default SMS app, default dialer)
+ * - Incoming and active call UI overlay management
+ * - Share intent handling for sending content via SMS
+ * - Lock screen integration for incoming calls
+ *
+ * ## State Management
+ * Uses a combination of:
+ * - [SmsViewModel] for SMS data (via viewModels delegate)
+ * - [PreferencesManager] for user preferences
+ * - Compose State for UI-specific state
+ * - MutableState triggers for intent-driven state changes
+ *
+ * ## Service Integration
+ * Services are managed through [BatteryAwareServiceManager] which optimizes
+ * for battery life by adjusting sync frequency based on power conditions.
+ *
+ * @see SyncFlowApp Application class that initializes core services
+ * @see SmsViewModel ViewModel for SMS data management
+ * @see BatteryAwareServiceManager Intelligent service management
+ */
 class MainActivity : ComponentActivity() {
 
-    // -------------------------------------------------------------
-    // ViewModel + Prefs
-    // -------------------------------------------------------------
+    // =========================================================================
+    // MARK: - ViewModel and Core Dependencies
+    // =========================================================================
+
+    /** SMS ViewModel providing message data and business logic */
     val viewModel: SmsViewModel by viewModels()
+
+    /** User preferences manager for theme, sync settings, etc. */
     private lateinit var preferencesManager: PreferencesManager
+
+    /** Authentication manager for session and token management */
     private lateinit var authManager: AuthManager
+
+    /** Recovery code manager for account recovery */
     private lateinit var recoveryCodeManager: RecoveryCodeManager
 
-    // State for active call (can be updated from onNewIntent)
+    // =========================================================================
+    // MARK: - Call State (Intent-Driven)
+    // =========================================================================
+    // These mutable state objects bridge between onNewIntent() and Compose.
+    // When onNewIntent receives a call-related intent, it updates the pending
+    // values and increments the trigger, causing Compose to recompose.
+
+    /** Trigger for active call state changes (incremented to trigger recomposition) */
     private val _activeCallTrigger = mutableStateOf(0)
     private var _pendingActiveCallId: String? = null
     private var _pendingActiveCallName: String? = null
     private var _pendingActiveCallVideo: Boolean = false
 
-    // State for incoming call (can be updated from onNewIntent)
+    /** Trigger for incoming call state changes */
     private val _incomingCallTrigger = mutableStateOf(0)
     private var _pendingIncomingCallId: String? = null
     private var _pendingIncomingCallName: String? = null
     private var _pendingIncomingCallVideo: Boolean = false
 
-    // State for dismissing calls (can be triggered by broadcasts)
+    /** Triggers for call dismissal (from broadcast receivers) */
     private val _dismissCallTrigger = mutableStateOf(0)
     private val _endCallTrigger = mutableStateOf(0)
 
-    // Broadcast receivers for call dismissal (registered at Activity level for reliability)
+    // =========================================================================
+    // MARK: - Broadcast Receivers
+    // =========================================================================
+    // Registered at Activity level for reliability across configuration changes
+
+    /** Receiver for incoming call UI dismissal events */
     private var callDismissReceiver: android.content.BroadcastReceiver? = null
+
+    /** Receiver for call ended by remote party events */
     private var callEndedReceiver: android.content.BroadcastReceiver? = null
 
     // Services are now managed by BatteryAwareServiceManager for optimal battery usage
 
-    // Share intent payload
+    // =========================================================================
+    // MARK: - Share Intent State
+    // =========================================================================
+
+    /** Pending share payload from ACTION_SEND intent */
     private val pendingSharePayload = mutableStateOf<SharePayload?>(null)
+
+    /** Pending conversation to open from notification or deep link */
     private val pendingConversationLaunch = mutableStateOf<ConversationLaunch?>(null)
 
+    /**
+     * Data class representing a request to open a specific conversation.
+     * Used when launching from notifications or deep links.
+     */
     data class ConversationLaunch(
         val threadId: Long,
         val address: String,
         val name: String
     )
 
-    // -------------------------------------------------------------
-    // Default SMS picker — SINGLE launcher
-    // -------------------------------------------------------------
+    // =========================================================================
+    // MARK: - Role Request Launchers
+    // =========================================================================
+    // Activity result launchers for system role requests. These must be
+    // registered at class initialization time, not dynamically.
+
+    /**
+     * Launcher for default SMS app role request.
+     * When the user grants this role, the app can send/receive SMS directly.
+     */
     private val defaultSmsRoleLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             android.util.Log.d("MainActivity", "=== Default SMS launcher callback ===")
@@ -103,7 +232,10 @@ class MainActivity : ComponentActivity() {
             viewModel.onDefaultSmsAppChanged(isDefault)
         }
 
-    // Default Dialer picker — SINGLE launcher
+    /**
+     * Launcher for default dialer role request.
+     * When granted, enables direct call handling and caller ID features.
+     */
     private val defaultDialerRoleLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             android.util.Log.d("MainActivity", "=== Default Dialer launcher callback ===")
@@ -112,6 +244,17 @@ class MainActivity : ComponentActivity() {
             android.util.Log.d("MainActivity", "Is now default dialer: $isDefault")
         }
 
+    /**
+     * Requests the default SMS app role from the system.
+     *
+     * On Android 10+, uses RoleManager.ROLE_SMS for the proper system dialog.
+     * On older versions, uses the legacy ACTION_CHANGE_DEFAULT intent.
+     *
+     * When granted, the app can:
+     * - Receive SMS/MMS directly
+     * - Send SMS without going through the default app
+     * - Access the SMS inbox programmatically
+     */
     fun requestDefaultSmsAppViaRole() {
         android.util.Log.d("MainActivity", "=== requestDefaultSmsAppViaRole() called ===")
         android.util.Log.d("MainActivity", "Android version: ${Build.VERSION.SDK_INT}")
@@ -224,21 +367,44 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // -------------------------------------------------------------
-    // Permissions
-    // -------------------------------------------------------------
-    // MINIMAL core permissions required for basic app functionality
-    // (Reduces antivirus false positives)
+    // =========================================================================
+    // MARK: - Permissions
+    // =========================================================================
+    //
+    // PERMISSION STRATEGY:
+    // --------------------
+    // SyncFlow uses a minimal permission approach to reduce antivirus false positives
+    // and user friction. Permissions are categorized into:
+    //
+    // 1. CORE_PERMISSIONS - Required for basic functionality (requested at startup)
+    // 2. CALL_PERMISSIONS - For phone call features (requested on demand)
+    // 3. MEDIA_PERMISSIONS - For video calls (requested on demand)
+    // 4. STORAGE_PERMISSIONS - For file attachments (requested on demand)
+    //
+    // This approach:
+    // - Reduces initial permission requests (less intimidating for users)
+    // - Reduces antivirus false positive rates
+    // - Provides context when permissions are requested (user understands why)
+    // - Allows app to function with reduced features if permissions denied
+    //
+
+    /**
+     * Core permissions required for basic SMS sync functionality.
+     * These are requested at app startup and are essential for the app to work.
+     */
     private val CORE_PERMISSIONS = arrayOf(
-        Manifest.permission.READ_SMS,
-        Manifest.permission.SEND_SMS,
-        Manifest.permission.RECEIVE_SMS,
-        Manifest.permission.READ_CONTACTS,
-        Manifest.permission.READ_CALL_LOG, // For call history sync
-        Manifest.permission.POST_NOTIFICATIONS // For local notifications
+        Manifest.permission.READ_SMS,           // Read SMS inbox
+        Manifest.permission.SEND_SMS,           // Send SMS from desktop
+        Manifest.permission.RECEIVE_SMS,        // Receive new messages
+        Manifest.permission.READ_CONTACTS,      // Show contact names
+        Manifest.permission.READ_CALL_LOG,      // Sync call history
+        Manifest.permission.POST_NOTIFICATIONS  // Show sync notifications
     )
 
-    // Optional permissions for enhanced features (requested when needed)
+    /**
+     * Optional permissions for phone call features.
+     * Requested when user accesses call-related functionality.
+     */
     private val CALL_PERMISSIONS = arrayOf(
         Manifest.permission.READ_PHONE_STATE,
         Manifest.permission.CALL_PHONE,
@@ -247,11 +413,19 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.READ_CALL_LOG
     )
 
+    /**
+     * Optional permissions for camera and microphone.
+     * Requested when user starts a video call.
+     */
     private val MEDIA_PERMISSIONS = arrayOf(
         Manifest.permission.CAMERA,
         Manifest.permission.RECORD_AUDIO
     )
 
+    /**
+     * Optional permissions for file access.
+     * Uses READ_MEDIA_IMAGES on Android 13+ for scoped storage compliance.
+     */
     private val STORAGE_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
     } else {
@@ -281,12 +455,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // All permissions for full functionality (for reference)
+    /** All permissions combined for reference */
     private val ALL_PERMISSIONS = (CORE_PERMISSIONS + ENHANCED_PERMISSIONS_GROUP_1 + ENHANCED_PERMISSIONS_GROUP_2).toMutableList()
 
-    // Track if we've already asked for permissions this session
+    /** Tracks if permissions have been requested this session to avoid repeated prompts */
     private var hasRequestedPermissions = false
 
+    /**
+     * Activity result launcher for permission requests.
+     * Handles the result of requestPermissions() calls.
+     */
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             hasRequestedPermissions = true
@@ -298,9 +476,19 @@ class MainActivity : ComponentActivity() {
             // If core permissions are granted, proceed even if optional ones are denied
         }
 
-    // -------------------------------------------------------------
-    // Lifecycle
-    // -------------------------------------------------------------
+    // =========================================================================
+    // MARK: - Activity Lifecycle
+    // =========================================================================
+
+    /**
+     * Called when the activity is resumed.
+     *
+     * Performs:
+     * - Auth activity tracking for session management
+     * - Default SMS app status check
+     * - Deleted message reconciliation
+     * - Call service startup (needed for incoming calls in foreground)
+     */
     override fun onResume() {
         super.onResume()
         // Track user activity for session management
@@ -312,6 +500,16 @@ class MainActivity : ComponentActivity() {
         SyncFlowCallService.startService(this)
     }
 
+    /**
+     * Called when the activity is being destroyed.
+     *
+     * Cleans up:
+     * - Broadcast receivers for call events
+     * - BatteryAwareServiceManager resources
+     *
+     * Note: This may be called during configuration changes, so only
+     * clean up activity-scoped resources here.
+     */
     override fun onDestroy() {
         super.onDestroy()
         // Unregister broadcast receivers
@@ -326,6 +524,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Registers broadcast receivers for call-related events.
+     *
+     * Two receivers are registered:
+     * 1. DISMISS_INCOMING_CALL - When an incoming call should be dismissed
+     *    (e.g., answered on phone, cancelled by caller)
+     * 2. CALL_ENDED_BY_REMOTE - When the remote party ends an active call
+     *
+     * These receivers update the Compose state via trigger variables,
+     * causing the UI to update appropriately.
+     */
     private fun registerCallBroadcastReceivers() {
         // Receiver for dismissing incoming call UI
         callDismissReceiver = object : android.content.BroadcastReceiver() {
@@ -371,6 +580,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Called when the activity is first created.
+     *
+     * This method performs extensive initialization in a carefully ordered sequence:
+     *
+     * ## Essential Setup (Main Thread, Blocking)
+     * - PreferencesManager, AuthManager, RecoveryCodeManager
+     * - Permission checking
+     * - Intent handling for calls/shares
+     * - Broadcast receiver registration
+     *
+     * ## Background Initialization (IO Dispatcher, Non-Blocking)
+     * - Signal Protocol for E2EE
+     * - FCM token registration
+     * - MobileAds initialization
+     * - Role requests (default dialer, call screening)
+     * - Battery optimization exemption
+     * - WorkManager scheduling
+     *
+     * ## UI Composition
+     * Sets up Jetpack Compose UI with:
+     * - Theme based on user preference
+     * - Main navigation
+     * - Call screen overlays (incoming/active)
+     *
+     * ## Performance Optimizations
+     * - Background init is deferred to avoid blocking UI render
+     * - Sync operations delayed 3 seconds after UI is up
+     * - Services managed by BatteryAwareServiceManager
+     */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -853,6 +1092,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Called when a new intent is delivered to an existing activity instance.
+     *
+     * This handles:
+     * - Incoming call intents from FCM notifications
+     * - Active call intents (when answering from notification)
+     * - Share intents when app is already running
+     * - Conversation launch intents from notifications
+     *
+     * For call intents, also enables lock screen override if needed.
+     *
+     * @param intent The new intent that was started
+     */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent) // Update the intent so getIntent() returns the new one
@@ -944,34 +1196,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // -------------------------------------------------------------
-    // Permission helpers
-    // -------------------------------------------------------------
+    // =========================================================================
+    // MARK: - Permission Helpers
+    // =========================================================================
+
+    /** Checks if all core permissions are granted */
     private fun hasCorePermissions(): Boolean =
         CORE_PERMISSIONS.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
 
+    /** Checks if all permissions (core + enhanced) are granted */
     private fun hasAllPermissions(): Boolean =
         ALL_PERMISSIONS.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
 
-    // Request only core permissions initially (reduces antivirus false positives)
+    /** Requests only core permissions at startup (reduces antivirus false positives) */
     private fun requestCorePermissions() {
         if (!hasRequestedPermissions) {
             permissionLauncher.launch(CORE_PERMISSIONS)
         }
     }
 
-    // Request call-related permissions when call features are used
+    /** Requests call-related permissions when call features are accessed */
     private fun requestCallPermissions() {
         if (CALL_PERMISSIONS.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
             permissionLauncher.launch(CALL_PERMISSIONS)
         }
     }
 
-    // Request media permissions when camera/microphone features are used
+    /** Requests camera/microphone permissions when video call features are accessed */
     private fun requestMediaPermissions() {
         if (MEDIA_PERMISSIONS.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
             permissionLauncher.launch(MEDIA_PERMISSIONS)
@@ -979,8 +1234,15 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Enable the call screen to show over the lock screen.
+     * Enables the call screen to display over the lock screen.
+     *
      * This is essential for incoming calls to be visible when the device is locked.
+     * Uses different APIs based on Android version:
+     * - API 27+: setShowWhenLocked() and setTurnScreenOn()
+     * - Older: Window flags FLAG_SHOW_WHEN_LOCKED, FLAG_TURN_SCREEN_ON
+     *
+     * Also requests keyguard dismissal to allow the user to interact with the call
+     * without unlocking (for answering/declining).
      */
     private fun enableCallScreenOverLockScreen() {
         Log.d("MainActivity", "Enabling call screen over lock screen")
@@ -1023,7 +1285,7 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
-    // Request storage permissions when file features are used
+    /** Requests storage permissions when file attachment features are accessed */
     private fun requestStoragePermissions() {
         if (STORAGE_PERMISSIONS.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
             permissionLauncher.launch(STORAGE_PERMISSIONS)
@@ -1123,9 +1385,21 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    // -------------------------------------------------------------
-    // Handle share intents
-    // -------------------------------------------------------------
+    // =========================================================================
+    // MARK: - Share Intent Handling
+    // =========================================================================
+
+    /**
+     * Extracts share payload from an incoming share intent.
+     *
+     * Handles:
+     * - ACTION_SEND: Single item share (text, image, file)
+     * - ACTION_SEND_MULTIPLE: Multiple items (multiple images)
+     * - ACTION_SENDTO: SMS compose intent with recipient
+     *
+     * @param intent The incoming intent to parse
+     * @return SharePayload if content was found, null otherwise
+     */
     private fun handleShareIntent(intent: Intent?): SharePayload? {
         if (intent == null) return null
 
@@ -1150,6 +1424,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Extracts all URIs from a share intent.
+     *
+     * Checks multiple sources:
+     * - EXTRA_STREAM for single URI
+     * - EXTRA_STREAM ArrayList for multiple URIs
+     * - ClipData for additional items
+     *
+     * Returns deduplicated list of URIs.
+     */
     private fun extractSharedUris(intent: Intent): List<Uri> {
         val uris = mutableListOf<Uri>()
 

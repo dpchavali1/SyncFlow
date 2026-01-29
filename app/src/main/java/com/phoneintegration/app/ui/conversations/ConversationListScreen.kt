@@ -1,3 +1,30 @@
+/**
+ * ConversationListScreen.kt
+ *
+ * This file implements the main conversation list screen, which is the primary
+ * entry point of the SyncFlow messaging app. It displays all SMS conversations
+ * in a scrollable list with search, filtering, and quick action capabilities.
+ *
+ * Key Features:
+ * - Conversation list with contact avatars and message previews
+ * - Search functionality across contacts and message content
+ * - SIM card filtering for dual-SIM devices
+ * - Unread message filtering
+ * - Swipe gestures for archive/pin actions
+ * - Long-press context menu for additional actions
+ * - Continuity banner for cross-device handoff
+ * - SyncFlow Deals promotional card
+ * - Floating action buttons for AI, stats, and new message
+ *
+ * Architecture:
+ * - Follows MVVM pattern with SmsViewModel
+ * - Uses state hoisting for all callback actions
+ * - Broadcasts received via LocalBroadcastManager for real-time updates
+ * - Swipe-to-dismiss for gesture-based interactions
+ *
+ * @see SmsViewModel for data management
+ * @see ConversationInfo for conversation data model
+ */
 @file:OptIn(ExperimentalFoundationApi::class)
 
 package com.phoneintegration.app.ui.conversations
@@ -86,6 +113,41 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 
+// =============================================================================
+// region MAIN SCREEN COMPOSABLE
+// =============================================================================
+
+/**
+ * Main conversation list screen composable.
+ *
+ * This is the primary screen of the app, displaying all SMS conversations
+ * in a searchable, filterable list. Supports dual-SIM filtering, swipe gestures,
+ * and provides quick access to AI assistant and statistics.
+ *
+ * State Hoisting Pattern:
+ * - ViewModel is passed in for state management
+ * - All navigation callbacks are hoisted to the parent
+ * - Local UI state (search query, menus) managed internally
+ *
+ * Side Effects:
+ * - DisposableEffect for broadcast receiver registration
+ * - DisposableEffect for continuity service lifecycle
+ * - LaunchedEffect for loading SIMs and conversations on mount
+ * - LaunchedEffect for periodic SMS permission checks
+ *
+ * @param viewModel The SmsViewModel for conversation data and actions
+ * @param prefsManager Preferences manager for swipe gesture settings
+ * @param onOpen Callback when a conversation is tapped (address, name)
+ * @param onOpenStats Callback to navigate to statistics screen
+ * @param onOpenSettings Callback to navigate to settings screen
+ * @param onNewMessage Callback to start a new message
+ * @param onOpenAI Callback to open AI assistant
+ * @param onOpenScheduled Callback to view scheduled messages
+ * @param onOpenArchived Callback to view archived conversations
+ * @param onOpenDownloads Callback to view SyncFlow downloads
+ * @param onOpenSpam Callback to view spam folder
+ * @param onOpenBlocked Callback to view blocked contacts
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ConversationListScreen(
@@ -646,6 +708,22 @@ fun ConversationListScreen(
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region PROMOTIONAL COMPONENTS
+// =============================================================================
+
+/**
+ * Promotional card for SyncFlow Deals.
+ *
+ * Displays an eye-catching gradient card with gift icon and "HOT" badge
+ * to promote exclusive offers. Appears at the top of the conversation list.
+ *
+ * @param onClick Callback when the card is tapped
+ */
 @Composable
 fun SyncFlowDealsCard(
     onClick: () -> Unit
@@ -765,6 +843,26 @@ fun SyncFlowDealsCard(
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region CONTINUITY FEATURE
+// =============================================================================
+
+/**
+ * Resolves a continuity state to a matching conversation.
+ *
+ * Attempts to find the conversation matching the continuity handoff by:
+ * 1. Exact address match
+ * 2. Normalized phone number match
+ * 3. Contact name match (case-insensitive)
+ *
+ * @param state The continuity state from another device
+ * @param conversations List of local conversations to search
+ * @return Matching conversation, or null if not found
+ */
 private fun resolveContinuityConversation(
     state: ContinuityService.ContinuityState,
     conversations: List<com.phoneintegration.app.ConversationInfo>
@@ -797,10 +895,26 @@ private fun resolveContinuityConversation(
     return null
 }
 
+/**
+ * Normalizes a phone address by extracting only digits.
+ *
+ * @param value The raw phone number or address string
+ * @return String containing only digit characters
+ */
 private fun normalizeAddress(value: String): String {
     return value.filter { it.isDigit() }
 }
 
+/**
+ * Banner displayed when a conversation handoff is available from another device.
+ *
+ * Shows device name, contact info, and provides Open/Dismiss actions.
+ * Part of the cross-device continuity feature.
+ *
+ * @param state The continuity state containing handoff information
+ * @param onOpen Callback to accept the handoff and open the conversation
+ * @param onDismiss Callback to dismiss the handoff banner
+ */
 @Composable
 private fun ContinuityBanner(
     state: ContinuityService.ContinuityState,
@@ -850,6 +964,23 @@ private fun ContinuityBanner(
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region CONVERSATION LIST ITEMS
+// =============================================================================
+
+/**
+ * Individual conversation list item displaying contact info and message preview.
+ *
+ * Shows avatar, contact name, last message preview, timestamp, and badges
+ * for unread count, pinned status, muted status, E2EE encryption, and
+ * group conversations.
+ *
+ * @param info The ConversationInfo data to display
+ */
 @Composable
 fun ConversationListItem(
     info: ConversationInfo
@@ -982,8 +1113,17 @@ fun ConversationListItem(
 }
 
 /**
- * Format timestamp for conversation list
- * Shows time (e.g. "2:30 PM") if today, otherwise date (e.g. "Jan 15")
+ * Formats a timestamp for display in the conversation list.
+ *
+ * Uses smart formatting based on age:
+ * - Same day: Time (e.g., "2:30 PM")
+ * - Yesterday: "Yesterday"
+ * - Same week: Day name (e.g., "Mon")
+ * - Same year: Month and day (e.g., "Jan 15")
+ * - Different year: Full date (e.g., "01/15/24")
+ *
+ * @param timestamp The message timestamp in milliseconds
+ * @return Formatted time/date string, or empty string if timestamp is invalid
  */
 private fun formatConversationTime(timestamp: Long): String {
     if (timestamp <= 0) return ""
@@ -1019,6 +1159,28 @@ private fun formatConversationTime(timestamp: Long): String {
     }
 }
 
+// =============================================================================
+// region SWIPEABLE CONVERSATION ITEMS
+// =============================================================================
+
+/**
+ * Swipeable conversation list item with gesture support.
+ *
+ * Supports swipe gestures:
+ * - Swipe left to archive
+ * - Swipe right to pin/unpin
+ *
+ * Also supports long-press for context menu with additional actions.
+ *
+ * @param conversation The ConversationInfo data to display
+ * @param onOpen Callback when item is tapped
+ * @param onArchive Callback when swiped left to archive
+ * @param onPin Callback when swiped right to pin/unpin
+ * @param onMute Callback from context menu to mute/unmute
+ * @param onBlock Callback from context menu to block contact
+ * @param onMarkSpam Callback from context menu to mark as spam
+ * @param onDelete Callback from context menu to delete conversation
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SwipeableConversationItem(
@@ -1141,6 +1303,21 @@ fun SwipeableConversationItem(
     )
 }
 
+/**
+ * Non-swipeable conversation list item.
+ *
+ * Used when swipe gestures are disabled in settings. Still supports
+ * long-press for context menu with all actions.
+ *
+ * @param conversation The ConversationInfo data to display
+ * @param onOpen Callback when item is tapped
+ * @param onArchive Callback from context menu to archive
+ * @param onPin Callback from context menu to pin/unpin
+ * @param onMute Callback from context menu to mute/unmute
+ * @param onBlock Callback from context menu to block contact
+ * @param onMarkSpam Callback from context menu to mark as spam
+ * @param onDelete Callback from context menu to delete conversation
+ */
 @Composable
 fun NonSwipeConversationItem(
     conversation: ConversationInfo,
@@ -1167,6 +1344,19 @@ fun NonSwipeConversationItem(
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region HELPER COMPONENTS
+// =============================================================================
+
+/**
+ * Visual separator between conversation list items.
+ *
+ * Thin divider line with proper insets matching the avatar width.
+ */
 @Composable
 private fun ConversationListSeparator() {
     Divider(
@@ -1179,6 +1369,23 @@ private fun ConversationListSeparator() {
     )
 }
 
+/**
+ * Wrapper component providing click and long-press behavior for conversation items.
+ *
+ * Handles tap to open and long-press to show context menu. Used by both
+ * SwipeableConversationItem and NonSwipeConversationItem.
+ *
+ * @param conversation The ConversationInfo for context menu state
+ * @param onOpen Callback when item is tapped
+ * @param onArchive Callback from context menu to archive
+ * @param onPin Callback from context menu to pin/unpin
+ * @param onMute Callback from context menu to mute/unmute
+ * @param onBlock Callback from context menu to block contact
+ * @param onMarkSpam Callback from context menu to mark as spam
+ * @param onDelete Callback from context menu to delete conversation
+ * @param showPinArchiveInMenu Whether to show pin/archive in menu (false for swipeable items)
+ * @param content The content composable to wrap (typically ConversationListItem)
+ */
 @Composable
 private fun ConversationItemContent(
     conversation: ConversationInfo,
@@ -1281,3 +1488,7 @@ private fun ConversationItemContent(
         }
     }
 }
+
+// =============================================================================
+// endregion
+// =============================================================================

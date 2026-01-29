@@ -2,49 +2,196 @@
 //  MessageStore.swift
 //  SyncFlowMac
 //
-//  Observable store for managing messages and conversations
+//  Created by SyncFlow Team
+//  Copyright (c) SyncFlow. All rights reserved.
+//
+//  ============================================================================
+//  PURPOSE
+//  ============================================================================
+//  MessageStore is the central state management hub for all messaging data in
+//  the SyncFlow macOS app. It implements the ObservableObject protocol for
+//  seamless SwiftUI integration.
+//
+//  Key Responsibilities:
+//  - Maintains the source of truth for messages and conversations
+//  - Manages Firebase real-time listeners for data synchronization
+//  - Groups messages into conversations with contact resolution
+//  - Handles read status, reactions, and pinned messages
+//  - Provides filtering (all, unread, archived, spam)
+//  - Supports message search and pagination
+//
+//  ============================================================================
+//  ARCHITECTURE (MVVM Pattern)
+//  ============================================================================
+//  MessageStore serves as the Model layer in the MVVM architecture:
+//
+//  ```
+//  View (SwiftUI)
+//      |
+//      | @ObservedObject / @EnvironmentObject
+//      v
+//  MessageStore (@Published properties)
+//      |
+//      | Delegates data operations to
+//      v
+//  FirebaseService (network layer)
+//  ```
+//
+//  Data Flow:
+//  1. View observes @Published properties (messages, conversations, etc.)
+//  2. Firebase listeners push updates to MessageStore
+//  3. MessageStore processes data on background thread
+//  4. @Published properties updated on main thread, triggering UI refresh
+//
+//  ============================================================================
+//  THREAD SAFETY
+//  ============================================================================
+//  - Heavy data processing (conversation building, message parsing) runs on
+//    background queues to keep UI responsive
+//  - @Published property updates are always dispatched to main thread
+//  - Atomic state access uses a concurrent queue with barrier writes
+//  - Pending outgoing messages use a serial queue for consistency
+//
+//  ============================================================================
+//  DEPENDENCIES
+//  ============================================================================
+//  - FirebaseService: Real-time data synchronization
+//  - PreferencesService: User preferences (pinned, archived, blocked)
+//  - NotificationService: System notification delivery
+//  - BatteryAwareServiceManager: Power-optimized processing
 //
 
 import Foundation
 import FirebaseDatabase
 import Combine
 
+// MARK: - MessageStore
+
+/// Central observable store for all messaging state in the SyncFlow macOS app.
+///
+/// MessageStore manages the complete lifecycle of message data, from Firebase
+/// synchronization through to UI-ready conversation objects. It serves as the
+/// single source of truth for the messaging UI.
+///
+/// ## Usage with SwiftUI
+/// ```swift
+/// struct ConversationListView: View {
+///     @EnvironmentObject var messageStore: MessageStore
+///
+///     var body: some View {
+///         List(messageStore.displayedConversations) { conversation in
+///             ConversationRow(conversation: conversation)
+///         }
+///     }
+/// }
+/// ```
+///
+/// ## Starting/Stopping Data Sync
+/// ```swift
+/// // Start listening for updates
+/// messageStore.startListening(userId: userId)
+///
+/// // Stop when user logs out or app closes
+/// messageStore.stopListening()
+/// ```
 class MessageStore: ObservableObject {
 
-    @Published var messages: [Message] = []
-    @Published var conversations: [Conversation] = []
-    @Published var isLoading = false
-    @Published var error: Error?
-    @Published var showArchived = false
-    @Published var showUnreadOnly = false
-    @Published var showSpamOnly = false
-    @Published var messageReactions: [String: String] = [:]
-    @Published var readReceipts: [String: ReadReceipt] = [:]
-    @Published var pinnedMessages: Set<String> = [] // Set of pinned message IDs
-    @Published var spamMessages: [SpamMessage] = []
-    @Published var selectedSpamAddress: String? = nil
-    @Published var canLoadMore = false  // Whether more old messages exist
-    @Published var isLoadingMore = false  // Loading state for pagination
+    // MARK: - Published State (UI-Bound)
 
+    /// All synced messages from the Android device, sorted by date (newest first).
+    @Published var messages: [Message] = []
+
+    /// Conversations grouped from messages, with contact info and unread counts.
+    @Published var conversations: [Conversation] = []
+
+    /// Loading state for initial data fetch.
+    @Published var isLoading = false
+
+    /// Most recent error encountered during sync operations.
+    @Published var error: Error?
+
+    /// Filter toggle: show only archived conversations.
+    @Published var showArchived = false
+
+    /// Filter toggle: show only unread conversations.
+    @Published var showUnreadOnly = false
+
+    /// Filter toggle: show only spam conversations.
+    @Published var showSpamOnly = false
+
+    /// Map of message ID to emoji reaction (e.g., "msg123": "thumbsup").
+    @Published var messageReactions: [String: String] = [:]
+
+    /// Map of message ID to read receipt information.
+    @Published var readReceipts: [String: ReadReceipt] = [:]
+
+    /// Set of message IDs that have been pinned by the user.
+    @Published var pinnedMessages: Set<String> = []
+
+    /// Messages detected as spam by the filter.
+    @Published var spamMessages: [SpamMessage] = []
+
+    /// Currently selected spam sender address for spam detail view.
+    @Published var selectedSpamAddress: String? = nil
+
+    /// Whether older messages exist beyond current loaded range (for pagination).
+    @Published var canLoadMore = false
+
+    /// Loading state for "load more" pagination requests.
+    @Published var isLoadingMore = false
+
+    // MARK: - Firebase Listener Handles
+
+    /// Handle for messages listener - must be removed on cleanup.
     private var messageListenerHandle: DatabaseHandle?
+
+    /// Handle for reactions listener.
     private var reactionsListenerHandle: DatabaseHandle?
+
+    /// Handle for read receipts listener.
     private var readReceiptsListenerHandle: DatabaseHandle?
+
+    /// Handle for spam messages listener.
     private var spamListenerHandle: DatabaseHandle?
+
+    // MARK: - Private State
+
+    /// Currently authenticated user ID.
     private var currentUserId: String?
+
+    /// Tracks message IDs from last update to detect new messages.
     private var lastMessageIds: Set<String> = []
-    private var lastMessageHash: Int = 0  // Track if message data actually changed
-    private var readReceiptsLoaded = false  // Track if read receipts have been loaded at least once
+
+    /// Hash of message data to avoid redundant processing.
+    private var lastMessageHash: Int = 0
+
+    /// Flag indicating if read receipts have loaded at least once.
+    /// Used to determine initial read state for synced messages.
+    private var readReceiptsLoaded = false
+
+    /// Combine cancellables for reactive subscriptions.
     private var cancellables = Set<AnyCancellable>()
 
-    // Thread-safe atomic access for background processing
+    // MARK: - Thread Safety
+
+    /// Concurrent queue for thread-safe atomic state access.
+    /// Reads are concurrent, writes use barrier for exclusivity.
     private let stateQueue = DispatchQueue(label: "MessageStore.stateQueue", attributes: .concurrent)
+
+    /// Atomic copy of last message hash for background thread access.
     private var _atomicLastHash: Int = 0
+
+    /// Atomic copy of last message IDs for background thread access.
     private var _atomicLastIds: Set<String> = []
 
+    /// Thread-safe read of atomic state (hash and IDs).
+    /// Uses sync read on concurrent queue - multiple readers allowed.
     private func getAtomicState() -> (hash: Int, ids: Set<String>) {
         return stateQueue.sync { (_atomicLastHash, _atomicLastIds) }
     }
 
+    /// Thread-safe write of atomic state.
+    /// Uses barrier flag to ensure exclusive write access.
     private func setAtomicState(hash: Int, ids: Set<String>) {
         stateQueue.async(flags: .barrier) {
             self._atomicLastHash = hash
@@ -52,23 +199,65 @@ class MessageStore: ObservableObject {
         }
     }
 
-    // Pagination state
-    private var loadedTimeRangeStart: TimeInterval?  // Oldest message timestamp loaded
-    private var initialLoadDays: Int = 180  // Load last 180 days (6 months) to show more history on initial pairing
-    private var loadMoreDays: Int = 90  // Load 90 more days when "Load More" is clicked
+    // MARK: - Pagination State
+
+    /// Timestamp (seconds) of the oldest loaded message for pagination.
+    private var loadedTimeRangeStart: TimeInterval?
+
+    /// Number of days of history to load on initial sync (6 months).
+    private var initialLoadDays: Int = 180
+
+    /// Number of additional days to load when user requests more (3 months).
+    private var loadMoreDays: Int = 90
+
+    // MARK: - Contacts State
+
+    /// Handle for contacts listener.
     private var contactsListenerHandle: DatabaseHandle?
+
+    /// Cached contacts from last sync.
     private var latestContacts: [Contact] = []
+
+    /// Lookup table: normalized phone number -> contact display name.
+    /// Used for fast contact name resolution in conversation building.
     private var contactNameLookup: [String: String] = [:]
+
+    // MARK: - Pending Outgoing Messages
+
+    /// Serial queue for thread-safe access to pending outgoing messages.
     private let pendingOutgoingQueue = DispatchQueue(label: "MessageStore.pendingOutgoingQueue")
+
+    /// Messages sent from Mac but not yet confirmed by Android.
+    /// Used for optimistic UI updates while waiting for sync.
     private var pendingOutgoingMessages: [String: Message] = [:]
 
+    // MARK: - Service Dependencies
+
+    /// Firebase service for data operations.
     private let firebaseService = FirebaseService.shared
+
+    /// Notification service for system alerts.
     private let notificationService = NotificationService.shared
+
+    /// User preferences service for pinned/archived/blocked state.
     private let preferences = PreferencesService.shared
 
     // MARK: - Phone Number Normalization
 
-    /// Normalize phone number for comparison (handles different formats like +1234567890 vs 1234567890)
+    /// Normalizes a phone number for consistent comparison across formats.
+    ///
+    /// Phone numbers can appear in many formats:
+    /// - `+1 (555) 123-4567`
+    /// - `15551234567`
+    /// - `555-123-4567`
+    ///
+    /// This method extracts the last 10 digits to create a normalized key
+    /// that matches across all these variations.
+    ///
+    /// - Parameter address: The phone number or address to normalize
+    /// - Returns: Normalized string (last 10 digits or lowercase original for non-phone)
+    ///
+    /// - Note: Non-phone addresses (email, short codes) are returned lowercase as-is.
     private func normalizePhoneNumber(_ address: String) -> String {
         // Skip non-phone addresses (email, short codes, etc.)
         if address.contains("@") || address.count < 6 {
@@ -79,6 +268,7 @@ class MessageStore: ObservableObject {
         let digitsOnly = address.filter { $0.isNumber }
 
         // For comparison, use last 10 digits (handles country code differences)
+        // e.g., +1-555-123-4567 and 555-123-4567 both become "5551234567"
         if digitsOnly.count >= 10 {
             return String(digitsOnly.suffix(10))
         }
@@ -87,19 +277,30 @@ class MessageStore: ObservableObject {
 
     // MARK: - Initialization
 
+    /// Creates a new MessageStore instance.
+    ///
+    /// Automatically:
+    /// - Loads pinned message IDs from UserDefaults
+    /// - Sets up quick-reply notification handlers
+    /// - Registers for battery and memory optimization events
     init() {
         loadPinnedMessages()
         setupNotificationHandlers()
         setupPerformanceOptimizations()
     }
 
+    /// Configures power and memory management optimizations.
+    ///
+    /// MessageStore adapts its processing behavior based on:
+    /// - Battery state: Reduces processing when battery is low
+    /// - Memory pressure: Clears caches when system needs memory
     private func setupPerformanceOptimizations() {
-        // Listen for battery state changes
+        // Listen for battery state changes to reduce CPU usage on low battery
         BatteryAwareServiceManager.shared.addStateChangeHandler { [weak self] state in
             self?.handleBatteryStateChange(state)
         }
 
-        // Listen for memory optimization notifications
+        // Listen for memory optimization notifications from the system
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleMemoryPressure),
@@ -191,12 +392,32 @@ class MessageStore: ObservableObject {
 
     // MARK: - Start Listening
 
+    /// Starts real-time synchronization for a user's messaging data.
+    ///
+    /// This method sets up Firebase listeners for:
+    /// - Messages (SMS/MMS synced from Android)
+    /// - Message reactions (emoji responses)
+    /// - Read receipts (cross-device read status)
+    /// - Spam messages (filtered messages)
+    /// - Contacts (for name resolution)
+    ///
+    /// - Parameter userId: The Firebase user ID to listen for
+    ///
+    /// ## Listener Lifecycle
+    /// Listeners are automatically cleaned up if switching users. Call `stopListening()`
+    /// when the user logs out or the app is closing.
+    ///
+    /// ## Performance Notes
+    /// - Message processing occurs on background threads
+    /// - Uses hash comparison to skip redundant updates
+    /// - New message detection triggers local notifications
     func startListening(userId: String) {
+        // Skip if already listening for this user
         guard currentUserId != userId else {
             return
         }
 
-        // Remove old listener if exists
+        // Clean up existing listeners for previous user (if any)
         if let handle = messageListenerHandle, let oldUserId = currentUserId {
             firebaseService.removeMessageListener(userId: oldUserId, handle: handle)
         }
@@ -216,12 +437,12 @@ class MessageStore: ObservableObject {
         currentUserId = userId
         isLoading = true
 
-        // Reset pagination state
+        // Reset pagination state for new user
         loadedTimeRangeStart = nil
         canLoadMore = false
 
-        // Load ALL messages (no time filter) - matches web behavior
-        // Previously limited to 180 days which caused conversations to not appear
+        // Start message listener - loads ALL messages (no time filter)
+        // This matches web behavior and ensures all conversations appear
         messageListenerHandle = firebaseService.listenToMessages(userId: userId, startTime: nil) { [weak self] messages in
             guard let self = self else { return }
 
@@ -342,6 +563,15 @@ class MessageStore: ObservableObject {
 
     // MARK: - Stop Listening
 
+    /// Stops all Firebase listeners and resets state.
+    ///
+    /// Call this when:
+    /// - User logs out
+    /// - App is terminating
+    /// - Switching to a different user
+    ///
+    /// Failure to call this method results in memory leaks and unnecessary
+    /// network traffic from orphaned listeners.
     func stopListening() {
         if let handle = messageListenerHandle, let userId = currentUserId {
             firebaseService.removeMessageListener(userId: userId, handle: handle)
@@ -368,6 +598,15 @@ class MessageStore: ObservableObject {
 
     // MARK: - Load More Messages (Pagination)
 
+    /// Loads additional older messages for infinite scroll pagination.
+    ///
+    /// Loads messages from an additional time range (90 days by default)
+    /// before the oldest currently loaded message.
+    ///
+    /// ## State Management
+    /// - Sets `isLoadingMore` to true during load
+    /// - Updates `canLoadMore` based on whether more messages exist
+    /// - Merges with existing messages (deduplicated)
     func loadMoreMessages() {
         guard let userId = currentUserId, !isLoadingMore, canLoadMore,
               let oldestTimestamp = loadedTimeRangeStart else {
@@ -422,31 +661,42 @@ class MessageStore: ObservableObject {
 
     // MARK: - Read Status
 
+    /// Applies read status to messages based on multiple sources.
+    ///
+    /// Read status is determined by checking (in order):
+    /// 1. Sent messages (type == 2) are always read
+    /// 2. Local macOS read tracking (UserDefaults)
+    /// 3. Android read receipts synced via Firebase
+    /// 4. Default to read if read receipts haven't loaded yet
+    ///
+    /// - Parameter messages: Array of messages to update
+    /// - Returns: Messages with updated isRead property
     private func applyReadStatus(to messages: [Message]) -> [Message] {
-        // Batch read all read message IDs once (avoids reading UserDefaults for each message)
+        // Batch read all read message IDs once (O(1) lookups vs O(n) UserDefaults reads)
         let readMessageIds = Set(UserDefaults.standard.stringArray(forKey: "readMessages") ?? [])
         let readReceiptIds = Set(readReceipts.keys)
 
         return messages.map { message in
             var updatedMessage = message
 
-            // Sent messages are always read
+            // Sent messages (type == 2) are always considered read
             if message.type == 2 {
                 updatedMessage.isRead = true
             }
-            // Check local macOS read status first
+            // Check local macOS read status (user marked as read on Mac)
             else if readMessageIds.contains(message.id) {
                 updatedMessage.isRead = true
             }
-            // Check if Android marked it as read (read receipt from Android)
+            // Check if Android marked it as read (read receipt synced from phone)
             else if readReceiptIds.contains(message.id) {
                 updatedMessage.isRead = true
             }
-            // If we haven't received any read receipts yet, assume synced messages are read
+            // If read receipts haven't loaded yet, assume synced messages are read
+            // (prevents flash of unread badges on initial load)
             else if !readReceiptsLoaded {
                 updatedMessage.isRead = true
             }
-            // Otherwise keep as is (default will be true from Message struct)
+            // Default to read (Message struct default)
             else {
                 updatedMessage.isRead = true
             }
@@ -455,10 +705,18 @@ class MessageStore: ObservableObject {
         }
     }
 
+    /// Total count of unread messages across all non-archived conversations.
+    /// Used for dock badge display.
     var totalUnreadCount: Int {
         return conversations.filter { !$0.isArchived }.reduce(0) { $0 + $1.unreadCount }
     }
 
+    /// Marks all messages in a conversation as read.
+    ///
+    /// Updates both local state (UserDefaults) and syncs to Firebase
+    /// so other devices know the messages have been read.
+    ///
+    /// - Parameter conversation: The conversation to mark as read
     func markConversationAsRead(_ conversation: Conversation) {
         // Get all messages for this conversation (using normalized address matching)
         let conversationMessages = messages(for: conversation)
@@ -487,7 +745,25 @@ class MessageStore: ObservableObject {
 
     // MARK: - Update Conversations
 
-    /// Build conversations from messages (thread-safe, can be called from background)
+    /// Builds conversation objects from a flat list of messages.
+    ///
+    /// This is the core algorithm for grouping messages into conversations.
+    /// It runs on background threads to avoid blocking the UI.
+    ///
+    /// ## Algorithm
+    /// 1. Group messages by normalized phone number
+    /// 2. For each group, find the latest message and calculate unread count
+    /// 3. Resolve contact names from contacts list or message metadata
+    /// 4. Apply user preferences (pinned, archived, blocked, avatar color)
+    /// 5. Sort: pinned first, then by timestamp (newest first)
+    ///
+    /// ## Performance Optimizations
+    /// - Bulk reads preferences into Sets for O(1) lookup
+    /// - Pre-reserves array capacity based on estimated conversation count
+    /// - Uses normalized addresses to merge duplicate phone formats
+    ///
+    /// - Parameter messages: Flat array of all messages
+    /// - Returns: Array of Conversation objects ready for display
     private func buildConversations(from messages: [Message]) -> [Conversation] {
         // Batch read ALL preferences in ONE call (thread-safe, no main thread blocking)
         let (pinnedSet, archivedSet, blockedSet, avatarColors) = preferences.getAllPreferenceSets()
@@ -656,6 +932,20 @@ class MessageStore: ObservableObject {
 
     // MARK: - Send Message
 
+    /// Sends an SMS message through the paired Android device.
+    ///
+    /// Implements optimistic UI update:
+    /// 1. Creates a pending message with temporary ID
+    /// 2. Immediately adds to UI for instant feedback
+    /// 3. Sends to Firebase for Android to deliver
+    /// 4. Matches with confirmed message when sync returns
+    /// 5. Removes pending message once confirmed
+    ///
+    /// - Parameters:
+    ///   - userId: The Firebase user ID
+    ///   - address: Recipient phone number
+    ///   - body: Message text content
+    /// - Throws: Error if send fails (rolls back optimistic update)
     func sendMessage(userId: String, to address: String, body: String) async throws {
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return

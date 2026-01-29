@@ -1,8 +1,58 @@
 /**
- * SyncFlow Firebase Cloud Functions
+ * =============================================================================
+ * SYNCFLOW FIREBASE CLOUD FUNCTIONS
+ * =============================================================================
  *
- * Handles sending FCM push notifications for incoming calls
- * when the app is in the background or closed.
+ * This file contains all serverless Cloud Functions for the SyncFlow application.
+ * SyncFlow enables SMS/MMS message synchronization between Android phones and
+ * Mac/Web clients, along with device-to-device calling capabilities.
+ *
+ * ARCHITECTURE OVERVIEW:
+ * ----------------------
+ * 1. AUTHENTICATION & PAIRING: QR code-based device pairing with custom tokens
+ * 2. DATA SYNCHRONIZATION: Message, contact, and call history sync via Cloud Functions
+ * 3. PUSH NOTIFICATIONS: FCM-based notifications for calls and outgoing messages
+ * 4. FILE STORAGE: Cloudflare R2 integration for MMS attachments and file transfers
+ * 5. SUBSCRIPTION MANAGEMENT: Plan tracking and device limits
+ * 6. ADMIN FUNCTIONS: User management, cleanup, and analytics
+ * 7. AI SUPPORT CHAT: User self-service for account queries
+ * 8. ACCOUNT LIFECYCLE: Soft deletion with 30-day grace period
+ *
+ * DATABASE STRUCTURE (Firebase Realtime Database):
+ * ------------------------------------------------
+ * /users/{userId}/
+ *   - devices/          : Paired devices
+ *   - messages/         : Synced SMS/MMS messages
+ *   - contacts/         : Synced contacts
+ *   - call_history/     : Call logs
+ *   - usage/            : Storage and sync statistics
+ *   - settings/         : User preferences
+ *   - spam_messages/    : Detected spam
+ *   - recovery_info/    : Account recovery code
+ *
+ * /pending_pairings/    : V1 pairing sessions
+ * /pairing_requests/    : V2 pairing sessions
+ * /fcm_tokens/          : Device push notification tokens
+ * /subscription_records/: Subscription history (survives user deletion)
+ * /scheduled_deletions/ : Accounts pending deletion
+ * /deleted_accounts/    : Record of deleted accounts
+ *
+ * SECURITY MODEL:
+ * ---------------
+ * - All user data is scoped to authenticated user IDs
+ * - Admin functions require admin custom claims
+ * - Device pairing creates custom auth tokens with pairedUid claims
+ * - R2 file access is validated against user ID in path
+ *
+ * ENVIRONMENT CONFIGURATION:
+ * --------------------------
+ * Required Firebase config (set via firebase functions:config:set):
+ * - r2.account_id, r2.access_key, r2.secret_key, r2.bucket : Cloudflare R2 credentials
+ * - resend.api_key : Resend email service API key
+ * - syncflow.admin_username, syncflow.admin_password_hash : Admin credentials
+ *
+ * @version 2.0.0
+ * @author SyncFlow Team
  */
 
 const functions = require("firebase-functions");
@@ -11,22 +61,55 @@ const { Resend } = require("resend");
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
+// Initialize Firebase Admin SDK - must be called before using any admin services
 admin.initializeApp();
 const crypto = require("crypto");
 
+// =============================================================================
+// GLOBAL CONSTANTS
+// =============================================================================
+
+/** Time-to-live for V1 pairing sessions (5 minutes) */
 const PAIRING_TTL_MS = 5 * 60 * 1000;
+
+/** Admin notification email address for alerts and reports */
 const ADMIN_EMAIL = "syncflow.contact@gmail.com";
 
-// ============================================================================
+// =============================================================================
 // CLOUDFLARE R2 CONFIGURATION
-// ============================================================================
-// R2 credentials are stored in Firebase environment config
-// Set them with: firebase functions:config:set r2.account_id="xxx" r2.access_key="xxx" r2.secret_key="xxx" r2.bucket="xxx"
+// =============================================================================
+//
+// Cloudflare R2 is used for storing MMS attachments, file transfers, and photos.
+// It provides S3-compatible storage with no egress fees.
+//
+// SETUP INSTRUCTIONS:
+// 1. Create an R2 bucket in Cloudflare dashboard
+// 2. Generate R2 API tokens with read/write permissions
+// 3. Set credentials via Firebase config:
+//    firebase functions:config:set r2.account_id="xxx" r2.access_key="xxx" r2.secret_key="xxx" r2.bucket="xxx"
+//
+// FILE KEY STRUCTURE:
+// - files/{userId}/{fileId}/{fileName}  : General file transfers
+// - mms/{userId}/{messageId}/{fileId}   : MMS attachments
+// - photos/{userId}/{fileId}            : Photo sync
+// =============================================================================
 
+/**
+ * Creates and returns a configured S3Client for Cloudflare R2 access.
+ *
+ * @returns {S3Client|null} Configured S3 client or null if credentials missing
+ *
+ * @example
+ * const client = getR2Client();
+ * if (client) {
+ *   await client.send(new PutObjectCommand({...}));
+ * }
+ */
 const getR2Client = () => {
     const config = typeof functions.config === "function" ? functions.config() : {};
     const r2Config = config?.r2 || {};
 
+    // Support both Firebase config and environment variables (for local testing)
     const accountId = r2Config.account_id || process.env.R2_ACCOUNT_ID;
     const accessKey = r2Config.access_key || process.env.R2_ACCESS_KEY;
     const secretKey = r2Config.secret_key || process.env.R2_SECRET_KEY;
@@ -37,7 +120,7 @@ const getR2Client = () => {
     }
 
     return new S3Client({
-        region: "auto",
+        region: "auto", // R2 uses "auto" region
         endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
         credentials: {
             accessKeyId: accessKey,
@@ -46,20 +129,57 @@ const getR2Client = () => {
     });
 };
 
+/**
+ * Returns the configured R2 bucket name.
+ *
+ * @returns {string} R2 bucket name, defaults to "syncflow-files"
+ */
 const getR2Bucket = () => {
     const config = typeof functions.config === "function" ? functions.config() : {};
     return config?.r2?.bucket || process.env.R2_BUCKET || "syncflow-files";
 };
 
-// Initialize Resend for email notifications
+// =============================================================================
+// EMAIL NOTIFICATION SERVICE (RESEND)
+// =============================================================================
+
+/**
+ * Creates and returns a configured Resend client for sending admin emails.
+ * Used for cleanup reports, security alerts, and deletion notifications.
+ *
+ * Setup: firebase functions:config:set resend.api_key="re_xxxx"
+ *
+ * @returns {Resend|null} Configured Resend client or null if API key missing
+ */
 const getResend = () => {
     const config = typeof functions.config === "function" ? functions.config() : {};
     const apiKey = config?.resend?.api_key || process.env.RESEND_API_KEY;
     return apiKey ? new Resend(apiKey) : null;
 };
 
+// =============================================================================
+// ADMIN EMAIL NOTIFICATION FUNCTIONS
+// =============================================================================
+
 /**
- * Send cleanup report email
+ * Sends a cleanup report email to the admin after scheduled or manual cleanup.
+ *
+ * @param {Object} stats - Cleanup statistics object
+ * @param {number} stats.usersProcessed - Number of users processed
+ * @param {number} stats.outgoingMessages - Stale outgoing messages cleaned
+ * @param {number} stats.callRequests - Old call requests cleaned
+ * @param {number} stats.spamMessages - Old spam messages cleaned
+ * @param {number} stats.readReceipts - Old read receipts cleaned
+ * @param {number} stats.inactiveDevices - Inactive devices cleaned
+ * @param {number} stats.oldNotifications - Old notifications cleaned
+ * @param {number} stats.staleTypingIndicators - Stale typing indicators cleaned
+ * @param {number} stats.expiredSessions - Expired sessions cleaned
+ * @param {number} stats.oldFileTransfers - Old file transfers cleaned
+ * @param {number} stats.abandonedPairings - Abandoned pairings cleaned
+ * @param {string} [type="AUTO"] - Cleanup type ("AUTO" for scheduled, "MANUAL" for triggered)
+ * @returns {Promise<boolean>} True if email sent successfully, false otherwise
+ *
+ * @side-effects Sends email via Resend API
  */
 const sendCleanupReportEmail = async (stats, type = "AUTO") => {
     const resend = getResend();
@@ -119,6 +239,24 @@ Automated Maintenance Report
     }
 };
 
+// =============================================================================
+// AUTHENTICATION HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * Validates that the request is from an authenticated user.
+ * Throws an HttpsError if not authenticated.
+ *
+ * @param {functions.https.CallableContext} context - Firebase callable function context
+ * @returns {string} The authenticated user's UID
+ * @throws {functions.https.HttpsError} If user is not authenticated
+ *
+ * @example
+ * exports.myFunction = functions.https.onCall(async (data, context) => {
+ *   const userId = requireAuth(context);
+ *   // userId is now guaranteed to be valid
+ * });
+ */
 const requireAuth = (context) => {
     if (!context.auth) {
         throw new functions.https.HttpsError("unauthenticated", "Authentication required");
@@ -127,7 +265,17 @@ const requireAuth = (context) => {
 };
 
 /**
- * Send notification email for account/data deletion requests
+ * Sends notification email to admin for account/data deletion or export requests.
+ * Includes user tier information in subject line for prioritization.
+ *
+ * @param {string} userId - The user's Firebase UID
+ * @param {string} requestType - Type of request: "account_deletion_inquiry" | "data_export_request"
+ * @param {string|null} [requestId=null] - Optional request ID for data exports
+ * @returns {Promise<boolean>} True if email sent successfully, false otherwise
+ *
+ * @side-effects
+ * - Reads user data from Firebase (usage, devices, subscription)
+ * - Sends email via Resend API
  */
 const sendDeletionNotificationEmail = async (userId, requestType, requestId = null) => {
     const resend = getResend();
@@ -261,7 +409,16 @@ Automated Notification
 };
 
 /**
- * Send security alert email (sign out all devices, etc.)
+ * Sends security alert email to admin when user performs security actions.
+ * Used for tracking potentially suspicious or protective account activity.
+ *
+ * @param {string} userId - The user's Firebase UID
+ * @param {string} alertType - Type of alert: "signout_all_devices" | other security actions
+ * @returns {Promise<boolean>} True if email sent successfully, false otherwise
+ *
+ * @side-effects
+ * - Reads user data from Firebase
+ * - Sends email via Resend API
  */
 const sendSecurityAlertEmail = async (userId, alertType) => {
     const resend = getResend();
@@ -337,7 +494,16 @@ Security Alert
 };
 
 /**
- * Send churn alert email (cancel subscription inquiry)
+ * Sends churn alert email to admin when user inquires about cancellation.
+ * Enables proactive retention efforts for at-risk subscribers.
+ *
+ * @param {string} userId - The user's Firebase UID
+ * @param {string} alertType - Type of churn indicator (e.g., "cancel_subscription_inquiry")
+ * @returns {Promise<boolean>} True if email sent successfully, false otherwise
+ *
+ * @side-effects
+ * - Reads user and subscription data from Firebase
+ * - Sends email via Resend API
  */
 const sendChurnAlertEmail = async (userId, alertType) => {
     const resend = getResend();
@@ -422,7 +588,16 @@ Churn Prevention Alert
 };
 
 /**
- * Send service health email (sync reset, etc.)
+ * Sends service health email to admin when users perform troubleshooting actions.
+ * Helps identify widespread sync issues or problematic patterns.
+ *
+ * @param {string} userId - The user's Firebase UID
+ * @param {string} alertType - Type of action: "sync_reset" | other service actions
+ * @returns {Promise<boolean>} True if email sent successfully, false otherwise
+ *
+ * @side-effects
+ * - Reads user data and sync errors from Firebase
+ * - Sends email via Resend API
  */
 const sendServiceHealthEmail = async (userId, alertType) => {
     const resend = getResend();
@@ -522,8 +697,16 @@ Service Health Monitor
     }
 };
 
+// =============================================================================
+// USER DATA HELPER FUNCTIONS
+// =============================================================================
+
 /**
- * Helper to get user info for email notifications
+ * Retrieves formatted user information for inclusion in admin email notifications.
+ * Includes user ID, plan, device count, device names, and storage usage.
+ *
+ * @param {string|null} userId - The user's Firebase UID
+ * @returns {Promise<string>} Formatted user info string for email body
  */
 const getUserInfoForEmail = async (userId) => {
     if (!userId) return "User ID: Unknown (not authenticated)";
@@ -565,8 +748,11 @@ ${deviceList}• Storage Used: ${storageMB} MB
 };
 
 /**
- * Get user tier for email subject line
- * Returns formatted tier string like [FREE], [MONTHLY], [YEARLY], [3-YEARLY]
+ * Gets user subscription tier formatted for email subject lines.
+ * Used to prioritize admin attention on paying customer issues.
+ *
+ * @param {string|null} userId - The user's Firebase UID
+ * @returns {Promise<string>} Formatted tier tag like "[FREE]", "[MONTHLY]", "[YEARLY]", "[3-YEARLY]"
  */
 const getUserTierForSubject = async (userId) => {
     if (!userId) return "[UNKNOWN]";
@@ -597,8 +783,22 @@ const getUserTierForSubject = async (userId) => {
 };
 
 /**
- * Get identifying information for account recovery
- * Gathers device names, phone numbers from calls/contacts, etc.
+ * Gathers identifying information for account recovery assistance.
+ * Collects device names, phone numbers from contacts/call history,
+ * and account statistics to help admin identify users who lost access.
+ *
+ * @param {string|null} userId - The user's Firebase UID
+ * @returns {Promise<Object|null>} Object containing identifying info or null if userId invalid
+ * @returns {string} .userId - The user ID
+ * @returns {Array<{name: string, platform: string, lastActive: number}>} .deviceNames - List of device names
+ * @returns {Array<string>} .phoneNumbers - List of phone numbers (max 20)
+ * @returns {number} .deviceCount - Total device count
+ * @returns {number} .contactCount - Total contact count
+ * @returns {number} .messageCount - Total messages synced
+ * @returns {number} .storageBytes - Storage used in bytes
+ * @returns {string} .plan - Current subscription plan
+ * @returns {number|null} .accountCreatedAt - Account creation timestamp
+ * @returns {number|null} .lastSyncAt - Last sync timestamp
  */
 const getUserIdentifyingInfo = async (userId) => {
     if (!userId) return null;
@@ -673,6 +873,16 @@ const getUserIdentifyingInfo = async (userId) => {
     }
 };
 
+/**
+ * Validates that the request is from an authenticated admin user.
+ * Admin status is determined by the "admin: true" custom claim.
+ *
+ * @param {functions.https.CallableContext} context - Firebase callable function context
+ * @returns {string} The authenticated admin's UID
+ * @throws {functions.https.HttpsError} If user is not authenticated or not an admin
+ *
+ * @security Admin claims should only be set via secure backend processes
+ */
 const requireAdmin = (context) => {
     if (!context.auth) {
         throw new functions.https.HttpsError("unauthenticated", "Authentication required");
@@ -683,10 +893,25 @@ const requireAdmin = (context) => {
     return context.auth.uid;
 };
 
+// =============================================================================
+// SUBSCRIPTION MANAGEMENT HELPERS
+// =============================================================================
+
 /**
- * Helper function to update subscription records
- * This creates a persistent record that survives user deletion
- * Tracks both active subscription and full history
+ * Updates the subscription record for a user in a persistent location.
+ * Subscription records are stored at /subscription_records/{userId}/ and
+ * survive user data deletion for analytics and potential account recovery.
+ *
+ * @param {string} userId - The user's Firebase UID
+ * @param {string} plan - Plan name: "free" | "monthly" | "yearly" | "3-yearly"
+ * @param {number|null} expiresAt - Timestamp when plan expires, null for non-expiring
+ * @param {string} [source="system"] - Source of the update (e.g., "system", "admin", "purchase")
+ * @returns {Promise<void>}
+ *
+ * @side-effects
+ * - Writes to /subscription_records/{userId}/active
+ * - Appends to /subscription_records/{userId}/history/{timestamp}
+ * - Sets wasPremium and firstPremiumDate flags for premium plans
  */
 const updateSubscriptionRecord = async (userId, plan, expiresAt, source = "system") => {
     const now = Date.now();
@@ -729,6 +954,31 @@ const updateSubscriptionRecord = async (userId, plan, expiresAt, source = "syste
     await recordRef.update(updates);
 };
 
+// =============================================================================
+// ADMIN AUTHENTICATION
+// =============================================================================
+
+/**
+ * Authenticates an admin user with username/password credentials.
+ * Returns a custom Firebase token with admin claims for accessing admin functions.
+ *
+ * @function adminLogin
+ * @param {Object} data - Request data
+ * @param {string} data.username - Admin username
+ * @param {string} data.password - Admin password (compared against SHA-256 hash)
+ * @returns {Promise<{customToken: string, uid: string}>} Firebase custom token and admin UID
+ * @throws {functions.https.HttpsError} If credentials invalid or not configured
+ *
+ * @security
+ * - Password is hashed with SHA-256 and compared using timing-safe comparison
+ * - Credentials are stored in Firebase config, not in code
+ * - Custom token includes admin: true claim
+ *
+ * @example
+ * // Client-side usage:
+ * const result = await functions.httpsCallable('adminLogin')({ username, password });
+ * await firebase.auth().signInWithCustomToken(result.data.customToken);
+ */
 exports.adminLogin = functions.https.onCall(async (data) => {
     try {
         const username = data && data.username ? String(data.username) : "";
@@ -769,12 +1019,35 @@ exports.adminLogin = functions.https.onCall(async (data) => {
     }
 });
 
+// =============================================================================
+// DEVICE PAIRING V1 - Legacy Pairing System
+// =============================================================================
+//
+// V1 Pairing Flow:
+// 1. Mac/Web calls initiatePairing() -> gets token + QR payload
+// 2. User scans QR with Android app
+// 3. Android calls completePairing() with approval
+// 4. Mac/Web receives custom auth token to authenticate
+//
+// Data stored at: /pending_pairings/{token}
+// =============================================================================
+
 /**
- * Initiates a pairing request from Web/macOS.
- * Creates a pending pairing session that Android can approve.
+ * Initiates a V1 pairing request from Web/macOS.
+ * Creates a pending pairing session that the Android app can approve.
  *
- * Called by: Web/macOS apps
- * Returns: { token, qrPayload, expiresAt }
+ * @function initiatePairing
+ * @param {Object} data - Request data
+ * @param {string} [data.deviceName="Desktop"] - Human-readable device name
+ * @param {string} [data.platform="web"] - Device platform (web, macos)
+ * @param {string} [data.appVersion="1.0.0"] - Client app version
+ * @param {string|null} [data.existingDeviceId] - Existing device ID for re-pairing
+ * @param {string|null} [data.syncGroupId] - Sync group to join
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{token: string, qrPayload: string, expiresAt: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated or internal error
+ *
+ * @side-effects Writes pairing session to /pending_pairings/{token}
  */
 exports.initiatePairing = functions.https.onCall(async (data, context) => {
     try {
@@ -829,11 +1102,23 @@ exports.initiatePairing = functions.https.onCall(async (data, context) => {
  * Completes a pairing request after Android user approval.
  * Creates the device entry and generates a custom auth token for Web/macOS.
  *
- * Called by: Android app after scanning QR and user confirms
- * Returns: { success: true } or throws error
+ * This function supports both V1 (pending_pairings) and V2 (pairing_requests) paths
+ * for backwards compatibility during the transition period.
  *
- * Note: This function checks BOTH V1 (pending_pairings) and V2 (pairing_requests) paths
- * to handle cases where Mac initiated with V2 but Android fallback to V1.
+ * @function completePairing
+ * @param {Object} data - Request data
+ * @param {string} data.token - Pairing token from QR code
+ * @param {boolean} [data.approved=true] - Whether user approved the pairing
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, status: string, deviceId?: string, customToken?: string, userId?: string}>}
+ * @throws {functions.https.HttpsError} If token invalid, expired, or already processed
+ *
+ * @side-effects
+ * - Updates pairing status in /pending_pairings or /pairing_requests
+ * - Creates device entry at /users/{uid}/devices/{deviceId}
+ * - Generates Firebase custom auth token with pairedUid claim
+ *
+ * @security The custom token allows Mac/Web to access the paired user's data
  */
 exports.completePairing = functions.https.onCall(async (data, context) => {
     try {
@@ -944,8 +1229,23 @@ exports.completePairing = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// SCHEDULED DEVICE CLEANUP
+// =============================================================================
+
 /**
- * Cleanup old/unused device entries (runs daily)
+ * Scheduled function to cleanup old/unused device entries.
+ * Runs daily and removes duplicate devices per platform that haven't been
+ * seen in 30 days, keeping the most recently active device for each platform.
+ *
+ * @function cleanupOldDevices
+ * @schedule Every 24 hours
+ * @returns {Promise<void>}
+ *
+ * @side-effects Deletes stale device entries from /users/{userId}/devices/
+ *
+ * @note Only removes devices when there are duplicates per platform;
+ *       a single device per platform is never removed regardless of age.
  */
 exports.cleanupOldDevices = functions.pubsub.schedule('every 24 hours').onRun(async () => {
     try {
@@ -997,8 +1297,24 @@ exports.cleanupOldDevices = functions.pubsub.schedule('every 24 hours').onRun(as
     }
 });
 
+// =============================================================================
+// DEVICE MANAGEMENT FUNCTIONS
+// =============================================================================
+
 /**
- * Unregister a device (called when device unpairs itself)
+ * Unregisters a device from the user's account.
+ * Called when a device unpairs itself or user removes it remotely.
+ *
+ * @function unregisterDevice
+ * @param {Object} data - Request data
+ * @param {string} data.deviceId - Device ID to unregister
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, deviceId: string, message?: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated or device ID missing
+ *
+ * @side-effects
+ * - Removes device from /users/{userId}/devices/{deviceId}
+ * - Cleans up device-specific data (cache, temp, sessions)
  */
 exports.unregisterDevice = functions.https.onCall(async (data, context) => {
     try {
@@ -1041,9 +1357,34 @@ exports.unregisterDevice = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// DATA SYNCHRONIZATION FUNCTIONS
+// =============================================================================
+//
+// These functions allow Android to sync data via HTTP calls instead of
+// Firebase Realtime Database listeners, which can cause OOM (Out of Memory)
+// issues on Android due to WebSocket memory consumption with large datasets.
+// =============================================================================
+
 /**
- * Sync call history from Android to Firebase
- * Used to avoid OOM from Firebase WebSocket sync on Android
+ * Syncs call history from Android to Firebase via HTTP.
+ * Avoids OOM issues from Firebase WebSocket sync on Android devices.
+ *
+ * @function syncCallHistory
+ * @param {Object} data - Request data
+ * @param {string} [data.userId] - User ID (defaults to authenticated user)
+ * @param {Array<Object>} data.callLogs - Array of call log objects
+ * @param {string} data.callLogs[].id - Call log ID
+ * @param {string} data.callLogs[].phoneNumber - Phone number
+ * @param {string} [data.callLogs[].contactName] - Contact name
+ * @param {string} data.callLogs[].callType - Call type (Incoming/Outgoing/Missed)
+ * @param {number} data.callLogs[].callDate - Call timestamp
+ * @param {number} data.callLogs[].duration - Call duration in seconds
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, count: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated or invalid data
+ *
+ * @side-effects Writes call logs to /users/{userId}/call_history/
  */
 exports.syncCallHistory = functions.https.onCall(async (data, context) => {
     try {
@@ -1095,8 +1436,23 @@ exports.syncCallHistory = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Sync contacts from Android to Firebase
- * Used to avoid OOM from Firebase WebSocket sync on Android
+ * Syncs contacts from Android to Firebase via HTTP.
+ * Avoids OOM issues from Firebase WebSocket sync on Android devices.
+ *
+ * @function syncContacts
+ * @param {Object} data - Request data
+ * @param {string} [data.userId] - User ID (defaults to authenticated user)
+ * @param {Array<Object>} data.contacts - Array of contact objects
+ * @param {string} data.contacts[].id - Contact ID
+ * @param {string} data.contacts[].displayName - Display name
+ * @param {Object} [data.contacts[].phoneNumbers] - Phone numbers map
+ * @param {string} [data.contacts[].photo] - Photo URL
+ * @param {string} [data.contacts[].email] - Email address
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, count: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated or invalid data
+ *
+ * @side-effects Writes contacts to /users/{userId}/contacts/
  */
 exports.syncContacts = functions.https.onCall(async (data, context) => {
     try {
@@ -1144,9 +1500,27 @@ exports.syncContacts = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// ACCOUNT RECOVERY FUNCTION
+// =============================================================================
+
 /**
- * Recover account using recovery code
- * This is fast because it uses Cloud Functions instead of direct Firebase access
+ * Recovers a user account using their recovery code.
+ * Returns the user ID associated with the recovery code for re-authentication.
+ *
+ * @function recoverAccount
+ * @param {Object} data - Request data
+ * @param {string} data.codeHash - SHA-256 hash of the recovery code
+ * @param {functions.https.CallableContext} context - Firebase context (no auth required)
+ * @returns {Promise<{success: boolean, userId: string}>}
+ * @throws {functions.https.HttpsError} If code invalid, corrupted, or account pending deletion
+ *
+ * @side-effects Updates lastUsedAt timestamp on recovery code record
+ *
+ * @security
+ * - Recovery codes are stored as hashes, not plaintext
+ * - Accounts scheduled for deletion cannot be recovered via this method
+ * - Hash comparison prevents timing attacks
  */
 exports.recoverAccount = functions.https.onCall(async (data, context) => {
     try {
@@ -1205,7 +1579,21 @@ exports.recoverAccount = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Get user usage data (fast via Cloud Function)
+ * Retrieves user usage data including plan, storage, and monthly statistics.
+ * Faster than direct Firebase access, especially for Mac/Web clients.
+ *
+ * @function getUserUsage
+ * @param {Object} data - Request data
+ * @param {string} [data.userId] - User ID (defaults to authenticated user)
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, usage: Object}>}
+ * @returns {string|null} usage.plan - Current subscription plan
+ * @returns {number|null} usage.planExpiresAt - Plan expiration timestamp
+ * @returns {number|null} usage.trialStartedAt - Trial start timestamp
+ * @returns {number} usage.storageBytes - Storage used in bytes
+ * @returns {number|null} usage.lastUpdatedAt - Last update timestamp
+ * @returns {Object} usage.monthly - Monthly usage statistics
+ * @throws {functions.https.HttpsError} If user ID not provided
  */
 exports.getUserUsage = functions.https.onCall(async (data, context) => {
     try {
@@ -1247,10 +1635,27 @@ exports.getUserUsage = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// STORAGE MANAGEMENT FUNCTIONS
+// =============================================================================
+
 /**
- * Clear MMS media data from Firebase Storage
- * This frees up storage quota by deleting synced MMS attachments
- * Note: This does NOT delete the message text, only the media files
+ * Clears MMS media data from Firebase Storage and Cloudflare R2.
+ * Frees up storage quota by deleting synced MMS attachments and file transfers.
+ * Message text is preserved; only media files are deleted.
+ *
+ * @function clearMmsData
+ * @param {Object} data - Request data
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, deletedFiles: number, freedBytes: number, message: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated
+ *
+ * @side-effects
+ * - Deletes files from Firebase Storage: users/{userId}/attachments/, users/{userId}/transfers/
+ * - Deletes files from R2: files/{userId}/, mms/{userId}/
+ * - Resets storageBytes counter in /users/{userId}/usage
+ * - Resets monthly mmsBytes and fileBytes counters
  */
 exports.clearMmsData = functions.https.onCall(async (data, context) => {
     try {
@@ -1442,13 +1847,44 @@ exports.clearMmsData = functions.https.onCall(async (data, context) => {
     }
 });
 
-// ============================================================================
+// =============================================================================
 // CLOUDFLARE R2 FILE TRANSFER FUNCTIONS
-// ============================================================================
+// =============================================================================
+//
+// These functions provide presigned URL generation for direct client-to-R2
+// file transfers, bypassing Firebase and reducing function execution costs.
+//
+// UPLOAD FLOW:
+// 1. Client calls getR2UploadUrl() with file metadata
+// 2. Function validates limits and returns presigned PUT URL
+// 3. Client uploads directly to R2 using presigned URL
+// 4. Client calls confirmR2Upload() to record usage
+//
+// DOWNLOAD FLOW:
+// 1. Client calls getR2DownloadUrl() with fileKey
+// 2. Function validates ownership and returns presigned GET URL
+// 3. Client downloads directly from R2
+// =============================================================================
 
 /**
- * Generate a presigned URL for uploading a file to R2
- * This allows clients to upload directly to R2 without going through Firebase
+ * Generates a presigned URL for uploading a file directly to Cloudflare R2.
+ * Validates file size limits based on user's subscription plan.
+ *
+ * @function getR2UploadUrl
+ * @param {Object} data - Request data
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {string} data.fileName - Original file name
+ * @param {string} data.contentType - MIME type
+ * @param {number} data.fileSize - File size in bytes
+ * @param {string} [data.transferType] - Type: "files" | "mms" | "photos"
+ * @param {string} [data.messageId] - Message ID for MMS attachments
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, uploadUrl: string, fileKey: string, fileId: string, expiresIn: number}>}
+ * @throws {functions.https.HttpsError} If limits exceeded or R2 not configured
+ *
+ * @limits
+ * - Free plan: 50MB per file, 100MB total storage
+ * - Pro plan: 500MB per file, 2GB total storage
  */
 exports.getR2UploadUrl = functions.https.onCall(async (data, context) => {
     try {
@@ -1557,7 +1993,24 @@ exports.getR2UploadUrl = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Confirm R2 upload completed and record usage
+ * Confirms an R2 upload completed and records usage statistics.
+ * Called by client after successful direct upload to R2.
+ *
+ * @function confirmR2Upload
+ * @param {Object} data - Request data
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {string} data.fileKey - R2 file key returned from getR2UploadUrl
+ * @param {number} data.fileSize - File size in bytes
+ * @param {string} [data.transferType] - Type: "files" | "mms" | "photos"
+ * @param {Object} [data.photoMetadata] - Metadata for photo uploads
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean}>}
+ * @throws {functions.https.HttpsError} If not authenticated or missing data
+ *
+ * @side-effects
+ * - Increments monthly upload/mms/photo/file bytes counters
+ * - Increments total storageBytes counter
+ * - For photos, creates entry in /users/{userId}/photos/
  */
 exports.confirmR2Upload = functions.https.onCall(async (data, context) => {
     try {
@@ -1626,7 +2079,18 @@ exports.confirmR2Upload = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Generate a presigned URL for downloading a file from R2
+ * Generates a presigned URL for downloading a file from Cloudflare R2.
+ * Validates that the requesting user owns the file.
+ *
+ * @function getR2DownloadUrl
+ * @param {Object} data - Request data
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {string} data.fileKey - R2 file key to download
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, downloadUrl: string, expiresIn: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated, unauthorized, or R2 not configured
+ *
+ * @security Validates that fileKey contains the user's ID to prevent unauthorized access
  */
 exports.getR2DownloadUrl = functions.https.onCall(async (data, context) => {
     try {
@@ -1677,7 +2141,21 @@ exports.getR2DownloadUrl = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Delete a file from R2 and update usage
+ * Deletes a file from Cloudflare R2 and updates usage counters.
+ * Validates that the requesting user owns the file.
+ *
+ * @function deleteR2File
+ * @param {Object} data - Request data
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {string} data.fileKey - R2 file key to delete
+ * @param {number} [data.fileSize] - File size for usage counter update
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean}>}
+ * @throws {functions.https.HttpsError} If not authenticated, unauthorized, or R2 not configured
+ *
+ * @side-effects
+ * - Deletes file from R2
+ * - Decrements storageBytes counter if fileSize provided
  */
 exports.deleteR2File = functions.https.onCall(async (data, context) => {
     try {
@@ -1735,7 +2213,19 @@ exports.deleteR2File = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Clear all R2 files for a user (called from clearMmsData)
+ * Clears all R2 files for a user across all prefixes (files, mms, photos).
+ * Typically called as part of account deletion or storage reset.
+ *
+ * @function clearR2Files
+ * @param {Object} data - Request data
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, deletedFiles: number, freedBytes: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated
+ *
+ * @side-effects
+ * - Deletes all files from R2 with prefixes: files/{userId}/, mms/{userId}/, photos/{userId}/
+ * - Resets storageBytes counter to 0
  */
 exports.clearR2Files = functions.https.onCall(async (data, context) => {
     try {
@@ -1872,9 +2362,28 @@ exports.clearR2Files = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// R2 ADMIN FUNCTIONS
+// =============================================================================
+
 /**
- * Get R2 storage analytics (admin function)
- * Lists all files and calculates storage statistics
+ * Retrieves R2 storage analytics including file counts, sizes, and per-user breakdown.
+ * Admin-only function for monitoring storage usage and costs.
+ *
+ * @function getR2Analytics
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<Object>} Analytics object
+ * @returns {boolean} .success
+ * @returns {number} .totalFiles - Total file count
+ * @returns {number} .totalSize - Total size in bytes
+ * @returns {Object} .fileCounts - Counts by type (files, mms, photos)
+ * @returns {Object} .sizeCounts - Sizes by type
+ * @returns {Array} .largestFiles - Top 10 largest files
+ * @returns {Array} .oldestFiles - Top 10 oldest files
+ * @returns {number} .estimatedCost - Estimated monthly R2 cost
+ * @returns {Array} .userStorage - Top 20 users by storage
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.getR2Analytics = functions.https.onCall(async (data, context) => {
     requireAdmin(context);
@@ -1994,8 +2503,20 @@ exports.getR2Analytics = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Cleanup old R2 files (admin function)
- * Deletes files older than specified days threshold
+ * Cleans up old R2 files based on age threshold.
+ * Admin-only function for storage maintenance.
+ *
+ * @function cleanupOldR2Files
+ * @param {Object} data - Request data
+ * @param {number} [data.daysThreshold=90] - Delete files older than this many days
+ * @param {string} [data.fileType] - Optional filter: "files" | "mms" | "photos"
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, deletedFiles: number, freedBytes: number, daysThreshold: number, usersAffected: number}>}
+ * @throws {functions.https.HttpsError} If not admin
+ *
+ * @side-effects
+ * - Deletes matching files from R2
+ * - Updates storageBytes counters for affected users
  */
 exports.cleanupOldR2Files = functions.https.onCall(async (data, context) => {
     requireAdmin(context);
@@ -2084,7 +2605,16 @@ exports.cleanupOldR2Files = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Get paginated R2 file list (admin function)
+ * Retrieves a paginated list of R2 files for admin browsing.
+ *
+ * @function getR2FileList
+ * @param {Object} data - Request data
+ * @param {string} [data.fileType] - Optional filter: "files" | "mms" | "photos"
+ * @param {number} [data.limit=100] - Max files to return (max 1000)
+ * @param {string} [data.continuationToken] - Token for pagination
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, files: Array, nextToken: string|null, hasMore: boolean}>}
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.getR2FileList = functions.https.onCall(async (data, context) => {
     requireAdmin(context);
@@ -2138,8 +2668,15 @@ exports.getR2FileList = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Helper to extract userId from R2 file key
- * Keys follow pattern: {type}/{userId}/...
+ * Extracts user ID from an R2 file key.
+ * R2 keys follow the pattern: {type}/{userId}/...
+ *
+ * @param {string} fileKey - R2 file key
+ * @returns {string|null} User ID or null if not found
+ *
+ * @example
+ * extractUserIdFromR2Key("files/abc123/file.txt") // returns "abc123"
+ * extractUserIdFromR2Key("mms/xyz789/msg1/image.jpg") // returns "xyz789"
  */
 function extractUserIdFromR2Key(fileKey) {
     const parts = fileKey.split('/');
@@ -2150,7 +2687,18 @@ function extractUserIdFromR2Key(fileKey) {
 }
 
 /**
- * Delete a specific R2 file by key (admin function)
+ * Deletes a specific R2 file by key. Admin-only function for file management.
+ *
+ * @function deleteR2FileAdmin
+ * @param {Object} data - Request data
+ * @param {string} data.fileKey - R2 file key to delete
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, deletedKey: string, freedBytes: number}>}
+ * @throws {functions.https.HttpsError} If not admin, missing fileKey, or R2 not configured
+ *
+ * @side-effects
+ * - Deletes file from R2
+ * - Updates affected user's storageBytes counter
  */
 exports.deleteR2FileAdmin = functions.https.onCall(async (data, context) => {
     requireAdmin(context);
@@ -2215,8 +2763,17 @@ exports.deleteR2FileAdmin = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Recalculate user's storage based on actual R2 files
- * Admin function to fix storage counter mismatches
+ * Recalculates a user's storage counter based on actual R2 files.
+ * Admin function to fix storage counter mismatches after bugs or failed operations.
+ *
+ * @function recalculateUserStorage
+ * @param {Object} data - Request data
+ * @param {string} data.userId - User ID to recalculate
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, userId: string, fileCount: number, actualBytes: number, previousBytes: number, difference: number}>}
+ * @throws {functions.https.HttpsError} If not admin or R2 not configured
+ *
+ * @side-effects Updates storageBytes in /users/{userId}/usage to actual value
  */
 exports.recalculateUserStorage = functions.https.onCall(async (data, context) => {
     try {
@@ -2301,7 +2858,14 @@ exports.recalculateUserStorage = functions.https.onCall(async (data, context) =>
 });
 
 /**
- * Get user's paired devices (fast via Cloud Function)
+ * Retrieves user's paired devices. Faster than direct Firebase access for Mac/Web.
+ *
+ * @function getDevices
+ * @param {Object} data - Request data
+ * @param {string} [data.userId] - User ID (defaults to authenticated user)
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, devices: Object}>}
+ * @throws {functions.https.HttpsError} If user ID not available
  */
 exports.getDevices = functions.https.onCall(async (data, context) => {
     try {
@@ -2335,7 +2899,15 @@ exports.getDevices = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Manual cleanup of old devices (callable function)
+ * Manually triggers device cleanup across all users.
+ * Admin-only function for on-demand maintenance.
+ *
+ * @function cleanupOldDevicesManual
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, cleaned: number, totalDevices: number, message: string}>}
+ *
+ * @side-effects Removes stale device entries older than 7 days with duplicates per platform
  */
 exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) => {
     requireAdmin(context);
@@ -2408,9 +2980,19 @@ exports.cleanupOldDevicesManual = functions.https.onCall(async (data, context) =
     }
 });
 
+// =============================================================================
+// SCHEDULED PAIRING CLEANUP
+// =============================================================================
+
 /**
- * Clean up expired pending pairings
- * Runs with the existing cleanup job
+ * Cleans up expired V1 pairing requests every 5 minutes.
+ * Removes sessions that have expired or completed more than 10 minutes ago.
+ *
+ * @function cleanupExpiredPairings
+ * @schedule Every 5 minutes
+ * @returns {Promise<null>}
+ *
+ * @side-effects Deletes expired entries from /pending_pairings/
  */
 exports.cleanupExpiredPairings = functions.pubsub
     .schedule("every 5 minutes")
@@ -2450,6 +3032,27 @@ exports.cleanupExpiredPairings = functions.pubsub
         }
     });
 
+// =============================================================================
+// ALTERNATIVE PAIRING TOKEN SYSTEM
+// =============================================================================
+//
+// This is a simplified pairing flow using short tokens instead of QR codes.
+// Useful for scenarios where QR scanning is not practical.
+// =============================================================================
+
+/**
+ * Creates a pairing token that can be redeemed by another device.
+ * Alternative to QR code pairing for scenarios where scanning is impractical.
+ *
+ * @function createPairingToken
+ * @param {Object} data - Request data
+ * @param {string} [data.deviceType="desktop"] - Target device type
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{token: string, expiresAt: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated
+ *
+ * @side-effects Writes token to /pairing_tokens/{token}
+ */
 exports.createPairingToken = functions.https.onCall(async (data, context) => {
     try {
         if (!context.auth) {
@@ -2481,6 +3084,23 @@ exports.createPairingToken = functions.https.onCall(async (data, context) => {
     }
 });
 
+/**
+ * Redeems a pairing token to complete device pairing.
+ * Called by the device attempting to pair using a token.
+ *
+ * @function redeemPairingToken
+ * @param {Object} data - Request data
+ * @param {string} data.token - Pairing token to redeem
+ * @param {string} [data.deviceName="Desktop"] - Device name
+ * @param {string} [data.deviceType="desktop"] - Device type
+ * @returns {Promise<{customToken: string, pairedUid: string, deviceId: string}>}
+ * @throws {functions.https.HttpsError} If token invalid, expired, used, or wrong device type
+ *
+ * @side-effects
+ * - Creates device entry at /users/{pairedUid}/devices/{deviceId}
+ * - Marks token as used
+ * - Generates custom auth token
+ */
 exports.redeemPairingToken = functions.https.onCall(async (data) => {
     try {
         const token = data && data.token ? String(data.token) : "";
@@ -2551,13 +3171,38 @@ exports.redeemPairingToken = functions.https.onCall(async (data) => {
     }
 });
 
+// =============================================================================
+// FCM PUSH NOTIFICATION TRIGGERS
+// =============================================================================
+//
+// These database-triggered functions send FCM (Firebase Cloud Messaging) push
+// notifications to wake up devices for time-sensitive events like incoming calls.
+//
+// FCM Priority Levels:
+// - "high": Immediately delivers to device, wakes from Doze mode
+// - "normal": Delivered when convenient, may be batched
+//
+// APNS (iOS) Priorities:
+// - "10": Immediate delivery, may wake device
+// - "5": Delivered when convenient
+// =============================================================================
+
 /**
- * Triggered when a new call notification is added to the fcm_notifications queue.
- * Sends an FCM high-priority data message to wake up the recipient's device.
+ * Sends FCM notification when a new call notification is queued.
+ * Triggered by writes to /fcm_notifications/{userId}/{callId}.
  *
- * Path: fcm_notifications/{userId}/{callId}
+ * @function sendCallNotification
+ * @trigger Database onCreate at /fcm_notifications/{userId}/{callId}
+ * @param {functions.database.DataSnapshot} snapshot - Created data snapshot
+ * @param {functions.EventContext} context - Event context with path params
+ * @returns {Promise<string|null>} FCM message ID or null
  *
- * Data structure:
+ * @side-effects
+ * - Sends FCM message to user's registered token
+ * - Deletes the notification entry after processing
+ * - Removes invalid FCM tokens if send fails
+ *
+ * @data-structure
  * {
  *   type: "incoming_call",
  *   callId: string,
@@ -2631,11 +3276,19 @@ exports.sendCallNotification = functions.database
     });
 
 /**
- * Triggered when a call is cancelled or ended.
- * Sends a notification to dismiss the incoming call UI.
+ * Sends FCM notification when a call is cancelled or ended.
+ * Dismisses the incoming call UI on the recipient's device.
+ * Triggered by updates to /fcm_notifications/{userId}/{callId} with type "call_cancelled".
  *
- * Path: fcm_notifications/{userId}/{callId}
- * with type: "call_cancelled"
+ * @function sendCallCancellation
+ * @trigger Database onWrite at /fcm_notifications/{userId}/{callId}
+ * @param {functions.Change<functions.database.DataSnapshot>} change - Before/after snapshots
+ * @param {functions.EventContext} context - Event context with path params
+ * @returns {Promise<null>}
+ *
+ * @side-effects
+ * - Sends FCM message with type "call_cancelled"
+ * - Deletes the notification entry after processing
  */
 exports.sendCallCancellation = functions.database
     .ref("/fcm_notifications/{userId}/{callId}")
@@ -2687,11 +3340,29 @@ exports.sendCallCancellation = functions.database
         }
     });
 
+// =============================================================================
+// SYNCFLOW CALL NOTIFICATION TRIGGERS
+// =============================================================================
+//
+// SyncFlow calls are device-to-device calls between SyncFlow users,
+// as opposed to carrier calls. These use WebRTC for audio/video.
+// =============================================================================
+
 /**
- * Triggered when a new SyncFlow call is added to a user's incoming_syncflow_calls.
- * Sends an FCM high-priority data message to wake up the Android device.
+ * Sends FCM notification for incoming SyncFlow (WebRTC) calls.
+ * Triggered when a new call is added to /users/{userId}/incoming_syncflow_calls/.
  *
- * Path: users/{userId}/incoming_syncflow_calls/{callId}
+ * @function notifyIncomingSyncFlowCall
+ * @trigger Database onCreate at /users/{userId}/incoming_syncflow_calls/{callId}
+ * @param {functions.database.DataSnapshot} snapshot - Created call data
+ * @param {functions.EventContext} context - Event context with userId and callId
+ * @returns {Promise<string|null>} FCM message ID or null
+ *
+ * @side-effects
+ * - Sends high-priority FCM message with call details
+ * - Removes invalid FCM tokens if send fails
+ *
+ * @note Only processes calls with status "ringing"
  */
 exports.notifyIncomingSyncFlowCall = functions.database
     .ref("/users/{userId}/incoming_syncflow_calls/{callId}")
@@ -2760,11 +3431,15 @@ exports.notifyIncomingSyncFlowCall = functions.database
     });
 
 /**
- * Triggered when a SyncFlow call status changes.
- * Sends an FCM message to dismiss the incoming call notification on Android
- * when the call is answered, ended, or rejected.
+ * Sends FCM notification when SyncFlow call status changes.
+ * Dismisses incoming call UI when call is answered, ended, or rejected.
+ * Only sends when status changes FROM "ringing" to something else.
  *
- * Path: users/{userId}/incoming_syncflow_calls/{callId}
+ * @function notifySyncFlowCallStatusChange
+ * @trigger Database onUpdate at /users/{userId}/incoming_syncflow_calls/{callId}/status
+ * @param {functions.Change<functions.database.DataSnapshot>} change - Before/after status
+ * @param {functions.EventContext} context - Event context with userId and callId
+ * @returns {Promise<string|null>} FCM message ID or null
  */
 exports.notifySyncFlowCallStatusChange = functions.database
     .ref("/users/{userId}/incoming_syncflow_calls/{callId}/status")
@@ -2827,10 +3502,16 @@ exports.notifySyncFlowCallStatusChange = functions.database
     });
 
 /**
- * Triggered when an outgoing SyncFlow call status changes (receiver ended the call).
- * Sends an FCM message to the caller to end their call.
+ * Sends FCM notification when outgoing SyncFlow call is ended by receiver.
+ * Notifies the caller to end their call UI.
  *
- * Path: users/{userId}/outgoing_syncflow_calls/{callId}/status
+ * @function notifyOutgoingSyncFlowCallStatusChange
+ * @trigger Database onUpdate at /users/{userId}/outgoing_syncflow_calls/{callId}/status
+ * @param {functions.Change<functions.database.DataSnapshot>} change - Before/after status
+ * @param {functions.EventContext} context - Event context with userId and callId
+ * @returns {Promise<string|null>} FCM message ID or null
+ *
+ * @note Only triggers when status changes to "ended"
  */
 exports.notifyOutgoingSyncFlowCallStatusChange = functions.database
     .ref("/users/{userId}/outgoing_syncflow_calls/{callId}/status")
@@ -2893,10 +3574,16 @@ exports.notifyOutgoingSyncFlowCallStatusChange = functions.database
     });
 
 /**
- * Triggered when a SyncFlow call is deleted (caller hung up or call cleaned up).
- * Sends an FCM message to dismiss the incoming call notification on Android.
+ * Sends FCM notification when a SyncFlow call is deleted while ringing.
+ * Occurs when caller hangs up before answer or call is cleaned up.
  *
- * Path: users/{userId}/incoming_syncflow_calls/{callId}
+ * @function notifySyncFlowCallDeleted
+ * @trigger Database onDelete at /users/{userId}/incoming_syncflow_calls/{callId}
+ * @param {functions.database.DataSnapshot} snapshot - Deleted call data
+ * @param {functions.EventContext} context - Event context with userId and callId
+ * @returns {Promise<string|null>} FCM message ID or null
+ *
+ * @note Only sends notification if call was still in "ringing" status when deleted
  */
 exports.notifySyncFlowCallDeleted = functions.database
     .ref("/users/{userId}/incoming_syncflow_calls/{callId}")
@@ -2957,12 +3644,25 @@ exports.notifySyncFlowCallDeleted = functions.database
         }
     });
 
+// =============================================================================
+// OUTGOING MESSAGE NOTIFICATION TRIGGER
+// =============================================================================
+
 /**
- * Triggered when a new outgoing message is added for desktop-to-phone SMS.
- * Sends an FCM high-priority data message to wake up the Android device
- * so it can send the SMS without requiring a persistent foreground service.
+ * Sends FCM notification when a new outgoing SMS is queued from Mac/Web.
+ * Wakes up Android device to send the SMS without requiring foreground service.
  *
- * Path: users/{userId}/outgoing_messages/{messageId}
+ * @function notifyOutgoingMessage
+ * @trigger Database onCreate at /users/{userId}/outgoing_messages/{messageId}
+ * @param {functions.database.DataSnapshot} snapshot - Message data
+ * @param {functions.EventContext} context - Event context with userId and messageId
+ * @returns {Promise<string|null>} FCM message ID or null
+ *
+ * @side-effects
+ * - Sends high-priority FCM message with 5-minute TTL
+ * - Removes invalid FCM tokens if send fails
+ *
+ * @note TTL of 5 minutes allows time for device to wake and send SMS
  */
 exports.notifyOutgoingMessage = functions.database
     .ref("/users/{userId}/outgoing_messages/{messageId}")
@@ -3019,8 +3719,14 @@ exports.notifyOutgoingMessage = functions.database
     });
 
 /**
- * Clean up old notifications (older than 2 minutes)
- * Runs every 5 minutes
+ * Cleans up old FCM notifications that weren't processed.
+ * Removes notifications older than 2 minutes to prevent stale data.
+ *
+ * @function cleanupOldNotifications
+ * @schedule Every 5 minutes
+ * @returns {Promise<null>}
+ *
+ * @side-effects Deletes old entries from /fcm_notifications/{userId}/{notificationId}
  */
 exports.cleanupOldNotifications = functions.pubsub
     .schedule("every 5 minutes")
@@ -3061,14 +3767,37 @@ exports.cleanupOldNotifications = functions.pubsub
         }
     });
 
-// ============================================
+// =============================================================================
 // SCHEDULED DATA CLEANUP FUNCTIONS
-// Runs daily at 3 AM UTC to clean orphan data
-// ============================================
+// =============================================================================
+//
+// These functions run on a schedule to clean up orphaned, stale, and temporary
+// data that accumulates over time. Cleanup prevents database bloat and reduces
+// storage costs.
+//
+// CLEANUP SCHEDULE:
+// - 3 AM UTC: Daily cleanup of user data
+// - 4 AM UTC: Process scheduled account deletions
+// - Every 5 min: Clean expired pairings and old notifications
+// =============================================================================
 
 /**
- * Daily cleanup job - runs at 3 AM UTC
- * Cleans up all orphan data across all users
+ * Daily cleanup job that processes all users and removes orphan data.
+ * Runs at 3 AM UTC to minimize impact on active users.
+ *
+ * @function scheduledDailyCleanup
+ * @schedule 3 AM UTC daily (cron: "0 3 * * *")
+ * @returns {Promise<Object|null>} Cleanup statistics or null on error
+ *
+ * @side-effects
+ * - Removes stale outgoing messages (>24 hours)
+ * - Removes old notifications (>7 days)
+ * - Removes stale typing indicators (>30 seconds)
+ * - Removes expired sessions (>24 hours)
+ * - Removes old file transfers and R2 files (>7 days)
+ * - Removes abandoned pairings (>1 hour)
+ * - Removes duplicate/inactive devices
+ * - Sends cleanup report email to admin
  */
 exports.scheduledDailyCleanup = functions.pubsub
     .schedule("0 3 * * *") // 3 AM UTC daily
@@ -3140,7 +3869,21 @@ exports.scheduledDailyCleanup = functions.pubsub
     });
 
 /**
- * Helper function to clean up data for a single user
+ * Cleans up orphan and stale data for a single user.
+ * Called by scheduledDailyCleanup for each user.
+ *
+ * @param {string} userId - User ID to clean up
+ * @param {number} now - Current timestamp for age calculations
+ * @returns {Promise<Object>} Statistics of items cleaned per category
+ *
+ * @cleanup-rules
+ * - Outgoing messages: >24 hours old
+ * - Notifications: >7 days old
+ * - Typing indicators: >30 seconds old
+ * - Sessions: >24 hours inactive
+ * - File transfers: >7 days old (also deletes R2 files)
+ * - Pairings: >1 hour without completion
+ * - Devices: Duplicates per platform >7 days since last seen
  */
 async function cleanupUserData(userId, now) {
     const ONE_HOUR = 60 * 60 * 1000;
@@ -3312,8 +4055,19 @@ async function cleanupUserData(userId, now) {
 }
 
 /**
- * Manual cleanup trigger - callable function for admin use
- * Can be called from admin panel for immediate cleanup
+ * Manually triggers cleanup for a specific user or the requesting admin.
+ * Can be called from admin panel for immediate cleanup.
+ *
+ * @function triggerCleanup
+ * @param {Object} data - Request data
+ * @param {string} [data.userId] - User ID to clean (defaults to admin's ID)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<Object>} Cleanup statistics including expired pairings
+ * @throws {functions.https.HttpsError} If not admin
+ *
+ * @side-effects
+ * - Cleans user data per cleanupUserData rules
+ * - Cleans expired V1 and V2 pairing requests
  */
 exports.triggerCleanup = functions.https.onCall(async (data, context) => {
   // Set CORS headers for web admin access
@@ -3381,7 +4135,15 @@ exports.triggerCleanup = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Get cleanup stats - callable function to check orphan counts
+ * Retrieves cleanup statistics for a user without actually cleaning.
+ * Shows counts of items that would be cleaned in each category.
+ *
+ * @function getCleanupStats
+ * @param {Object} data - Request data
+ * @param {string} [data.userId] - User ID to analyze (defaults to authenticated user)
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<Object>} Counts per cleanup category
+ * @throws {functions.https.HttpsError} If not authenticated
  */
 exports.getCleanupStats = functions.https.onCall(async (data, context) => {
   // Set CORS headers for web admin access
@@ -3585,7 +4347,19 @@ exports.getCleanupStats = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Get system-wide cleanup overview - shows totals across all users
+ * Retrieves system-wide cleanup overview across all users.
+ * Admin function for monitoring database health.
+ *
+ * @function getSystemCleanupOverview
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<Object>} System-wide cleanup statistics
+ * @returns {number} .totalUsers - Total user count
+ * @returns {number} .totalCleanupItems - Total items to clean
+ * @returns {Object} .breakdown - Counts per category
+ * @returns {Array} .topUsersByCleanup - Users with most cleanup items
+ * @returns {Object} .systemHealth - Health indicators
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.getSystemCleanupOverview = functions.https.onCall(async (data, context) => {
   // Set CORS headers for web admin access
@@ -3684,7 +4458,12 @@ exports.getSystemCleanupOverview = functions.https.onCall(async (data, context) 
 });
 
 /**
- * Helper function to get cleanup counts for a user (lighter version)
+ * Gets cleanup counts for a single user (lightweight version for overview).
+ * Does not clean, only counts items matching cleanup criteria.
+ *
+ * @param {string} userId - User ID to analyze
+ * @param {number} now - Current timestamp
+ * @returns {Promise<Object>} Counts per cleanup category
  */
 async function getUserCleanupCounts(userId, now) {
     const ONE_HOUR = 60 * 60 * 1000;
@@ -3789,13 +4568,35 @@ async function getUserCleanupCounts(userId, now) {
     return counts;
 }
 
-// ============================================
-// SYNC GROUP MANAGEMENT (Device-based pairing)
-// ============================================
+// =============================================================================
+// SYNC GROUP MANAGEMENT
+// =============================================================================
+//
+// Sync Groups are collections of devices that share data. Each group has:
+// - A master device (the Android phone)
+// - Secondary devices (Mac, Web)
+// - A subscription plan that applies to all devices
+// - Device limits based on plan (3 for free, unlimited for pro)
+//
+// Data stored at: /syncGroups/{syncGroupId}/
+// =============================================================================
 
 /**
- * Update sync group plan (admin only)
- * Called when upgrading/downgrading a sync group's plan
+ * Updates the subscription plan for a sync group.
+ * Admin-only function for managing user subscriptions.
+ *
+ * @function updateSyncGroupPlan
+ * @param {Object} data - Request data
+ * @param {string} data.syncGroupId - Sync group ID to update
+ * @param {string} data.plan - New plan: "free" | "monthly" | "yearly" | "3-yearly"
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, syncGroupId: string, plan: string, updatedAt: number}>}
+ * @throws {functions.https.HttpsError} If not admin or invalid plan
+ *
+ * @side-effects
+ * - Updates plan and expiration at /syncGroups/{syncGroupId}
+ * - Records change in history
+ * - Sets wasPremium and firstPremiumDate flags for premium plans
  */
 exports.updateSyncGroupPlan = functions.https.onCall(async (data, context) => {
     try {
@@ -3873,7 +4674,20 @@ exports.updateSyncGroupPlan = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Remove device from sync group (admin or device owner)
+ * Removes a device from a sync group.
+ * Can be called by admin or the device's owner.
+ *
+ * @function removeDeviceFromSyncGroup
+ * @param {Object} data - Request data
+ * @param {string} data.syncGroupId - Sync group ID
+ * @param {string} data.deviceId - Device ID to remove
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, syncGroupId: string, deviceId: string, removedAt: number}>}
+ * @throws {functions.https.HttpsError} If not authorized or group not found
+ *
+ * @side-effects
+ * - Removes device from /syncGroups/{syncGroupId}/devices/
+ * - Records removal in history
  */
 exports.removeDeviceFromSyncGroup = functions.https.onCall(async (data, context) => {
     try {
@@ -3923,7 +4737,15 @@ exports.removeDeviceFromSyncGroup = functions.https.onCall(async (data, context)
 });
 
 /**
- * Get sync group info (any authenticated user can view)
+ * Retrieves sync group information including devices and plan details.
+ * Available to any authenticated user.
+ *
+ * @function getSyncGroupInfo
+ * @param {Object} data - Request data
+ * @param {string} data.syncGroupId - Sync group ID to retrieve
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, data: Object}>}
+ * @throws {functions.https.HttpsError} If not authenticated or group not found
  */
 exports.getSyncGroupInfo = functions.https.onCall(async (data, context) => {
     try {
@@ -3972,7 +4794,14 @@ exports.getSyncGroupInfo = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * List all sync groups (admin only)
+ * Lists all sync groups in the system.
+ * Admin-only function for user management.
+ *
+ * @function listSyncGroups
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, groups: Array}>}
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.listSyncGroups = functions.https.onCall(async (data, context) => {
     try {
@@ -4015,7 +4844,15 @@ exports.listSyncGroups = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Get detailed sync group info (admin only)
+ * Retrieves detailed sync group information including history.
+ * Admin-only function for troubleshooting and management.
+ *
+ * @function getSyncGroupDetails
+ * @param {Object} data - Request data
+ * @param {string} data.syncGroupId - Sync group ID
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, data: Object}>} Full sync group data with history
+ * @throws {functions.https.HttpsError} If not admin or group not found
  */
 exports.getSyncGroupDetails = functions.https.onCall(async (data, context) => {
     try {
@@ -4072,7 +4909,17 @@ exports.getSyncGroupDetails = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Delete a sync group (admin only - used for cleanup)
+ * Deletes a sync group and all its data.
+ * Admin-only function for cleanup of abandoned groups.
+ *
+ * @function deleteSyncGroup
+ * @param {Object} data - Request data
+ * @param {string} data.syncGroupId - Sync group ID to delete
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, syncGroupId: string, deletedAt: number}>}
+ * @throws {functions.https.HttpsError} If not admin
+ *
+ * @side-effects Removes /syncGroups/{syncGroupId} entirely
  */
 exports.deleteSyncGroup = functions.https.onCall(async (data, context) => {
     try {
@@ -4099,7 +4946,14 @@ exports.deleteSyncGroup = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * List all users with their device counts and subscription status (admin only)
+ * Lists all users with device counts and subscription status.
+ * Admin-only function for user management dashboard.
+ *
+ * @function listUsers
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, users: Array, totalUsers: number, totalDevices: number}>}
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.listUsers = functions.https.onCall(async (data, context) => {
     try {
@@ -4174,19 +5028,35 @@ exports.listUsers = functions.https.onCall(async (data, context) => {
     }
 });
 
-// ============================================
+// =============================================================================
 // PAIRING V2 - Redesigned Pairing System
-// ============================================
-// New pairing flow with:
-// - Persistent device IDs
-// - Device limit enforcement (3 for free, unlimited for pro)
-// - 15-minute token expiration
-// - Phone-verified user identity
+// =============================================================================
+//
+// V2 Pairing improves on V1 with:
+// - Persistent device IDs that survive app reinstalls
+// - Device limit enforcement based on subscription plan
+// - 15-minute token expiration (vs 5 min in V1)
+// - Better handling of re-pairing existing devices
+//
+// V2 PAIRING FLOW:
+// 1. Mac/Web calls initiatePairingV2() with persistent deviceId
+// 2. Returns QR code payload containing token and device info
+// 3. Android scans QR, displays device info for confirmation
+// 4. Android calls approvePairingV2() with approval decision
+// 5. Mac/Web polls checkPairingV2Status() for result
+// 6. On approval, Mac/Web receives custom auth token
+//
+// Data stored at: /pairing_requests/{token}
+// =============================================================================
 
-const PAIRING_V2_TTL_MS = 15 * 60 * 1000; // 15 minutes (increased from 5)
+/** Time-to-live for V2 pairing sessions (15 minutes) */
+const PAIRING_V2_TTL_MS = 15 * 60 * 1000;
 
 /**
- * Helper: Get user's subscription plan
+ * Retrieves user's current subscription plan, checking for expiration.
+ *
+ * @param {string} userId - User ID
+ * @returns {Promise<string>} Plan name: "free" | "monthly" | "yearly" | "3-yearly"
  */
 async function getUserPlan(userId) {
     try {
@@ -4213,7 +5083,10 @@ async function getUserPlan(userId) {
 }
 
 /**
- * Helper: Get device count for user
+ * Counts the number of devices registered to a user.
+ *
+ * @param {string} userId - User ID
+ * @returns {Promise<number>} Device count
  */
 async function getDeviceCount(userId) {
     try {
@@ -4232,7 +5105,10 @@ async function getDeviceCount(userId) {
 }
 
 /**
- * Helper: Get device limit for plan
+ * Returns device limit based on subscription plan.
+ *
+ * @param {string} plan - Plan name
+ * @returns {number} Device limit (3 for free, 999 for paid plans)
  */
 function getDeviceLimit(plan) {
     switch (plan) {
@@ -4248,10 +5124,22 @@ function getDeviceLimit(plan) {
 }
 
 /**
- * Initiate Pairing V2 - Called by Mac/Web to start pairing
+ * Initiates V2 pairing from Mac/Web device.
+ * Creates a pairing request with QR code payload for Android to scan.
  *
- * Uses persistent device IDs that survive reinstalls.
- * Returns a QR payload for Android to scan.
+ * @function initiatePairingV2
+ * @param {Object} data - Request data
+ * @param {string} data.deviceId - Persistent device ID (format: mac_xxxx or web_xxxx)
+ * @param {string} [data.deviceName="Desktop"] - Human-readable device name
+ * @param {string} [data.deviceType="macos"] - Device type
+ * @param {string} [data.appVersion="2.0.0"] - App version
+ * @param {functions.https.CallableContext} context - Firebase context (no auth required)
+ * @returns {Promise<{success: boolean, token: string, expiresAt: number, qrPayload: string}>}
+ * @throws {functions.https.HttpsError} If deviceId format invalid
+ *
+ * @side-effects Creates pairing request at /pairing_requests/{token}
+ *
+ * @security Device can initiate without auth; auth is granted after Android approval
  */
 exports.initiatePairingV2 = functions.https.onCall(async (data, context) => {
     try {
@@ -4320,9 +5208,27 @@ exports.initiatePairingV2 = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Approve Pairing V2 - Called by Android after scanning QR and user confirms
+ * Approves or rejects a V2 pairing request from Android.
+ * Validates device limits for free users and creates custom auth token on approval.
  *
- * Validates device limits and creates custom auth token for Mac/Web.
+ * @function approvePairingV2
+ * @param {Object} data - Request data
+ * @param {string} data.token - Pairing token from QR code
+ * @param {boolean} [data.approved=true] - Whether user approved
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<Object>} Result object
+ * @returns {boolean} .success - Operation success
+ * @returns {string} .status - "approved" | "rejected"
+ * @returns {string} [.error] - Error code if device limit reached
+ * @returns {boolean} [.isRePairing] - True if device was already paired
+ * @throws {functions.https.HttpsError} If token invalid, expired, or already processed
+ *
+ * @side-effects
+ * - Updates pairing request status at /pairing_requests/{token}
+ * - Creates/updates device at /users/{uid}/devices/{deviceId}
+ * - Generates Firebase custom auth token for approved device
+ *
+ * @security Custom token includes pairedUid claim linking device to user
  */
 exports.approvePairingV2 = functions.https.onCall(async (data, context) => {
     try {
@@ -4458,9 +5364,18 @@ exports.approvePairingV2 = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Check Pairing V2 Status - Called by Mac/Web to poll for approval
+ * Checks V2 pairing request status. Called by Mac/Web to poll for approval.
+ * Returns custom auth token when pairing is approved.
  *
- * Returns status and custom token when approved.
+ * @function checkPairingV2Status
+ * @param {Object} data - Request data
+ * @param {string} data.token - Pairing token to check
+ * @param {functions.https.CallableContext} context - Firebase context (no auth required)
+ * @returns {Promise<Object>} Status object
+ * @returns {boolean} .success
+ * @returns {string} .status - "pending" | "approved" | "rejected" | "expired"
+ * @returns {string} [.customToken] - Firebase auth token (only if approved)
+ * @returns {string} [.pairedUid] - Paired user ID (only if approved)
  */
 exports.checkPairingV2Status = functions.https.onCall(async (data, context) => {
     try {
@@ -4515,7 +5430,19 @@ exports.checkPairingV2Status = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Get Device Info V2 - Returns user's devices with limit info
+ * Returns user's devices with device limit information based on plan.
+ *
+ * @function getDeviceInfoV2
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<Object>} Device info object
+ * @returns {boolean} .success
+ * @returns {string} .plan - Current subscription plan
+ * @returns {number} .deviceLimit - Max devices allowed
+ * @returns {number} .deviceCount - Current device count
+ * @returns {boolean} .canAddDevice - Whether another device can be added
+ * @returns {Array} .devices - List of device objects
+ * @throws {functions.https.HttpsError} If not authenticated
  */
 exports.getDeviceInfoV2 = functions.https.onCall(async (data, context) => {
     try {

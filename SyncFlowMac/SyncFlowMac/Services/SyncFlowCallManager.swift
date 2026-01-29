@@ -2,8 +2,72 @@
 //  SyncFlowCallManager.swift
 //  SyncFlowMac
 //
-//  Manages SyncFlow-to-SyncFlow audio/video calls using WebRTC.
-//  Handles peer connection, media tracks, and Firebase signaling.
+//  Created by SyncFlow Team
+//  Copyright (c) SyncFlow. All rights reserved.
+//
+//  ============================================================================
+//  PURPOSE
+//  ============================================================================
+//  SyncFlowCallManager handles peer-to-peer audio/video calls between SyncFlow
+//  devices using WebRTC. This enables direct calls between the macOS app and
+//  Android app (or other SyncFlow clients) without going through traditional
+//  phone networks.
+//
+//  Key Features:
+//  - WebRTC-based peer-to-peer calling
+//  - Audio and video tracks with effects (blur, face focus)
+//  - Screen sharing capability
+//  - Call recording
+//  - Firebase-based signaling (offer/answer/ICE candidates)
+//  - STUN/TURN NAT traversal for connection establishment
+//
+//  ============================================================================
+//  ARCHITECTURE
+//  ============================================================================
+//  The call flow follows the standard WebRTC signaling pattern:
+//
+//  ```
+//  Caller (Mac)                    Firebase                    Callee (Android)
+//      |                              |                              |
+//      |---- Create Offer ----------->|                              |
+//      |                              |---- Notify Incoming Call --->|
+//      |                              |<--- Create Answer -----------|
+//      |<--- Receive Answer ----------|                              |
+//      |                              |                              |
+//      |---- ICE Candidates --------->|<----- ICE Candidates --------|
+//      |<--- ICE Candidates ----------|------- ICE Candidates ------>|
+//      |                              |                              |
+//      |================= WebRTC P2P Connection =====================|
+//  ```
+//
+//  Firebase Database Structure for Calls:
+//  ```
+//  users/{userId}/syncflow_calls/{callId}/
+//    - status: "ringing" | "active" | "ended" | "rejected"
+//    - offer: { sdp, type }
+//    - answer: { sdp, type }
+//    - ice_caller/: { candidate, sdpMid, sdpMLineIndex }
+//    - ice_callee/: { candidate, sdpMid, sdpMLineIndex }
+//  ```
+//
+//  ============================================================================
+//  NAT TRAVERSAL
+//  ============================================================================
+//  Uses STUN servers to discover public IP addresses and TURN servers
+//  as relay fallback when direct connection fails:
+//
+//  - STUN: Google's public STUN servers for NAT discovery
+//  - TURN: OpenRelay public TURN servers for relay
+//  - Note: Production apps should use private TURN servers (coturn, Twilio)
+//
+//  ============================================================================
+//  DEPENDENCIES
+//  ============================================================================
+//  - WebRTC: Google's WebRTC framework for real-time communication
+//  - FirebaseDatabase: Signaling channel for offer/answer exchange
+//  - ScreenCaptureKit: macOS screen sharing (macOS 12.3+)
+//  - AVFoundation: Camera and microphone access
+//  - CoreImage: Video effects processing
 //
 
 import Foundation
@@ -16,44 +80,120 @@ import FirebaseDatabase
 import FirebaseAuth
 import ScreenCaptureKit
 
+// MARK: - SyncFlowCallManager
+
+/// Manages WebRTC-based audio/video calls between SyncFlow devices.
+///
+/// SyncFlowCallManager handles the complete lifecycle of peer-to-peer calls:
+/// initiating calls, answering incoming calls, managing media tracks,
+/// and cleaning up resources when calls end.
+///
+/// ## Usage - Starting a Call
+/// ```swift
+/// let callManager = SyncFlowCallManager()
+///
+/// // Start a video call to a user
+/// let callId = try await callManager.startCallToUser(
+///     recipientPhoneNumber: "+15551234567",
+///     recipientName: "John",
+///     isVideo: true
+/// )
+/// ```
+///
+/// ## Usage - Answering a Call
+/// ```swift
+/// // Listen for incoming calls
+/// callManager.startListeningForIncomingUserCalls(userId: userId)
+///
+/// // When incomingUserCall is set, answer it
+/// if let incoming = callManager.incomingUserCall {
+///     try await callManager.answerUserCall(callId: incoming.callId, withVideo: true)
+/// }
+/// ```
+///
+/// ## Thread Safety
+/// - All @Published properties are updated on the main thread
+/// - WebRTC callbacks may come from background threads
+/// - Firebase listeners dispatch to main thread via DispatchQueue.main
 class SyncFlowCallManager: NSObject, ObservableObject {
 
-    // MARK: - Published State
+    // MARK: - Published State (UI-Bound)
 
+    /// Current state of the call (idle, ringing, connected, etc.).
     @Published var callState: CallState = .idle
+
+    /// The active call object with participant info.
     @Published var currentCall: SyncFlowCall?
+
+    /// Whether the local microphone is muted.
     @Published var isMuted = false
+
+    /// Whether local video is enabled (camera on).
     @Published var isVideoEnabled = true
+
+    /// Whether speaker output is enabled (vs earpiece on mobile).
     @Published var isSpeakerOn = true
+
+    /// Active video effect (none, face focus, background blur).
     @Published var videoEffect: VideoEffect = .none
 
-    // Video tracks for UI rendering
+    // MARK: - Video Tracks
+
+    /// Local camera video track for preview display.
     @Published var localVideoTrack: RTCVideoTrack?
+
+    /// Remote peer's video track for main display.
     @Published var remoteVideoTrack: RTCVideoTrack?
 
-    // Screen sharing
+    // MARK: - Screen Sharing State
+
+    /// Whether screen sharing is currently active.
     @Published var isScreenSharing = false
+
+    /// Screen share video track (if sharing).
     @Published var screenShareTrack: RTCVideoTrack?
+
+    /// Service handling ScreenCaptureKit integration.
     private var screenCaptureService: ScreenCaptureService?
 
-    // Call recording
+    // MARK: - Call Recording State
+
+    /// Whether call recording is currently active.
     @Published var isRecordingCall = false
+
+    /// Duration of the current recording in seconds.
     @Published var recordingDuration: TimeInterval = 0
+
+    /// Service handling call audio recording.
     private var callRecordingService: CallRecordingService?
 
+    // MARK: - Call State Enum
+
+    /// Represents the current state of a call.
     enum CallState: Equatable {
+        /// No active call.
         case idle
+        /// Setting up WebRTC and preparing to call.
         case initializing
+        /// Outgoing call is ringing, waiting for answer.
         case ringing
+        /// Call answered, establishing WebRTC connection.
         case connecting
+        /// Call is active with media flowing.
         case connected
+        /// Call failed with error message.
         case failed(String)
+        /// Call has ended normally.
         case ended
     }
 
-    // MARK: - Constants
+    // MARK: - ICE Server Configuration
 
-    // STUN servers for NAT traversal (discover public IP)
+    /// STUN servers for NAT traversal - discover public IP address.
+    ///
+    /// STUN (Session Traversal Utilities for NAT) servers help WebRTC
+    /// discover the public IP address when behind a NAT router.
+    /// Google provides free public STUN servers.
     private static let stunServers = [
         "stun:stun.l.google.com:19302",
         "stun:stun1.l.google.com:19302",
@@ -61,8 +201,13 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         "stun:stun.cloudflare.com:3478"
     ]
 
-    // Free public TURN servers for relay when direct connection fails
-    // Note: For production, you should set up your own TURN server (coturn, Twilio, etc.)
+    /// TURN servers for relay when direct P2P connection fails.
+    ///
+    /// TURN (Traversal Using Relays around NAT) servers relay media
+    /// when direct peer-to-peer connection isn't possible (e.g., symmetric NAT).
+    ///
+    /// - Warning: These are free public TURN servers with limited capacity.
+    ///   For production, use private TURN servers (coturn, Twilio, etc.).
     private static let turnServers: [(url: String, username: String, credential: String)] = [
         // OpenRelay free TURN servers (metered.ca)
         ("turn:openrelay.metered.ca:80", "openrelayproject", "openrelayproject"),
@@ -70,13 +215,17 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         ("turn:openrelay.metered.ca:443?transport=tcp", "openrelayproject", "openrelayproject")
     ]
 
+    /// Combined ICE server configuration for WebRTC.
+    ///
+    /// ICE (Interactive Connectivity Establishment) uses both STUN and TURN
+    /// servers to find the best path for media connection.
     private static var iceServers: [RTCIceServer] {
         var servers: [RTCIceServer] = []
 
-        // Add STUN servers
+        // Add STUN servers (lightweight, for NAT discovery)
         servers.append(RTCIceServer(urlStrings: stunServers))
 
-        // Add TURN servers with credentials
+        // Add TURN servers with credentials (heavyweight, for relay)
         for turn in turnServers {
             servers.append(RTCIceServer(
                 urlStrings: [turn.url],
@@ -88,65 +237,128 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         return servers
     }
 
+    // MARK: - Timeouts and Limits
+
+    /// Seconds to wait for callee to answer before timing out.
     private static let callTimeoutSeconds: TimeInterval = 60
+
+    /// Maximum ICE connection retry attempts before failing the call.
     private static let maxConnectionRetries = 3
 
-    // MARK: - Private Properties
+    // MARK: - WebRTC Components
 
+    /// Factory for creating WebRTC peer connections and media tracks.
     private var peerConnectionFactory: RTCPeerConnectionFactory?
+
+    /// The WebRTC peer connection for media exchange.
     private var peerConnection: RTCPeerConnection?
 
+    // MARK: - Media Tracks
+
+    /// Local audio track from microphone.
     private var localAudioTrack: RTCAudioTrack?
+
+    /// Source for local audio (microphone).
     private var localAudioSource: RTCAudioSource?
+
+    /// Source for local video (camera).
     private var localVideoSource: RTCVideoSource?
+
+    /// Camera capture device.
     private var videoCapturer: RTCCameraVideoCapturer?
+
+    /// Delegate for applying video effects (blur, face focus).
     private var videoEffectsDelegate: VideoEffectsCapturerDelegate?
 
+    // MARK: - Firebase
+
+    /// Firebase Realtime Database reference.
     private let database = Database.database()
 
-    /// Ensure Firebase is online before write operations
+    /// Ensures Firebase connection is active before writes.
     private func ensureOnline() {
         database.goOnline()
     }
 
-    // Firebase listeners
+    // MARK: - Firebase Listener Handles
+
+    /// Handle for incoming call notifications.
     private var callListenerHandle: DatabaseHandle?
+
+    /// Handle for answer SDP listener.
     private var answerListenerHandle: DatabaseHandle?
+
+    /// Handle for ICE candidate listener.
     private var iceListenerHandle: DatabaseHandle?
+
+    /// Handle for call status changes listener.
     private var statusListenerHandle: DatabaseHandle?
+
+    /// Reference to current call in Firebase.
     private var currentCallRef: DatabaseReference?
 
-    /// Get the correct user ID - prefer stored paired user ID over auth.currentUser
+    // MARK: - User Identity
+
+    /// Gets the current user ID, preferring stored paired ID over auth user.
+    ///
+    /// This ensures call data is written to the correct Firebase path
+    /// even if the auth session has expired.
     private var currentUserId: String? {
         UserDefaults.standard.string(forKey: "syncflow_user_id") ?? Auth.auth().currentUser?.uid
     }
 
-    // User-to-user call tracking
+    // MARK: - User-to-User Call Tracking
+
+    /// Whether current call is a user-to-user call (vs device-to-device).
     private var isUserCall: Bool = false
-    private var userCallRecipientUid: String?  // For outgoing calls - who we're calling
-    private var userCallCallerUid: String?     // For incoming calls - who called us
+
+    /// For outgoing calls: the recipient's Firebase UID.
+    private var userCallRecipientUid: String?
+
+    /// For incoming calls: the caller's Firebase UID.
+    private var userCallCallerUid: String?
+
+    /// The UID used for signaling (ICE candidates, answers).
     private var userCallSignalingUid: String?
 
-    // Timeout timer
+    // MARK: - Call Management
+
+    /// Timer for call timeout (no answer).
     private var callTimeoutTimer: Timer?
 
-    // Connection retry tracking
+    /// Number of ICE connection retry attempts.
     private var connectionRetryCount = 0
+
+    /// ICE candidates received before remote description was set.
+    /// These are buffered and processed once remote description is available.
     private var pendingIceCandidates: [RTCIceCandidate] = []
+
+    /// Whether the remote SDP description has been set.
+    /// ICE candidates cannot be added until this is true.
     private var hasRemoteDescription = false
 
+    /// Combine cancellables for reactive subscriptions.
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
 
+    /// Creates a new SyncFlowCallManager and initializes WebRTC.
     override init() {
         super.init()
         initializeWebRTC()
     }
 
+    /// Initializes the WebRTC framework and peer connection factory.
+    ///
+    /// This must be called before any WebRTC operations. It sets up:
+    /// - SSL for secure communication
+    /// - Video encoder/decoder factories for hardware acceleration
+    /// - Peer connection factory for creating connections and tracks
     private func initializeWebRTC() {
+        // Initialize SSL for secure WebRTC communication
         RTCInitializeSSL()
 
+        // Use default factories which leverage hardware encoding/decoding
         let encoderFactory = RTCDefaultVideoEncoderFactory()
         let decoderFactory = RTCDefaultVideoDecoderFactory()
 
@@ -158,9 +370,20 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         print("SyncFlowCallManager: WebRTC initialized")
     }
 
-    // MARK: - Public Methods
+    // MARK: - Public Methods - Device Calls
 
-    /// Start an outgoing call to a device
+    /// Starts an outgoing call to a specific device.
+    ///
+    /// This initiates a device-to-device call (e.g., Mac to Android device).
+    /// Use `startCallToUser` for user-to-user calls via phone number lookup.
+    ///
+    /// - Parameters:
+    ///   - userId: Firebase user ID owning both devices
+    ///   - calleeDeviceId: Target device's unique ID
+    ///   - calleeName: Display name for the callee
+    ///   - isVideo: Whether to enable video
+    /// - Returns: The unique call ID
+    /// - Throws: WebRTC or Firebase errors
     func startCall(
         userId: String,
         calleeDeviceId: String,
@@ -225,7 +448,13 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         return callId
     }
 
-    /// Answer an incoming call
+    /// Answers an incoming device-to-device call.
+    ///
+    /// - Parameters:
+    ///   - userId: Firebase user ID
+    ///   - callId: The call ID to answer
+    ///   - withVideo: Whether to enable video
+    /// - Throws: SyncFlowCallError if call not found or WebRTC fails
     func answerCall(userId: String, callId: String, withVideo: Bool) async throws {
         ensureOnline()
 
@@ -281,7 +510,13 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         print("SyncFlowCallManager: Answered call from \(call.callerName)")
     }
 
-    /// Reject an incoming call
+    /// Rejects an incoming call.
+    ///
+    /// Updates the call status to "rejected" and cleans up resources.
+    ///
+    /// - Parameters:
+    ///   - userId: Firebase user ID
+    ///   - callId: The call ID to reject
     func rejectCall(userId: String, callId: String) async throws {
         ensureOnline()
 
@@ -302,7 +537,12 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         print("SyncFlowCallManager: Rejected call")
     }
 
-    /// End the current call
+    /// Ends the current active call.
+    ///
+    /// Updates Firebase status, closes WebRTC connection, and releases
+    /// all media resources (camera, microphone, screen share).
+    ///
+    /// - Note: Automatically delegates to `endUserCall()` for user-to-user calls.
     func endCall() async throws {
         ensureOnline()
 
@@ -341,25 +581,41 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         print("SyncFlowCallManager: Ended call")
     }
 
-    /// Toggle microphone mute
+    // MARK: - Call Controls
+
+    /// Toggles microphone mute state.
+    ///
+    /// When muted, the local audio track is disabled but the connection
+    /// remains active. The remote party sees you as muted.
     func toggleMute() {
         isMuted.toggle()
         localAudioTrack?.isEnabled = !isMuted
         print("SyncFlowCallManager: Mute toggled: \(isMuted)")
     }
 
-    /// Toggle video
+    /// Toggles local video on/off.
+    ///
+    /// When disabled, the camera stops sending frames but the video track
+    /// remains in the connection. The remote party sees a black frame.
     func toggleVideo() {
         isVideoEnabled.toggle()
         localVideoTrack?.isEnabled = isVideoEnabled
         print("SyncFlowCallManager: Video toggled: \(isVideoEnabled)")
     }
 
+    /// Toggles face focus video effect.
+    ///
+    /// Face focus uses a radial blur that keeps the center (face area)
+    /// sharp while blurring the periphery.
     func toggleFaceFocus() {
         videoEffect = videoEffect == .faceFocus ? .none : .faceFocus
         print("SyncFlowCallManager: Face focus toggled: \(videoEffect)")
     }
 
+    /// Toggles background blur video effect.
+    ///
+    /// Background blur uses a stronger blur with wider focus area
+    /// to simulate a blurred background effect.
     func toggleBackgroundBlur() {
         videoEffect = videoEffect == .backgroundBlur ? .none : .backgroundBlur
         print("SyncFlowCallManager: Background blur toggled: \(videoEffect)")
@@ -367,7 +623,10 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     // MARK: - Screen Sharing
 
-    /// Get the screen capture service (creates one if needed)
+    /// Gets the screen capture service, creating it if necessary.
+    ///
+    /// - Returns: ScreenCaptureService instance for managing screen sharing
+    /// - Requires: macOS 12.3 or later for ScreenCaptureKit support
     @available(macOS 12.3, *)
     func getScreenCaptureService() -> ScreenCaptureService {
         if screenCaptureService == nil, let factory = peerConnectionFactory {
@@ -523,8 +782,26 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         }.filter { $0.isAndroid && $0.online }
     }
 
-    /// Start an outgoing call to a user by their phone number
-    /// This looks up the recipient's UID via phone_to_uid and writes the call to their Firebase path
+    // MARK: - User-to-User Calls
+
+    /// Starts a call to a user by their phone number.
+    ///
+    /// This is the primary method for calling other SyncFlow users. It:
+    /// 1. Looks up the recipient's Firebase UID via `phone_to_uid` mapping
+    /// 2. Creates call entry in recipient's `incoming_syncflow_calls`
+    /// 3. Sets up WebRTC and starts signaling
+    ///
+    /// - Parameters:
+    ///   - recipientPhoneNumber: The recipient's phone number
+    ///   - recipientName: Display name for the recipient
+    ///   - isVideo: Whether to enable video
+    /// - Returns: The unique call ID
+    /// - Throws: `SyncFlowCallError.userNotOnSyncFlow` if recipient not found
+    ///
+    /// ## Fallback Behavior
+    /// If `phone_to_uid` lookup fails, falls back to the paired user ID.
+    /// This enables calls between paired devices when phone number mapping
+    /// isn't available.
     func startCallToUser(
         recipientPhoneNumber: String,
         recipientName: String,
@@ -950,23 +1227,41 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     // MARK: - Incoming User Calls
 
-    /// Incoming user call data
+    /// Data structure for an incoming user-to-user call.
     struct IncomingUserCall {
+        /// Unique call identifier.
         let callId: String
+        /// Firebase UID of the caller.
         let callerUid: String
+        /// Caller's phone number (for display).
         let callerPhone: String
+        /// Caller's display name.
         let callerName: String
+        /// Platform of caller ("android", "macos", "ios").
         let callerPlatform: String
+        /// Whether this is a video call.
         let isVideo: Bool
     }
 
-    /// Published incoming call for UI
+    /// Currently incoming call awaiting user action (answer/reject).
+    /// UI should observe this to show incoming call screen.
     @Published var incomingUserCall: IncomingUserCall?
 
+    /// Handle for incoming call notifications listener.
     private var incomingCallListenerHandle: DatabaseHandle?
+
+    /// Handle for incoming call status changes listener.
     private var incomingCallStatusListenerHandle: DatabaseHandle?
 
-    /// Start listening for incoming user-to-user calls
+    /// Starts listening for incoming user-to-user calls.
+    ///
+    /// When a call is received, `incomingUserCall` is set, which the UI
+    /// should observe to present the incoming call screen.
+    ///
+    /// - Parameter userId: The current user's Firebase UID
+    ///
+    /// ## Cleanup
+    /// Call `stopListeningForIncomingUserCalls(userId:)` when no longer needed.
     func startListeningForIncomingUserCalls(userId: String) {
         let callsRef = database.reference()
             .child("users")
@@ -1366,8 +1661,20 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Private Methods
+    // MARK: - Private Methods - Peer Connection Setup
 
+    /// Sets up the WebRTC peer connection with ICE server configuration.
+    ///
+    /// Configures:
+    /// - ICE servers (STUN/TURN)
+    /// - Bundle policy (max-bundle for efficiency)
+    /// - RTCP mux policy (require for single port)
+    /// - Unified Plan SDP semantics (modern WebRTC standard)
+    ///
+    /// - Parameters:
+    ///   - userId: Firebase user ID
+    ///   - callId: The call ID
+    ///   - isOutgoing: true if we're initiating the call
     private func setupPeerConnection(userId: String, callId: String, isOutgoing: Bool) {
         let config = RTCConfiguration()
         config.iceServers = Self.iceServers
@@ -1641,6 +1948,18 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         callTimeoutTimer = nil
     }
 
+    /// Cleans up all call resources after a call ends.
+    ///
+    /// This method releases:
+    /// - Firebase listeners
+    /// - Screen sharing resources
+    /// - Call recording
+    /// - Video capturer and tracks
+    /// - Audio tracks (releases microphone)
+    /// - Peer connection
+    ///
+    /// - Important: Always called when a call ends to prevent resource leaks.
+    ///   Microphone access is released here to stop the green indicator dot.
     private func cleanup() {
         print("SyncFlowCallManager: Cleaning up")
 
@@ -1786,24 +2105,42 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
 // MARK: - RTCPeerConnectionDelegate
 
+/// Extension implementing WebRTC peer connection delegate callbacks.
+///
+/// These callbacks handle the WebRTC connection lifecycle events:
+/// - Signaling state changes
+/// - ICE connection state changes (checking, connected, failed)
+/// - ICE candidate generation
+/// - Media track reception
 extension SyncFlowCallManager: RTCPeerConnectionDelegate {
 
+    /// Called when signaling state changes.
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
         print("SyncFlowCallManager: Signaling state: \(stateChanged.rawValue)")
     }
 
+    /// Called when a media stream is added (legacy API).
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
         print("SyncFlowCallManager: Stream added")
     }
 
+    /// Called when a media stream is removed (legacy API).
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {
         print("SyncFlowCallManager: Stream removed")
     }
 
+    /// Called when renegotiation is needed (e.g., adding screen share track).
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {
         print("SyncFlowCallManager: Should negotiate")
     }
 
+    /// Called when ICE connection state changes.
+    ///
+    /// This is the main indicator of connection health:
+    /// - `checking`: Attempting to connect
+    /// - `connected`/`completed`: Call is active
+    /// - `failed`: Connection couldn't be established
+    /// - `disconnected`: Temporary disconnect (may reconnect)
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         let stateDescription: String
         switch newState {
@@ -1928,15 +2265,38 @@ extension SyncFlowCallManager: RTCPeerConnectionDelegate {
     }
 }
 
+// MARK: - Video Effects
+
+/// Available video effects for call video.
 enum VideoEffect: String, CaseIterable {
+    /// No effect applied - raw camera feed.
     case none
+    /// Face focus - blurs edges to draw attention to center/face.
     case faceFocus
+    /// Background blur - simulates depth-of-field blur effect.
     case backgroundBlur
 }
 
+/// Delegate for processing video frames and applying effects.
+///
+/// This class intercepts video frames from the camera capturer,
+/// applies visual effects (blur, focus), and forwards the processed
+/// frames to the WebRTC video source.
+///
+/// ## Effect Implementation
+/// Effects use Core Image filters applied via a radial gradient mask:
+/// - `CIGaussianBlur`: Applies blur to the frame
+/// - `CIRadialGradient`: Creates center-to-edge mask
+/// - `CIBlendWithMask`: Combines sharp center with blurred edges
 final class VideoEffectsCapturerDelegate: NSObject, RTCVideoCapturerDelegate {
+    /// Target video source for processed frames.
     private let videoSource: RTCVideoSource
+
+    /// Closure that provides the current effect setting.
     private let effectProvider: () -> VideoEffect
+
+    /// Core Image context for GPU-accelerated processing.
+    /// Disables intermediate caching for memory efficiency.
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     init(videoSource: RTCVideoSource, effectProvider: @escaping () -> VideoEffect) {
@@ -1944,6 +2304,7 @@ final class VideoEffectsCapturerDelegate: NSObject, RTCVideoCapturerDelegate {
         self.effectProvider = effectProvider
     }
 
+    /// Processes each captured video frame, applying effects if enabled.
     func capturer(_ capturer: RTCVideoCapturer, didCapture frame: RTCVideoFrame) {
         let effect = effectProvider()
         guard effect != .none else {
@@ -2053,14 +2414,30 @@ final class VideoEffectsCapturerDelegate: NSObject, RTCVideoCapturerDelegate {
 
 // MARK: - Errors
 
+/// Errors that can occur during SyncFlow call operations.
 enum SyncFlowCallError: LocalizedError {
+    /// User is not authenticated with Firebase.
     case notAuthenticated
+
+    /// WebRTC has not been initialized.
     case notInitialized
+
+    /// The specified call was not found in Firebase.
     case callNotFound
+
+    /// Incoming call data doesn't contain an SDP offer.
     case noOffer
+
+    /// Failed to create WebRTC SDP offer.
     case failedToCreateOffer
+
+    /// Failed to create WebRTC SDP answer.
     case failedToCreateAnswer
+
+    /// Recipient phone number not found in phone_to_uid mapping.
     case userNotOnSyncFlow
+
+    /// User attempted to call their own number.
     case cannotCallSelf
 
     var errorDescription: String? {

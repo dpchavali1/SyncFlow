@@ -1,3 +1,29 @@
+/**
+ * AIAssistantScreen.kt
+ *
+ * This file implements the AI-powered assistant screen that provides intelligent
+ * analysis of SMS messages. The screen allows users to query their message history
+ * using natural language and receive insights about spending, transactions, OTP codes,
+ * and more.
+ *
+ * Key Features:
+ * - Natural language query processing for SMS data
+ * - Spending analysis and transaction tracking
+ * - Merchant recognition with fuzzy matching
+ * - OTP code extraction and display
+ * - Quick action cards for common queries
+ * - Smart digest showing monthly spending summary
+ *
+ * Architecture:
+ * - Uses AIService for backend AI processing
+ * - Local query handlers for offline-capable common queries
+ * - SpendingParser for extracting financial data from messages
+ * - MerchantModel for merchant name normalization
+ *
+ * @see AIService for AI backend integration
+ * @see SpendingParser for transaction extraction logic
+ * @see MerchantModel for merchant recognition
+ */
 package com.phoneintegration.app.ui.ai
 
 import androidx.compose.animation.core.Animatable
@@ -41,7 +67,28 @@ import java.util.*
 import kotlin.math.min
 import com.phoneintegration.app.MessageCategory
 
+// =============================================================================
+// region DATA MODELS
+// =============================================================================
+
+/**
+ * Represents a single message in the AI chat conversation.
+ *
+ * @property role The role of the message sender - either "user" or "assistant"
+ * @property content The text content of the message
+ */
 data class ChatMessage(val role: String, val content: String)
+/**
+ * Represents a quick action button displayed in the AI assistant welcome screen.
+ *
+ * Quick actions provide one-tap access to common queries, making it easier
+ * for users to explore AI capabilities without typing.
+ *
+ * @property icon Material icon to display on the action card
+ * @property title Short title displayed on the button
+ * @property query The pre-filled query to execute when tapped
+ * @property color Background tint color for the icon (as ARGB Long)
+ */
 data class QuickAction(
     val icon: ImageVector,
     val title: String,
@@ -49,6 +96,10 @@ data class QuickAction(
     val color: Long
 )
 
+/**
+ * Predefined list of quick action buttons shown on the AI assistant welcome screen.
+ * These actions cover the most common user queries for easy one-tap access.
+ */
 val QUICK_ACTIONS = listOf(
     QuickAction(Icons.Outlined.TrendingUp, "Spending", "How much did I spend this month?", 0xFF2196F3),
     QuickAction(Icons.Outlined.Receipt, "Bills", "Show my upcoming bills", 0xFFFF9800),
@@ -58,6 +109,19 @@ val QUICK_ACTIONS = listOf(
     QuickAction(Icons.Outlined.ShoppingCart, "Transactions", "List my transactions", 0xFF009688),
 )
 
+/**
+ * Represents a financial transaction extracted from an SMS message.
+ *
+ * Transactions are parsed from bank/payment SMS messages and used
+ * for spending analysis and reporting.
+ *
+ * @property amount The transaction amount in the specified currency
+ * @property date Timestamp of the transaction in milliseconds
+ * @property message The original SMS body containing the transaction
+ * @property merchant The normalized merchant name (may be null if undetectable)
+ * @property currency Currency code ("USD" or "INR")
+ * @property category Spending category (e.g., "TRANSPORT", "FOOD", "SHOPPING")
+ */
 data class Transaction(
     val amount: Double,
     val date: Long,
@@ -67,8 +131,30 @@ data class Transaction(
     val category: String = "OTHER"
 )
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region MERCHANT RECOGNITION
+// =============================================================================
+
+/**
+ * Singleton object for merchant name recognition and normalization.
+ *
+ * MerchantModel provides fuzzy matching capabilities to identify merchants
+ * from SMS transaction messages, even when merchant names are abbreviated
+ * or slightly misspelled.
+ *
+ * Features:
+ * - Known merchant dictionary for exact matching
+ * - Levenshtein distance algorithm for fuzzy matching
+ * - Regex-based merchant extraction from SMS bodies
+ * - Category inference based on merchant type
+ */
 object MerchantModel {
 
+    /** Dictionary mapping common merchant abbreviations to canonical names */
     private val known = mapOf(
         "AMZN" to "AMAZON",
         "AMAZON" to "AMAZON",
@@ -100,6 +186,7 @@ object MerchantModel {
         "SWIGGY" to "SWIGGY",
     )
 
+    /** Regex pattern for extracting merchant names from transaction SMS messages */
     private val merchantRegex = Regex(
         """
         (?ix)
@@ -117,6 +204,15 @@ object MerchantModel {
         setOf(RegexOption.IGNORE_CASE, RegexOption.COMMENTS)
     )
 
+    /**
+     * Cleans and normalizes a merchant name string.
+     *
+     * Removes URLs, common TLDs, and special characters. Returns empty string
+     * if the cleaned result is too short or too long.
+     *
+     * @param name Raw merchant name string
+     * @return Cleaned merchant name in uppercase, or empty string if invalid
+     */
     fun clean(name: String): String {
         var n = name.uppercase()
         n = n.replace(Regex("""WWW\.?|HTTPS?://"""), "")
@@ -126,6 +222,15 @@ object MerchantModel {
         return n.takeIf { it.length in 2..40 } ?: ""
     }
 
+    /**
+     * Calculates the Levenshtein edit distance between two strings.
+     *
+     * Used for fuzzy merchant matching to handle typos and abbreviations.
+     *
+     * @param a First string
+     * @param b Second string
+     * @return The minimum number of single-character edits needed to transform a into b
+     */
     fun levenshtein(a: String, b: String): Int {
         val dp = Array(a.length + 1) { IntArray(b.length + 1) }
         for (i in 0..a.length) dp[i][0] = i
@@ -142,6 +247,15 @@ object MerchantModel {
         return dp[a.length][b.length]
     }
 
+    /**
+     * Performs fuzzy matching to find the best-known merchant match.
+     *
+     * First attempts exact substring matching against known merchants,
+     * then falls back to Levenshtein distance if no exact match found.
+     *
+     * @param input Raw merchant name from SMS
+     * @return Canonical merchant name, or cleaned input if no match found
+     */
     fun fuzzyMatch(input: String): String {
         val cleaned = clean(input)
         if (cleaned.isBlank()) return ""
@@ -157,6 +271,16 @@ object MerchantModel {
         return cleaned
     }
 
+    /**
+     * Infers the spending category based on message content and merchant name.
+     *
+     * Categories include: TRANSPORT, FUEL, GROCERIES, SHOPPING, FOOD,
+     * SUBSCRIPTION, TRAVEL, ENTERTAINMENT, BILLS, HEALTH, and OTHER.
+     *
+     * @param msg The full SMS message body
+     * @param merchant The identified merchant name (nullable)
+     * @return The inferred category string
+     */
     fun guessCategory(msg: String, merchant: String?): String {
         val m = merchant?.lowercase() ?: ""
         val lower = msg.lowercase()
@@ -184,6 +308,12 @@ object MerchantModel {
         return "OTHER"
     }
 
+    /**
+     * Extracts and normalizes the merchant name from an SMS body.
+     *
+     * @param body The full SMS message body
+     * @return Normalized merchant name, or null if no merchant found
+     */
     fun extract(body: String): String? {
         val raw = merchantRegex.find(body)?.groupValues?.getOrNull(1) ?: return null
         val cleaned = clean(raw)
@@ -191,14 +321,39 @@ object MerchantModel {
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region SPENDING ANALYSIS
+// =============================================================================
+
+/**
+ * Singleton object for parsing spending/transaction data from SMS messages.
+ *
+ * SpendingParser analyzes SMS messages to extract financial transaction details
+ * including amounts, merchants, and categories. It filters out credits/refunds
+ * to focus on actual spending.
+ */
 object SpendingParser {
 
+    /** Regex patterns for extracting monetary amounts in various formats (INR and USD) */
     private val amountRegex = listOf(
         Regex("""(?:rs\.?|₹|inr)\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
         Regex("""(?:usd|\$)\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
         Regex("""amount[: ]*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
     )
 
+    /**
+     * Analyzes a list of SMS messages and extracts transaction data.
+     *
+     * Filters out credits, refunds, reversals, and deposits to focus on spending.
+     * Results are sorted by date in descending order (most recent first).
+     *
+     * @param messages List of SMS messages to analyze
+     * @return List of extracted transactions, sorted by date descending
+     */
     fun analyze(messages: List<SmsMessage>): List<Transaction> {
         val out = mutableListOf<Transaction>()
 
@@ -242,16 +397,62 @@ object SpendingParser {
     }
 }
 
-// -------------------------------------------------------
-// UI + SMART QUERY ENGINE
-// -------------------------------------------------------
+// =============================================================================
+// endregion
+// =============================================================================
 
+// =============================================================================
+// region QUERY HANDLING
+// =============================================================================
+
+/**
+ * Represents a query handler for processing specific user question patterns.
+ *
+ * Query handlers use regex patterns to match user questions and generate
+ * appropriate responses based on analyzed SMS data.
+ *
+ * @property name Identifier for logging and debugging
+ * @property regex Pattern to match against user queries
+ * @property handler Function that processes a match and returns the response string
+ */
 private data class QueryHandler(
     val name: String,
     val regex: Regex,
     val handler: (MatchResult) -> String
 )
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region MAIN COMPOSABLE
+// =============================================================================
+
+/**
+ * Main composable for the AI Assistant screen.
+ *
+ * This full-screen composable provides a chat interface for users to interact
+ * with an AI assistant that can analyze their SMS messages. Features include:
+ * - Chat conversation with the AI
+ * - Quick action cards for common queries
+ * - Smart digest card showing monthly spending summary
+ * - Auto-scrolling chat history
+ * - Keyboard-safe layout with proper insets
+ *
+ * State Hoisting Pattern:
+ * - Messages list is passed in (hoisted to parent)
+ * - Internal conversation state is managed locally
+ * - Loading state is managed locally
+ * - Query text field state is managed locally
+ *
+ * Side Effects:
+ * - LaunchedEffect for auto-scrolling when conversation updates
+ * - Coroutine scope for async AI queries
+ *
+ * @param messages The list of SMS messages to analyze (hoisted state from parent)
+ * @param onDismiss Callback invoked when user closes the assistant screen
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AIAssistantScreen(messages: List<SmsMessage>, onDismiss: () -> Unit) {
@@ -795,10 +996,23 @@ Try asking:
         }
     }
 }
-// -------------------------------------------------------
-// SMART DIGEST CARD
-// -------------------------------------------------------
+// =============================================================================
+// endregion
+// =============================================================================
 
+// =============================================================================
+// region SUPPORTING COMPOSABLES
+// =============================================================================
+
+/**
+ * Displays a summary card showing monthly spending statistics.
+ *
+ * Shows current month's total spending, transaction count, and comparison
+ * with the previous month (as a percentage change).
+ *
+ * @param transactions List of all parsed transactions
+ * @param formatCurrency Function to format currency values with proper locale
+ */
 @Composable
 fun SmartDigestCard(
     transactions: List<Transaction>,
@@ -896,10 +1110,15 @@ fun SmartDigestCard(
     }
 }
 
-// -------------------------------------------------------
-// QUICK ACTION GRID
-// -------------------------------------------------------
-
+/**
+ * Displays a 2-column grid of quick action buttons.
+ *
+ * Quick actions provide one-tap access to common queries like
+ * spending analysis, package tracking, and OTP viewing.
+ *
+ * @param actions List of QuickAction items to display
+ * @param onActionClick Callback when a quick action is tapped
+ */
 @Composable
 fun QuickActionGrid(
     actions: List<QuickAction>,
@@ -930,6 +1149,16 @@ fun QuickActionGrid(
     }
 }
 
+/**
+ * Individual quick action card component.
+ *
+ * Displays an icon with a colored background and title text.
+ * Clickable to execute the associated query.
+ *
+ * @param action The QuickAction data to display
+ * @param onClick Callback when the card is tapped
+ * @param modifier Optional modifier for customization
+ */
 @Composable
 fun QuickActionCard(
     action: QuickAction,
@@ -975,10 +1204,15 @@ fun QuickActionCard(
     }
 }
 
-// -------------------------------------------------------
-// CHAT BUBBLE
-// -------------------------------------------------------
-
+/**
+ * Displays a single chat message bubble.
+ *
+ * User messages appear on the right with primary color background.
+ * Assistant messages appear on the left with surface variant background.
+ * Bubbles have asymmetric rounded corners to indicate message direction.
+ *
+ * @param msg The ChatMessage to display
+ */
 @Composable
 fun ChatBubble(msg: ChatMessage) {
 
@@ -1016,10 +1250,15 @@ fun ChatBubble(msg: ChatMessage) {
     }
 }
 
-// -------------------------------------------------------
-// TYPING INDICATOR
-// -------------------------------------------------------
-
+/**
+ * Displays an animated typing indicator (three pulsing dots).
+ *
+ * Shown when the AI is processing a query. Uses infinite animation
+ * with staggered delays to create a wave effect.
+ *
+ * Side Effects:
+ * - LaunchedEffect for each dot's animation with staggered delay
+ */
 @Composable
 fun TypingIndicator() {
     Row(
@@ -1066,5 +1305,9 @@ fun TypingIndicator() {
         }
     }
 }
+
+// =============================================================================
+// endregion
+// =============================================================================
 
 // END OF FILE

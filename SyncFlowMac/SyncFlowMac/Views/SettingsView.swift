@@ -4,17 +4,57 @@
 //
 //  Settings and preferences view
 //
+//  =============================================================================
+//  PURPOSE:
+//  This view provides the main settings interface for the SyncFlow macOS app.
+//  It uses a TabView to organize settings into categories: General, Sync,
+//  Notifications, Subscription, Usage, Support, and About.
+//
+//  USER INTERACTIONS:
+//  - Navigate between settings tabs by clicking tab items
+//  - Toggle switches for various preferences
+//  - Configure notification sounds and custom colors
+//  - Manage subscription status and upgrade
+//  - Unpair device or delete account
+//  - Access support chat and external links
+//
+//  STATE MANAGEMENT:
+//  - @EnvironmentObject for AppState (pairing status, user ID)
+//  - @AppStorage for persisting preferences to UserDefaults
+//  - @State for local UI state (alerts, sheets, etc.)
+//  - @StateObject for service instances (subscription, sounds)
+//
+//  PERFORMANCE CONSIDERATIONS:
+//  - Settings are loaded lazily via @AppStorage
+//  - Subscription status checked asynchronously
+//  - Tab content only rendered when tab is selected
+//  =============================================================================
 
 import SwiftUI
 import ServiceManagement
 
+// MARK: - Main Settings View
+
+/// Root settings view containing tabbed navigation for all preference categories.
 struct SettingsView: View {
+
+    // MARK: - Environment
+
+    /// App-wide state for pairing status and user info
     @EnvironmentObject var appState: AppState
 
+    // MARK: - Persisted Settings (UserDefaults via @AppStorage)
+
+    /// Whether push notifications are enabled
     @AppStorage("notifications_enabled") private var notificationsEnabled = true
+    /// Whether notification sounds are enabled
     @AppStorage("sound_enabled") private var soundEnabled = true
+    /// Whether message previews appear in notifications
     @AppStorage("show_previews") private var showPreviews = true
+    /// Whether app launches at login
     @AppStorage("auto_start") private var autoStart = false
+
+    // MARK: - Body
 
     var body: some View {
         TabView {
@@ -66,23 +106,49 @@ struct SettingsView: View {
 
 // MARK: - General Settings
 
+/// General settings tab including connection status, startup options, chat themes, and account actions.
 struct GeneralSettingsView: View {
+
+    // MARK: - Environment
+
     @EnvironmentObject var appState: AppState
+
+    // MARK: - Startup Settings
+
+    /// Whether app launches at system login
     @AppStorage("auto_start") private var autoStart = false
 
+    // MARK: - Alert State
+
+    /// Whether unpair confirmation alert is shown
     @State private var showingUnpairAlert = false
+    /// Whether delete account sheet is shown
     @State private var showingDeleteAccountSheet = false
 
+    // MARK: - Chat Theme Settings
+
+    /// Current chat color theme preset
     @AppStorage("chat_color_theme") private var chatColorTheme = ChatColorTheme.apple.rawValue
+    /// Whether to use macOS accent color for sent bubbles
     @AppStorage("chat_use_system_accent") private var chatUseSystemAccent = false
+    /// Whether bubble gradients are enabled
     @AppStorage("chat_bubble_gradient_enabled") private var chatBubbleGradientEnabled = true
+    /// Whether custom colors override theme
     @AppStorage("chat_custom_colors_enabled") private var chatCustomColorsEnabled = false
+    /// Custom sent bubble color (hex)
     @AppStorage("chat_sent_custom_color") private var chatSentCustomColorHex = "#0A84FF"
+    /// Custom received bubble color (hex)
     @AppStorage("chat_received_custom_color") private var chatReceivedCustomColorHex = "#2C2C2E"
+    /// Custom received bubble text color (hex)
     @AppStorage("chat_received_text_color") private var chatReceivedTextColorHex = "#F8F8F8"
+    /// Custom conversation window background color (hex)
     @AppStorage("conversation_window_color") private var conversationWindowColorHex = "#0F1119"
+    /// Whether theme reset confirmation alert is shown
     @State private var showThemeResetAlert = false
+    /// Preferred appearance mode (auto, light, dark)
     @AppStorage("preferred_color_scheme") private var preferredColorScheme = "auto"
+
+    // MARK: - Body
 
     var body: some View {
         Form {
@@ -270,6 +336,11 @@ struct GeneralSettingsView: View {
         }
     }
 
+    // MARK: - Private Methods
+
+    /// Toggles the "Launch at Login" setting using SMAppService.
+    /// Requires macOS 13+; gracefully handles errors.
+    /// - Parameter enabled: Whether to enable launch at login
     private func toggleLaunchAtLogin(_ enabled: Bool) {
         // Use SMAppService for macOS 13+
         if #available(macOS 13.0, *) {
@@ -297,6 +368,9 @@ struct GeneralSettingsView: View {
         }
     }
 
+    /// Creates a binding that converts between Color and hex string storage.
+    /// - Parameter hexStorage: Binding to the hex string @AppStorage
+    /// - Returns: A Binding<Color> for use with ColorPicker
     private func colorBinding(for hexStorage: Binding<String>) -> Binding<Color> {
         Binding(
             get: { Color(hex: hexStorage.wrappedValue) },
@@ -308,7 +382,8 @@ struct GeneralSettingsView: View {
         )
     }
 
-    /// Check if app is currently set to launch at login
+    /// Checks if app is currently set to launch at login.
+    /// - Returns: True if launch at login is enabled
     static func isLaunchAtLoginEnabled() -> Bool {
         if #available(macOS 13.0, *) {
             return SMAppService.mainApp.status == .enabled
@@ -319,13 +394,26 @@ struct GeneralSettingsView: View {
 
 // MARK: - Notification Settings
 
+/// Notification settings tab for configuring alerts, sounds, and contact-specific sounds.
 struct NotificationSettingsView: View {
+
+    // MARK: - Bindings (from parent)
+
+    /// Whether notifications are enabled globally
     @Binding var notificationsEnabled: Bool
+    /// Whether notification sounds are enabled
     @Binding var soundEnabled: Bool
+    /// Whether message previews appear in notifications
     @Binding var showPreviews: Bool
 
+    // MARK: - Services & State
+
+    /// Notification sound service for sound management
     @StateObject private var soundService = NotificationSoundService.shared
+    /// Whether sound picker sheet is shown
     @State private var showSoundPicker = false
+
+    // MARK: - Body
 
     var body: some View {
         Form {
@@ -416,6 +504,9 @@ struct NotificationSettingsView: View {
         }
     }
 
+    // MARK: - Computed Properties
+
+    /// Display name for the currently selected default sound
     private var currentSoundName: String {
         NotificationSoundService.builtInSounds.first { $0.id == soundService.defaultSoundId }?.name ?? "Default"
     }
@@ -423,9 +514,17 @@ struct NotificationSettingsView: View {
 
 // MARK: - Subscription Settings
 
+/// Subscription management tab showing current plan, pricing, and features.
 struct SubscriptionSettingsView: View {
+
+    // MARK: - Services & State
+
+    /// Subscription service for status and purchases
     @StateObject private var subscriptionService = SubscriptionService.shared
+    /// Whether paywall sheet is shown
     @State private var showPaywall = false
+
+    // MARK: - Body
 
     var body: some View {
         Form {
@@ -589,6 +688,9 @@ struct SubscriptionSettingsView: View {
         }
     }
 
+    // MARK: - Subviews
+
+    /// Badge showing current subscription status (TRIAL, PRO, EXPIRED, FREE)
     @ViewBuilder
     private var statusBadge: some View {
         switch subscriptionService.subscriptionStatus {
@@ -631,6 +733,9 @@ struct SubscriptionSettingsView: View {
         }
     }
 
+    // MARK: - Helper Views
+
+    /// Row displaying a pricing tier with optional badge
     private func pricingRow(_ name: String, price: String, badge: String? = nil) -> some View {
         HStack {
             Text(name)
@@ -646,6 +751,7 @@ struct SubscriptionSettingsView: View {
         .font(.subheadline)
     }
 
+    /// Row displaying a feature with checkmark
     private func featureRow(_ feature: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "checkmark.circle.fill")
@@ -659,8 +765,14 @@ struct SubscriptionSettingsView: View {
 
 // MARK: - Sync Settings View
 
+/// Sync settings tab with instructions for loading older messages from Android.
 struct SyncSettingsView: View {
+
+    // MARK: - Environment
+
     @EnvironmentObject var appState: AppState
+
+    // MARK: - Body
 
     var body: some View {
         Form {
@@ -737,8 +849,15 @@ struct SyncSettingsView: View {
 
 // MARK: - Support Settings View
 
+/// Support settings tab with AI assistant chat and external support links.
 struct SupportSettingsView: View {
+
+    // MARK: - State
+
+    /// Whether AI support chat sheet is shown
     @State private var showSupportChat = false
+
+    // MARK: - Body
 
     var body: some View {
         Form {
@@ -823,6 +942,7 @@ struct SupportSettingsView: View {
 
 // MARK: - About View
 
+/// About tab showing app info, version, and links.
 struct AboutView: View {
     var body: some View {
         VStack(spacing: 20) {

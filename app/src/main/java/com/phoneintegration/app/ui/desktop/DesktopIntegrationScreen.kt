@@ -1,3 +1,34 @@
+/**
+ * DesktopIntegrationScreen.kt
+ *
+ * This file implements the desktop integration screen, allowing users to pair
+ * their Android device with desktop (macOS) and web applications for cross-device
+ * SMS synchronization.
+ *
+ * Key Features:
+ * - QR code scanning for device pairing
+ * - Paired device management (view, unpair)
+ * - Sync settings configuration (background sync, notification mirroring)
+ * - Recovery code management for account recovery
+ * - Initial data sync (messages, contacts, call history)
+ * - Device limit tracking based on user plan
+ * - Photo sync capability
+ *
+ * Architecture:
+ * - Uses DesktopSyncService for pairing and sync operations
+ * - Uses UnifiedIdentityManager for authentication
+ * - Global PairedDevicesCache for efficient device list management
+ * - Supports both V1 and V2 QR code formats
+ * - Firebase Realtime Database for cloud sync
+ *
+ * Navigation:
+ * - Modal screen navigated from Settings
+ * - No outbound navigation (self-contained)
+ *
+ * @see DesktopSyncService for sync implementation
+ * @see UnifiedIdentityManager for authentication
+ * @see PairedDevicesCache for device caching
+ */
 package com.phoneintegration.app.ui.desktop
 
 import android.content.Context
@@ -40,8 +71,21 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
+// =============================================================================
+// region DEVICE CACHE
+// =============================================================================
+
 /**
- * Global cache for paired devices - survives screen navigation
+ * Global cache for paired devices that survives screen navigation.
+ *
+ * This singleton object maintains the paired device list across screen
+ * recompositions and navigations, preventing unnecessary network requests.
+ *
+ * Cache Features:
+ * - 30-second validity period
+ * - Stores device count, limit, and plan info
+ * - Thread-safe with Compose state
+ * - Supports force refresh when needed
  */
 private object PairedDevicesCache {
     private val _devices = mutableStateListOf<PairedDevice>()
@@ -80,6 +124,36 @@ private object PairedDevicesCache {
     }
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region MAIN COMPOSABLE
+// =============================================================================
+
+/**
+ * Main composable for the desktop integration/pairing screen.
+ *
+ * This screen allows users to:
+ * - Scan QR codes to pair with desktop/web apps
+ * - View and manage paired devices
+ * - Configure sync settings (background sync, notification mirror)
+ * - View/copy their recovery code
+ * - Manually sync photos
+ *
+ * State Hoisting Pattern:
+ * - onBack callback is hoisted for navigation
+ * - Internal state managed locally with remember
+ * - Shared state via PairedDevicesCache singleton
+ *
+ * Side Effects:
+ * - LaunchedEffect for initial device loading
+ * - DisposableEffect for lifecycle-aware settings refresh
+ * - Coroutine launches for async operations (pairing, sync)
+ *
+ * @param onBack Callback to navigate back to previous screen
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DesktopIntegrationScreen(
@@ -1726,7 +1800,24 @@ fun DesktopIntegrationScreen(
     }
 }
 
-// Helper function to parse QR codes (supports V1 and V2 formats)
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region QR CODE PARSING
+// =============================================================================
+
+/**
+ * Parses QR code data for device pairing.
+ *
+ * Supports two formats:
+ * - V1 format: {"token": "...", "name": "...", "platform": "...", "syncGroupId": "..."}
+ * - V2 format: {"v": 2, "token": "...", "device": {"id": "...", "name": "...", "type": "..."}, "expires": ...}
+ *
+ * @param qrData Raw QR code content string
+ * @return PairingQrData if parsing succeeds, null otherwise
+ */
 private fun parsePairingQrCode(qrData: String): PairingQrData? {
     return try {
         val json = org.json.JSONObject(qrData)
@@ -1787,7 +1878,12 @@ private fun parsePairingQrCode(qrData: String): PairingQrData? {
     }
 }
 
-// Check if QR code is in legacy format
+/**
+ * Checks if a QR code is in legacy format (non-JSON or missing token).
+ *
+ * @param qrData Raw QR code content string
+ * @return true if the code appears to be legacy format
+ */
 private fun isLegacyPairingCode(qrData: String): Boolean {
     return try {
         // Legacy codes might be plain strings or different JSON format
@@ -1797,7 +1893,27 @@ private fun isLegacyPairingCode(qrData: String): Boolean {
     }
 }
 
-// Data classes - Updated for V2 support
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region DATA CLASSES
+// =============================================================================
+
+/**
+ * Represents parsed pairing QR code data.
+ *
+ * Supports both V1 (legacy) and V2 (with device limits) formats.
+ *
+ * @property token The pairing token to exchange with the server
+ * @property name Display name for the device being paired
+ * @property platform Platform type ("macos", "web", etc.)
+ * @property syncGroupId Optional sync group ID for V1 format
+ * @property version QR format version (1 or 2)
+ * @property deviceId Persistent device ID (V2 only)
+ * @property expiresAt Token expiration timestamp (V2 only)
+ */
 data class PairingQrData(
     val token: String,
     val name: String,
@@ -1807,9 +1923,27 @@ data class PairingQrData(
     val deviceId: String? = null, // Persistent device ID (V2 only)
     val expiresAt: Long = 0       // Token expiration timestamp (V2 only)
 ) {
+    /** Whether this is a V2 format QR code with device limit support */
     val isV2: Boolean get() = version >= 2
 }
 
+// =============================================================================
+// endregion
+// =============================================================================
+
+// =============================================================================
+// region PAIRED DEVICE COMPONENTS
+// =============================================================================
+
+/**
+ * Displays a single paired device card with info and unpair action.
+ *
+ * Shows device icon (based on platform), name, platform type, last seen time,
+ * and sync status. Includes an unpair button with confirmation dialog.
+ *
+ * @param device The PairedDevice to display
+ * @param onUnpair Callback when user confirms unpair action
+ */
 @Composable
 private fun PairedDeviceItem(
     device: PairedDevice,
@@ -1961,3 +2095,7 @@ private fun PairedDeviceItem(
         )
     }
 }
+
+// =============================================================================
+// endregion
+// =============================================================================

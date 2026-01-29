@@ -5,11 +5,78 @@
 //  Main content view - shows either pairing screen or main interface
 //
 
+// =============================================================================
+// MARK: - Architecture Overview
+// =============================================================================
+//
+// ContentView is the root view of the SyncFlow macOS application. It acts as
+// the primary routing view, determining which interface to display based on
+// the application's pairing state.
+//
+// VIEW HIERARCHY:
+// ---------------
+// ContentView
+// ├── PairingView (when not paired)
+// │   └── QR code scanner / pairing flow
+// └── MainView (when paired)
+//     ├── SideRail (navigation tabs)
+//     ├── MessagesTabView / ContactsView / CallHistoryView / DealsView
+//     └── Various overlays (incoming calls, banners, sheets)
+//
+// STATE MANAGEMENT:
+// -----------------
+// - AppState (via @EnvironmentObject): Central app state from SyncFlowMacApp
+// - MessageStore (via @StateObject in MainView): SMS message data and operations
+// - SubscriptionService: Premium subscription status
+// - UsageTracker: Usage limits and statistics
+//
+// OVERLAY SYSTEM:
+// ---------------
+// ContentView uses ZStack to layer overlays on top of the main content:
+// 1. IncomingCallView - Full-screen phone call incoming overlay
+// 2. CallInProgressBanner - Top banner for active calls
+// 3. IncomingSyncFlowCallView - Device-to-device WebRTC incoming call
+// 4. SyncFlowCallView - Active WebRTC call UI
+//
+// Overlays are controlled by AppState published properties and use zIndex
+// to ensure proper layering order.
+//
+// SHEET PRESENTATIONS:
+// --------------------
+// - Photo Gallery: showPhotoGallery
+// - Notifications: showNotifications
+// - Scheduled Messages: showScheduledMessages
+//
+// ANIMATION:
+// ----------
+// Spring and easeInOut animations are applied to overlay transitions
+// for smooth user experience.
+//
+// =============================================================================
+
 import SwiftUI
 import AppKit
 
+// =============================================================================
+// MARK: - ContentView (Root View)
+// =============================================================================
+
+/// The root content view that routes between pairing and main interfaces.
+///
+/// ContentView observes AppState to determine whether to show:
+/// - `PairingView` when `appState.isPaired` is false
+/// - `MainView` when `appState.isPaired` is true
+///
+/// Additionally, it manages overlay presentations for incoming calls
+/// and active call UI that need to appear above all other content.
 struct ContentView: View {
+
+    /// The central application state injected from SyncFlowMacApp
     @EnvironmentObject var appState: AppState
+
+    // =========================================================================
+    // MARK: - View Body
+    // =========================================================================
 
     var body: some View {
         ZStack {
@@ -104,18 +171,67 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Main View (Split view with conversations and messages)
+// =============================================================================
+// MARK: - MainView (Primary Interface)
+// =============================================================================
 
+/// The main application interface shown after successful pairing.
+///
+/// MainView provides the primary user interface with:
+/// - Side rail navigation for switching between tabs
+/// - Content area that changes based on selected tab
+/// - Usage and subscription banners for free tier users
+/// - Media control bar for remote phone media playback
+///
+/// ## State Objects
+/// - `messageStore`: Manages SMS message data, created once per MainView instance
+/// - `subscriptionService`: Tracks premium subscription status
+/// - `usageTracker`: Monitors usage limits for free tier
+/// - `mediaControlService`: Remote media playback control
+///
+/// ## Tab Navigation
+/// The side rail provides access to four main sections:
+/// 1. **Messages**: SMS/MMS conversations (MessagesTabView)
+/// 2. **Contacts**: Phone contacts synced from device (ContactsView)
+/// 3. **Calls**: Call history and dialer (CallHistoryView)
+/// 4. **Deals**: Promotional offers (DealsView)
+///
+/// ## Lifecycle
+/// On appear, starts listening for messages if userId is available.
+/// Listens for userId changes to handle re-pairing scenarios.
 struct MainView: View {
+
+    // =========================================================================
+    // MARK: - Environment & State
+    // =========================================================================
+
+    /// Central app state from parent view
     @EnvironmentObject var appState: AppState
+
+    /// Message data store - manages conversations and messages
+    /// Created as @StateObject to persist across view updates
     @StateObject private var messageStore = MessageStore()
+
+    /// Subscription service for premium feature gating
     @StateObject private var subscriptionService = SubscriptionService.shared
+
+    /// Usage tracking for free tier limits
     @StateObject private var usageTracker = UsageTracker.shared
+
+    /// Media control service for remote playback control
     @ObservedObject private var mediaControlService = MediaControlService.shared
+
+    /// Local search text for filtering conversations
     @State private var searchText = ""
+
+    /// Modal presentation flags
     @State private var showKeyboardShortcuts = false
     @State private var showAIAssistant = false
     @State private var showSupportChat = false
+
+    // =========================================================================
+    // MARK: - View Body
+    // =========================================================================
 
     var body: some View {
         HStack(spacing: 0) {
@@ -255,13 +371,35 @@ struct MainView: View {
     }
 }
 
-// MARK: - Side Rail
+// =============================================================================
+// MARK: - SideRail (Navigation Component)
+// =============================================================================
 
+/// The vertical navigation rail on the left side of the main interface.
+///
+/// SideRail provides:
+/// - New message button at top
+/// - Tab navigation buttons (Messages, Contacts, Calls, Deals)
+/// - AI Assistant and Support Chat buttons at bottom
+/// - Settings button linking to preferences
+///
+/// The Deals tab has special styling with gradient and pulse animation
+/// to draw attention to promotional content.
 struct SideRail: View {
+
+    /// Currently selected navigation tab (binding to parent)
     @Binding var selectedTab: AppTab
+
+    /// Callback to show new message composer
     let onNewMessage: () -> Void
+
+    /// Optional callback to show AI assistant
     var onAIAssistant: (() -> Void)? = nil
+
+    /// Optional callback to show support chat
     var onSupportChat: (() -> Void)? = nil
+
+    /// Animation state for Deals icon pulse effect
     @State private var dealsIconPulse = false
 
     var body: some View {
@@ -388,11 +526,28 @@ struct SideRail: View {
     }
 }
 
-// MARK: - Messages Tab View
+// =============================================================================
+// MARK: - MessagesTabView (Conversations & Messages)
+// =============================================================================
 
+/// The messages tab content showing conversation list and message detail.
+///
+/// Uses NavigationSplitView for a two-column layout:
+/// - **Sidebar**: ConversationListView with search and conversation list
+/// - **Detail**: MessageView for selected conversation or SpamDetailView for spam filter
+///
+/// The view adapts based on `messageStore.currentFilter`:
+/// - Normal filter: Shows MessageView for selected conversation
+/// - Spam filter: Shows SpamDetailView for managing spam messages
 struct MessagesTabView: View {
+
+    /// Central app state for selected conversation
     @EnvironmentObject var appState: AppState
+
+    /// Message store for conversation and message data
     @EnvironmentObject var messageStore: MessageStore
+
+    /// Search text binding for filtering conversations
     @Binding var searchText: String
 
     var body: some View {
@@ -420,9 +575,12 @@ struct MessagesTabView: View {
     }
 }
 
+/// Detail view for spam message management.
+/// Shows spam messages from a selected sender with options to remove.
 struct SpamDetailView: View {
     @EnvironmentObject var messageStore: MessageStore
 
+    /// Currently selected spam sender address
     private var selectedAddress: String? {
         messageStore.selectedSpamAddress
     }
@@ -496,8 +654,12 @@ struct SpamDetailView: View {
     }
 }
 
-// MARK: - Empty State
+// =============================================================================
+// MARK: - EmptyStateView
+// =============================================================================
 
+/// Placeholder view shown when no conversation is selected.
+/// Prompts user to select a conversation from the sidebar.
 struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 20) {
@@ -519,12 +681,29 @@ struct EmptyStateView: View {
     }
 }
 
-// MARK: - Usage Limit Warning Banner
+// =============================================================================
+// MARK: - UsageLimitWarningBanner
+// =============================================================================
 
+/// Warning banner shown when user approaches or exceeds usage limits.
+///
+/// Displays for free tier users when:
+/// - Monthly upload limit is reached (MMS won't sync)
+/// - Storage limit is exceeded
+///
+/// Expandable to show detailed usage breakdown with progress bars.
 struct UsageLimitWarningBanner: View {
+
+    /// Current usage statistics
     let stats: UsageStats
+
+    /// Callback to refresh usage stats from server
     let onRefresh: () -> Void
+
+    /// Whether the detailed breakdown is expanded
     @State private var isExpanded = false
+
+    /// Whether a refresh is in progress
     @State private var isRefreshing = false
 
     var body: some View {
@@ -616,10 +795,22 @@ struct UsageLimitWarningBanner: View {
     }
 }
 
-// MARK: - Upgrade Banner (Bottom of screen for free users)
+// =============================================================================
+// MARK: - UpgradeBanner
+// =============================================================================
 
+/// Promotional banner shown at the bottom for free tier users.
+///
+/// Encourages upgrade to SyncFlow Pro with:
+/// - Feature highlights (photo sync, 500MB storage)
+/// - Current pricing
+/// - Direct upgrade button opening paywall
 struct UpgradeBanner: View {
+
+    /// Subscription service to check current plan
     @StateObject private var subscriptionService = SubscriptionService.shared
+
+    /// Whether to show the paywall sheet
     @State private var showPaywall = false
 
     var body: some View {

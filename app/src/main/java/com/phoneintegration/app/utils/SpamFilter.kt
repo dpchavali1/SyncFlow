@@ -1,3 +1,83 @@
+/**
+ * SpamFilter.kt
+ *
+ * Comprehensive spam detection utility that analyzes SMS messages using pattern matching,
+ * keyword detection, and heuristics to identify spam, scams, and promotional messages.
+ *
+ * ## Architecture Overview
+ *
+ * The spam filter uses a scoring system where each spam indicator adds to a confidence score.
+ * When the score exceeds a threshold (default 0.5), the message is classified as spam.
+ *
+ * ```
+ * Message Input --> Whitelist Check (trusted senders bypass)
+ *                        |
+ *                        v
+ *                 Keyword Matching (+0.15 per keyword)
+ *                        |
+ *                        v
+ *                 URL Analysis (+0.35 for suspicious URLs)
+ *                        |
+ *                        v
+ *                 Sender Pattern Check (+0.25 for suspicious senders)
+ *                        |
+ *                        v
+ *                 Additional Heuristics (caps, special chars, etc.)
+ *                        |
+ *                        v
+ *                 Final Score --> Spam Classification
+ * ```
+ *
+ * ## Spam Categories Detected
+ *
+ * 1. **Financial Scams**: Fake loans, card blocked alerts, phishing
+ * 2. **Toll/Traffic Scams**: Fake toll violation notices (very common)
+ * 3. **Delivery Scams**: Fake package notifications (USPS, FedEx impersonation)
+ * 4. **Dating/Romance Spam**: Unsolicited dating messages
+ * 5. **Political Spam**: Campaign messages and fundraising
+ * 6. **Promotional Spam**: Aggressive marketing, discount offers
+ * 7. **Brand Impersonation**: Messages claiming to be from Amazon, Netflix, etc.
+ *
+ * ## Trusted Senders (Never Spam)
+ *
+ * Bank transaction alerts, payment confirmations, and government notices from
+ * recognized senders are automatically whitelisted. Examples:
+ * - Banks: HDFC, ICICI, SBI, AXIS, etc.
+ * - Payments: Paytm, PhonePe, GPay
+ * - Government: UIDAI, EPFO
+ *
+ * ## Score Weights
+ *
+ * | Indicator                    | Score Weight |
+ * |------------------------------|--------------|
+ * | High confidence scam phrase  | +0.60        |
+ * | Brand impersonation          | +0.50        |
+ * | Dating spam phrase           | +0.50        |
+ * | Old unread message (>72h)    | +0.55        |
+ * | Suspicious URL               | +0.35        |
+ * | Promotional sender prefix    | +0.30        |
+ * | Spam keyword (each, max 4)   | +0.15        |
+ * | Saved contact                | -0.15        |
+ *
+ * ## Usage
+ *
+ * ```kotlin
+ * val result = SpamFilter.checkMessage(
+ *     body = message.body,
+ *     senderAddress = message.address,
+ *     isFromContact = isKnownContact,
+ *     threshold = 0.5f
+ * )
+ *
+ * if (result.isSpam) {
+ *     // Handle spam message
+ *     Log.d("Spam", "Confidence: ${result.confidence}, Reasons: ${result.reasons}")
+ * }
+ * ```
+ *
+ * @see checkMessage for the main spam detection method
+ * @see SpamCheckResult for the result data structure
+ */
 package com.phoneintegration.app.utils
 
 import android.content.Context
@@ -8,12 +88,27 @@ import kotlinx.coroutines.withContext
 /**
  * Spam filter utility for detecting and managing spam messages.
  * Uses pattern matching and heuristics to identify spam.
+ *
+ * This is an object (singleton) so the pattern lists are loaded once and reused.
  */
 object SpamFilter {
 
     // ==========================================
-    // TRUSTED SENDERS - Never mark as spam
+    // REGION: Trusted Senders Whitelist
     // ==========================================
+
+    /**
+     * Known trusted senders that should NEVER be marked as spam.
+     *
+     * These include:
+     * - Indian banks (HDFC, ICICI, SBI, etc.)
+     * - Payment services (Paytm, PhonePe, GPay)
+     * - Credit card companies
+     * - Insurance and investment firms
+     * - Government agencies
+     *
+     * The sender ID is checked against this set (case-insensitive contains match).
+     */
     private val TRUSTED_BANK_SENDERS = setOf(
         // Indian Banks - Transaction alerts
         "HDFCBK", "HDFC", "HDFCBANK",
@@ -58,7 +153,10 @@ object SpamFilter {
         "INCOME", "ITREFUND"
     )
 
-    // Trusted sender patterns (regex)
+    /**
+     * Regex patterns for trusted sender formats.
+     * Matches the Indian bank SMS format: XX-BANKNAME (e.g., "AD-HDFCBANK")
+     */
     private val TRUSTED_SENDER_PATTERNS = listOf(
         Regex("""^[A-Z]{2}-[A-Z]*HDFC[A-Z]*$""", RegexOption.IGNORE_CASE),
         Regex("""^[A-Z]{2}-[A-Z]*ICICI[A-Z]*$""", RegexOption.IGNORE_CASE),
@@ -69,8 +167,13 @@ object SpamFilter {
     )
 
     // ==========================================
-    // DATING/ROMANCE SPAM PATTERNS
+    // REGION: Dating/Romance Spam Detection
     // ==========================================
+
+    /**
+     * Phrases commonly used in dating/romance spam messages.
+     * These are high-confidence spam indicators.
+     */
     private val DATING_SPAM_PHRASES = listOf(
         "hey babe",
         "hey handsome",
@@ -99,13 +202,35 @@ object SpamFilter {
         "adult fun"
     )
 
+    /** Domain keywords that indicate a dating/adult spam URL */
     private val DATING_SPAM_DOMAINS = listOf(
         "intimate", "dating", "hookup", "singles", "meet", "love",
         "affair", "flirt", "chat", "sexy", "hot", "naughty", "adult",
         "match", "date", "romance", "lonely", "finder"
     )
 
-    // Common spam keywords and patterns
+    // ==========================================
+    // REGION: Spam Keywords Database
+    // ==========================================
+
+    /**
+     * Comprehensive list of spam keywords and phrases.
+     *
+     * Organized by category:
+     * - Lottery/Prize scams
+     * - Toll/Traffic scams
+     * - Financial scams
+     * - Banking/Card scams
+     * - Phishing attempts
+     * - IRS/Tax scams
+     * - Delivery scams
+     * - Job scams
+     * - Dating/Adult spam
+     * - Political campaigns
+     * - Promotional spam
+     *
+     * Each match adds +0.15 to the spam score (capped at 4 matches = +0.60)
+     */
     private val SPAM_KEYWORDS = listOf(
         // Lottery/Prize scams
         "congratulations you have won",
@@ -422,7 +547,21 @@ object SpamFilter {
         "valued customer"
     )
 
-    // High confidence spam phrases (instant flag)
+    // ==========================================
+    // REGION: High Confidence Spam Phrases
+    // ==========================================
+
+    /**
+     * High-confidence spam phrases that indicate definite spam/scam.
+     * These add +0.60 to the spam score for immediate flagging.
+     *
+     * Includes:
+     * - Toll scam phrases ("your toll", "pay your toll")
+     * - Threat phrases ("legal action", "arrest warrant")
+     * - Delivery scam phrases ("package could not be delivered")
+     * - Dating scam patterns
+     * - Brand impersonation indicators
+     */
     private val HIGH_CONFIDENCE_PHRASES = listOf(
         // Toll scams
         "your toll",
@@ -472,7 +611,16 @@ object SpamFilter {
         "google account"
     )
 
-    // Known brand domains for impersonation detection
+    // ==========================================
+    // REGION: Brand Impersonation Detection
+    // ==========================================
+
+    /**
+     * Mapping of brand names to their legitimate domains.
+     *
+     * Used to detect brand impersonation: if a message mentions "Amazon"
+     * but links to a non-Amazon domain, it's likely a scam.
+     */
     private val BRAND_DOMAINS = mapOf(
         "amazon" to listOf("amazon.com", "amazon.in", "amazon.co.uk", "amzn.com", "amzn.to"),
         "usps" to listOf("usps.com"),
@@ -488,7 +636,19 @@ object SpamFilter {
         "target" to listOf("target.com")
     )
 
-    // Suspicious URL patterns
+    // ==========================================
+    // REGION: Suspicious URL Patterns
+    // ==========================================
+
+    /**
+     * Regex patterns for suspicious URLs commonly used in spam.
+     *
+     * Detects:
+     * - URL shorteners (bit.ly, tinyurl.com, etc.)
+     * - Suspicious TLDs (.xyz, .top, .click, .icu, etc.)
+     * - Fake toll/government domains
+     * - Fake carrier domains (usps/fedex impersonation)
+     */
     private val SUSPICIOUS_URL_PATTERNS = listOf(
         // URL shorteners (commonly used in spam)
         Regex("""bit\.ly/\w+""", RegexOption.IGNORE_CASE),
@@ -542,25 +702,69 @@ object SpamFilter {
         Regex("""fedex.*\..*(?!fedex\.com)""", RegexOption.IGNORE_CASE)
     )
 
-    // Common spam sender patterns
+    // ==========================================
+    // REGION: Suspicious Sender Patterns
+    // ==========================================
+
+    /**
+     * Regex patterns for suspicious sender addresses.
+     * Note: These need to be balanced - some legitimate senders use similar formats.
+     */
     private val SPAM_SENDER_PATTERNS = listOf(
         Regex("""^[A-Z]{2}-\w+"""),  // Shortcodes like "AD-SPAM"
         Regex("""^\d{5,6}$"""),       // 5-6 digit shortcodes
         Regex("""^[A-Z]{6,}$""")      // All caps sender names
     )
 
+    // ==========================================
+    // REGION: Data Classes
+    // ==========================================
+
+    /**
+     * Result of a spam check operation.
+     *
+     * @property isSpam True if the message is classified as spam
+     * @property confidence Score from 0.0 to 1.0 indicating spam likelihood
+     * @property reasons List of human-readable reasons for the classification
+     */
     data class SpamCheckResult(
         val isSpam: Boolean,
         val confidence: Float,  // 0.0 to 1.0
         val reasons: List<String>
     )
 
+    // ==========================================
+    // REGION: Public API
+    // ==========================================
+
     /**
-     * Check if a message is likely spam.
-     * Returns a SpamCheckResult with confidence level and reasons.
-     * @param threshold The confidence threshold for spam classification (default 0.5)
-     * @param isRead Whether the message has been read (unread messages from unknown senders are more suspicious)
-     * @param messageAgeHours How old the message is in hours (old unread = more suspicious)
+     * Checks if a message is likely spam using multi-factor analysis.
+     *
+     * ## Algorithm Overview
+     *
+     * 1. **Whitelist Check**: Trusted senders (banks, etc.) return immediately as not spam
+     * 2. **High Confidence Phrases**: Check for definite scam phrases (+0.60)
+     * 3. **Keyword Matching**: Count spam keywords (up to +0.60)
+     * 4. **URL Analysis**: Check for suspicious URLs (+0.35)
+     * 5. **Sender Analysis**: Check sender format patterns
+     * 6. **Content Heuristics**: Caps ratio, special chars, length
+     * 7. **Unread Heuristic**: Old unread messages from unknowns are suspicious
+     * 8. **Brand Impersonation**: Detect fake brand links
+     * 9. **Dating Spam**: Check dating-specific patterns
+     *
+     * ## Threshold Guidelines
+     *
+     * - 0.3: Very aggressive (catches more spam, more false positives)
+     * - 0.5: Balanced (default, recommended)
+     * - 0.7: Conservative (fewer false positives, might miss some spam)
+     *
+     * @param body The message body text
+     * @param senderAddress The sender's phone number or shortcode
+     * @param isFromContact True if sender is in contacts (reduces spam score)
+     * @param threshold Confidence threshold for spam classification (default 0.5)
+     * @param isRead True if message has been read (unread messages more suspicious)
+     * @param messageAgeHours Age of the message in hours (old unread = suspicious)
+     * @return SpamCheckResult with classification and reasons
      */
     fun checkMessage(
         body: String,
@@ -576,20 +780,21 @@ object SpamFilter {
         val lowerBody = body.lowercase()
         val upperSender = senderAddress.uppercase()
 
-        // ==========================================
-        // WHITELIST CHECK - Trusted senders are NEVER spam
-        // ==========================================
+        // STEP 1: Whitelist check - trusted senders are NEVER spam
+        // This is the first check because it's fast and definitive
         if (isTrustedSender(senderAddress)) {
             return SpamCheckResult(isSpam = false, confidence = 0f, reasons = listOf("Trusted sender"))
         }
 
+        // STEP 2: Contact bonus
         // Messages from saved contacts are less likely to be spam
-        // But reduce the bonus - ads can come from "saved" business contacts
+        // But we limit the bonus since businesses can be saved as contacts
         if (isFromContact) {
             score -= 0.15f
         }
 
-        // HIGH PRIORITY: Check for high confidence spam phrases (scams)
+        // STEP 3: High confidence phrase detection (scam patterns)
+        // These are definite spam indicators that add significant score
         val matchedHighConfidence = HIGH_CONFIDENCE_PHRASES.filter { phrase ->
             lowerBody.contains(phrase)
         }
@@ -598,7 +803,8 @@ object SpamFilter {
             reasons.add("Scam phrase detected: ${matchedHighConfidence.first()}")
         }
 
-        // Check for spam keywords
+        // STEP 4: Keyword matching
+        // Check against comprehensive spam keyword database
         val matchedKeywords = SPAM_KEYWORDS.filter { keyword ->
             lowerBody.contains(keyword)
         }
@@ -607,21 +813,24 @@ object SpamFilter {
             reasons.add("Contains spam keywords: ${matchedKeywords.take(3).joinToString(", ")}")
         }
 
-        // Check for suspicious URLs
+        // STEP 5: URL analysis
+        // Check for URL shorteners and suspicious TLDs
         val hasShortUrl = SUSPICIOUS_URL_PATTERNS.any { it.containsMatchIn(body) }
         if (hasShortUrl) {
             score += 0.35f
             reasons.add("Contains shortened/suspicious URL")
         }
 
-        // Check sender patterns (shortcodes, all caps, etc.)
+        // STEP 6: Sender pattern analysis
+        // Check for suspicious sender formats (shortcodes, all caps, etc.)
         val isSuspiciousSender = SPAM_SENDER_PATTERNS.any { it.matches(senderAddress) }
         if (isSuspiciousSender) {
             score += 0.25f
             reasons.add("Suspicious sender format")
         }
 
-        // Check for promotional sender prefixes (AD-, BZ-, etc.)
+        // STEP 7: Promotional sender prefix check
+        // Common prefixes used by marketing/spam senders
         if (upperSender.startsWith("AD-") || upperSender.startsWith("BZ-") ||
             upperSender.startsWith("DM-") || upperSender.startsWith("VM-") ||
             upperSender.startsWith("HP-") || upperSender.startsWith("JD-") ||
@@ -688,8 +897,9 @@ object SpamFilter {
             reasons.add("Unknown/hidden sender")
         }
 
-        // Persistently unread messages from non-contacts are suspicious
-        // Spam/bulk SMS often remain unread because users recognize them as spam
+        // STEP 8: Unread message heuristic
+        // Messages that remain unread for a long time from unknown senders
+        // are often spam that users instinctively ignore
         if (!isRead && !isFromContact) {
             if (messageAgeHours > 72) {
                 // Very old unread messages (>3 days) are highly suspicious
@@ -706,7 +916,8 @@ object SpamFilter {
             }
         }
 
-        // Brand impersonation detection - message mentions brand but link doesn't match
+        // STEP 9: Brand impersonation detection
+        // If message mentions a brand but links to a different domain, it's likely a scam
         for ((brand, validDomains) in BRAND_DOMAINS) {
             if (lowerBody.contains(brand)) {
                 // Extract URLs from body
@@ -727,9 +938,8 @@ object SpamFilter {
             }
         }
 
-        // ==========================================
-        // DATING/ROMANCE SPAM DETECTION
-        // ==========================================
+        // STEP 10: Dating/romance spam detection
+        // Check for phrases and domains commonly used in dating spam
         val hasDatingPhrase = DATING_SPAM_PHRASES.any { lowerBody.contains(it) }
         if (hasDatingPhrase) {
             score += 0.5f
@@ -755,7 +965,8 @@ object SpamFilter {
             reasons.add("Casual greeting + link from unknown sender")
         }
 
-        // Normalize score to 0-1 range
+        // FINAL: Normalize score and return result
+        // Clamp to 0-1 range and compare against threshold
         val confidence = score.coerceIn(0f, 1f)
         val isSpam = confidence >= threshold
 
@@ -766,9 +977,18 @@ object SpamFilter {
         )
     }
 
+    // ==========================================
+    // REGION: Helper Methods
+    // ==========================================
+
     /**
-     * Check if sender is a trusted/whitelisted sender (banks, payments, government)
-     * These senders should NEVER be marked as spam
+     * Checks if a sender is in the trusted whitelist.
+     *
+     * Trusted senders include banks, payment services, and government agencies.
+     * These should NEVER be marked as spam as they send important transaction alerts.
+     *
+     * @param senderAddress The sender's phone number or shortcode
+     * @return True if sender is trusted, false otherwise
      */
     private fun isTrustedSender(senderAddress: String): Boolean {
         val upperSender = senderAddress.uppercase().trim()
@@ -798,15 +1018,25 @@ object SpamFilter {
     }
 
     /**
-     * Check if a message is spam and should be filtered.
-     * Simple boolean check for quick filtering.
+     * Simple boolean check for spam classification.
+     *
+     * Convenience method that wraps checkMessage() for quick filtering.
+     * Uses default threshold of 0.5.
+     *
+     * @param body The message body text
+     * @param senderAddress The sender's phone number or shortcode
+     * @param isFromContact True if sender is in contacts
+     * @return True if message is classified as spam
      */
     fun isSpam(body: String, senderAddress: String, isFromContact: Boolean = false): Boolean {
         return checkMessage(body, senderAddress, isFromContact).isSpam
     }
 
     /**
-     * Get spam classification label for UI
+     * Gets a human-readable spam classification label for UI display.
+     *
+     * @param confidence Spam confidence score from 0.0 to 1.0
+     * @return User-friendly label: "High confidence spam", "Likely spam", etc.
      */
     fun getSpamLabel(confidence: Float): String {
         return when {

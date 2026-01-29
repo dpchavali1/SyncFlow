@@ -1,22 +1,84 @@
+//
+//  AIAssistantView.swift
+//  SyncFlowMac
+//
+//  =============================================================================
+//  PURPOSE:
+//  This view provides an AI-powered assistant for analyzing SMS message data.
+//  It presents a chat interface where users can ask questions about their
+//  messages, and the AI analyzes local data to provide insights on spending,
+//  bills, packages, subscriptions, OTP codes, and more.
+//
+//  USER INTERACTIONS:
+//  - Type questions in the input bar and press Enter or tap send
+//  - Tap quick action cards for common queries (spending, bills, packages, etc.)
+//  - View smart digest summary of monthly activity
+//  - Copy AI responses to clipboard
+//  - Tap follow-up suggestions to continue the conversation
+//  - Start a new chat session with the "New Chat" button
+//  - Dismiss the view with the X button
+//
+//  STATE MANAGEMENT:
+//  - @EnvironmentObject for MessageStore (provides message data for analysis)
+//  - Local @State for chat history, input text, processing state
+//  - Cached digest data to avoid recalculating on every render
+//  - @FocusState for input field keyboard focus
+//
+//  PERFORMANCE CONSIDERATIONS:
+//  - Message analysis limited to 500-1000 recent messages for performance
+//  - Digest generation runs on background thread
+//  - Results are cached to avoid reprocessing
+//  - LazyVStack used for chat history virtualization
+//  - AI processing happens asynchronously to keep UI responsive
+//  =============================================================================
+
 import SwiftUI
 
+// MARK: - Main AI Assistant View
+
+/// Chat interface for the AI assistant that analyzes message data.
+/// Provides insights on spending, bills, packages, subscriptions, and more.
 struct AIAssistantView: View {
+
+    // MARK: - Environment
+
+    /// Message store providing SMS data for analysis
     @EnvironmentObject var messageStore: MessageStore
+    /// Environment dismiss action for closing the view
     @Environment(\.dismiss) private var dismiss
 
+    // MARK: - Chat State
+
+    /// Current text in the input field
     @State private var inputText = ""
+    /// Array of chat messages (user queries and AI responses)
     @State private var chatHistory: [AIChatMessage] = []
+    /// Whether the AI is currently processing a query
     @State private var isProcessing = false
+    /// Focus state for the input field
     @FocusState private var isInputFocused: Bool
 
+    // MARK: - Services
+
+    /// AI assistant service for processing queries
     private let aiService = AIAssistantService.shared
 
+    // MARK: - Digest State
+
+    /// Whether to show the smart digest card
     @State private var showDigest = true
+    /// Whether a response was just copied (for UI feedback)
     @State private var copiedResponse = false
+    /// Cached digest data to avoid recomputation
     @State private var cachedDigest: SmartDigest? = nil
+    /// Cached subscription count for digest display
     @State private var cachedSubscriptionCount: Int = 0
+    /// Whether digest is currently being generated
     @State private var isLoadingDigest = true
 
+    // MARK: - Quick Actions
+
+    /// Predefined quick action buttons for common queries
     private let quickActions: [AIQuickAction] = [
         AIQuickAction(icon: "chart.bar.fill", title: "Spending", subtitle: "Track expenses", query: "How much did I spend this month?", color: "blue"),
         AIQuickAction(icon: "calendar.badge.clock", title: "Bills", subtitle: "Due dates", query: "Show my upcoming bills", color: "orange"),
@@ -27,6 +89,8 @@ struct AIAssistantView: View {
         AIQuickAction(icon: "key.fill", title: "OTPs", subtitle: "Verification codes", query: "Show recent OTP codes", color: "red"),
         AIQuickAction(icon: "list.bullet.rectangle", title: "Transactions", subtitle: "Recent activity", query: "List my recent transactions", color: "teal"),
     ]
+
+    // MARK: - Body
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,6 +144,7 @@ struct AIAssistantView: View {
 
     // MARK: - Header
 
+    /// Header section with AI avatar, title, new chat button, and close button.
     private var header: some View {
         HStack(spacing: 12) {
             // AI Avatar
@@ -148,6 +213,8 @@ struct AIAssistantView: View {
 
     // MARK: - Smart Digest Card
 
+    /// Card showing monthly spending summary, subscriptions, bills, and packages.
+    /// Loads data asynchronously on first appear.
     private var smartDigestCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -257,6 +324,8 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Loads digest data asynchronously on a background thread.
+    /// Limits processing to 500 most recent messages for performance.
     private func loadDigestAsync() {
         guard cachedDigest == nil else { return }
         isLoadingDigest = true
@@ -277,6 +346,8 @@ struct AIAssistantView: View {
 
     // MARK: - Welcome Section
 
+    /// Welcome message shown when chat history is empty.
+    /// Introduces the AI assistant and its capabilities.
     private var welcomeSection: some View {
         VStack(spacing: 12) {
             ZStack {
@@ -309,6 +380,8 @@ struct AIAssistantView: View {
 
     // MARK: - Quick Actions Grid
 
+    /// Grid of quick action buttons for common queries.
+    /// Each button sends a predefined query to the AI.
     private var quickActionsGrid: some View {
         LazyVGrid(columns: [
             GridItem(.flexible()),
@@ -321,6 +394,8 @@ struct AIAssistantView: View {
         .padding(.horizontal, 16)
     }
 
+    /// Individual quick action card with icon, title, and subtitle.
+    /// - Parameter action: The quick action data to display
     private func quickActionCard(_ action: AIQuickAction) -> some View {
         Button {
             processQuery(action.query)
@@ -359,6 +434,9 @@ struct AIAssistantView: View {
 
     // MARK: - Chat Bubble
 
+    /// Creates a chat bubble for a user or AI message.
+    /// User messages align right, AI messages align left with avatar.
+    /// - Parameter message: The chat message to display
     private func chatBubble(for message: AIChatMessage) -> some View {
         HStack(alignment: .top, spacing: 8) {
             if !message.isUser {
@@ -388,6 +466,9 @@ struct AIAssistantView: View {
         }
     }
 
+    // MARK: - Avatars
+
+    /// AI avatar with gradient background
     private var aiAvatar: some View {
         ZStack {
             Circle()
@@ -404,6 +485,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// User avatar with person icon
     private var userAvatar: some View {
         ZStack {
             Circle()
@@ -416,6 +498,9 @@ struct AIAssistantView: View {
         }
     }
 
+    // MARK: - Message Bubbles
+
+    /// Simple text bubble for user messages
     private func textBubble(text: String, isUser: Bool) -> some View {
         Text(text)
             .font(.body)
@@ -426,6 +511,8 @@ struct AIAssistantView: View {
             .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
+    /// Rich response bubble for AI answers with various result card types.
+    /// Includes summary, detailed results, and follow-up suggestions.
     private func responseBubble(response: AIResponse) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // Summary with copy button
@@ -487,7 +574,9 @@ struct AIAssistantView: View {
     }
 
     // MARK: - Result Cards
+    // These methods create specialized cards for different AI response types
 
+    /// Card displaying spending analysis with total, stats, and top merchants
     private func spendingCard(_ analysis: SpendingAnalysis) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // Total
@@ -539,6 +628,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card displaying upcoming bills with due dates and amounts
     private func billsCard(_ bills: [BillReminder]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(bills.prefix(5)) { bill in
@@ -597,6 +687,7 @@ struct AIAssistantView: View {
         return formatter.localizedString(for: date, relativeTo: Date())
     }
 
+    /// Card displaying package tracking with status and carrier info
     private func packagesCard(_ packages: [PackageStatus]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(packages.prefix(6)) { package in
@@ -657,6 +748,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card displaying account balances from bank notifications
     private func balancesCard(_ balances: [BalanceInfo]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // Filter to show balances with amounts first
@@ -721,6 +813,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card displaying OTP codes with copy functionality and expiry status
     private func otpsCard(_ otps: [OTPInfo]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(otps.prefix(10)) { otp in
@@ -771,6 +864,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card displaying recent transactions with merchant and amount
     private func transactionsCard(_ transactions: [ParsedTransaction]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(transactions.prefix(10)) { txn in
@@ -816,6 +910,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card displaying detected recurring subscriptions with monthly estimate
     private func subscriptionsCard(_ recurring: [RecurringExpense]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // Monthly total
@@ -876,6 +971,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card displaying smart digest summary with key metrics
     private func digestCard(_ digest: SmartDigest) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // This month spending
@@ -924,6 +1020,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card showing spending comparison between this month and last month
     private func trendsCard(thisMonth: SpendingAnalysis, lastMonth: SpendingAnalysis) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // Comparison
@@ -979,6 +1076,9 @@ struct AIAssistantView: View {
         }
     }
 
+    // MARK: - Helper Components
+
+    /// Compact stat box with icon, value, and label
     private func statBox(icon: String, title: String, subtitle: String, color: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
@@ -1000,12 +1100,14 @@ struct AIAssistantView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Simple help text card
     private func helpCard(_ text: String) -> some View {
         Text(text)
             .font(.subheadline)
             .lineSpacing(4)
     }
 
+    /// Card shown when AI query returns no results
     private func noResultsCard(_ message: String) -> some View {
         HStack {
             Image(systemName: "magnifyingglass")
@@ -1016,6 +1118,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Card shown when an error occurs during processing
     private func errorCard(_ message: String) -> some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -1026,6 +1129,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Displays clickable follow-up query suggestions
     private func followUpSuggestions(_ suggestions: [String]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Try asking:")
@@ -1053,6 +1157,7 @@ struct AIAssistantView: View {
 
     // MARK: - Typing Indicator
 
+    /// Animated typing indicator shown while AI is processing
     private var typingIndicator: some View {
         HStack(alignment: .top, spacing: 8) {
             aiAvatar
@@ -1076,6 +1181,7 @@ struct AIAssistantView: View {
 
     // MARK: - Input Bar
 
+    /// Text input field with send button for user queries
     private var inputBar: some View {
         HStack(spacing: 12) {
             TextField("Ask about spending, bills, packages...", text: $inputText)
@@ -1108,6 +1214,10 @@ struct AIAssistantView: View {
 
     // MARK: - Helper Methods
 
+    /// Processes a user query through the AI service.
+    /// Adds user message to history, processes on background thread,
+    /// then adds AI response to history.
+    /// - Parameter query: The user's question or command
     private func processQuery(_ query: String) {
         guard !query.isEmpty else { return }
 
@@ -1131,12 +1241,15 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Formats a date as a short time string
     private func formatTime(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }
 
+    /// Copies the AI response to clipboard in plain text format.
+    /// Formats different response types appropriately.
     private func copyResponseToClipboard(_ response: AIResponse) {
         var text = response.summary + "\n\n"
 
@@ -1199,11 +1312,13 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Formats an amount with the appropriate currency symbol
     private func formatCurrency(_ amount: Double, _ currency: String) -> String {
         let symbol = currency == "INR" ? "₹" : "$"
         return "\(symbol)\(String(format: "%.2f", amount))"
     }
 
+    /// Creates a compact stat pill with value and label
     private func statPill(label: String, value: String) -> some View {
         VStack(spacing: 2) {
             Text(value)
@@ -1219,6 +1334,7 @@ struct AIAssistantView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Converts color name string to SwiftUI Color
     private func colorForString(_ color: String) -> Color {
         switch color {
         case "blue": return .blue
@@ -1233,6 +1349,7 @@ struct AIAssistantView: View {
         }
     }
 
+    /// Returns appropriate color for package delivery status
     private func colorForDeliveryStatus(_ status: DeliveryStatus) -> Color {
         switch status {
         case .delivered, .outForDelivery: return .green
@@ -1244,8 +1361,13 @@ struct AIAssistantView: View {
 
 // MARK: - Flow Layout
 
+/// Custom layout that arranges views in a flowing grid, wrapping to new lines as needed.
+/// Used for displaying follow-up suggestion chips that wrap based on available width.
 struct FlowLayout: Layout {
+    /// Spacing between items
     var spacing: CGFloat = 8
+
+    // MARK: - Layout Protocol
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let result = arrangeSubviews(proposal: proposal, subviews: subviews)
@@ -1260,6 +1382,9 @@ struct FlowLayout: Layout {
         }
     }
 
+    // MARK: - Private Helpers
+
+    /// Calculates positions for all subviews in a flowing layout
     private func arrangeSubviews(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, positions: [CGPoint]) {
         let maxWidth = proposal.width ?? .infinity
         var positions: [CGPoint] = []
@@ -1270,6 +1395,7 @@ struct FlowLayout: Layout {
         for subview in subviews {
             let size = subview.sizeThatFits(.unspecified)
 
+            // Wrap to next line if needed
             if currentX + size.width > maxWidth && currentX > 0 {
                 currentX = 0
                 currentY += lineHeight + spacing

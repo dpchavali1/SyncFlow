@@ -1,5 +1,59 @@
 package com.phoneintegration.app
 
+// =============================================================================
+// ARCHITECTURE OVERVIEW
+// =============================================================================
+//
+// SyncFlowApp is the Android Application class and primary entry point for the
+// SyncFlow Android application. It initializes all core services and managers
+// required for the app to function.
+//
+// INITIALIZATION ORDER:
+// ---------------------
+// The initialization order is critical for proper app function:
+// 1. ErrorHandler - Must be first to catch any initialization errors
+// 2. Firebase Security Config - Certificate pinning for secure communication
+// 3. AuthManager - Session management and authentication
+// 4. SecurityMonitor - Monitors for security threats and anomalies
+// 5. InputValidation - Sanitizes user input to prevent injection attacks
+// 6. SQLCipher - Encrypted local database for sensitive data
+// 7. DealNotificationScheduler - Background job for promotional notifications
+// 8. IntelligentSyncManager - Cross-platform message sync coordination
+// 9. UnifiedIdentityManager - Single user identity across all devices
+// 10. DataCleanupService - Firebase storage cost management
+// 11. SpamFilterWorker - Background spam detection and filtering
+//
+// ERROR HANDLING STRATEGY:
+// ------------------------
+// Each initialization step is wrapped in try-catch to ensure:
+// - Individual failures don't crash the entire app
+// - Failures are logged for debugging
+// - The app continues with reduced functionality if non-critical services fail
+// - Only truly critical failures (caught in outer try-catch) cause app termination
+//
+// COIL IMAGE LOADING:
+// -------------------
+// The app implements ImageLoaderFactory to provide a custom Coil ImageLoader
+// with optimized caching for contact photos and message images:
+// - Memory cache: 25% of available memory
+// - Disk cache: 100MB for persistent image storage
+//
+// SERVICE ARCHITECTURE:
+// ---------------------
+// Services use the singleton pattern accessed via getInstance():
+// - Thread-safe lazy initialization
+// - Single instance shared across all components
+// - Lifecycle managed by the Application
+//
+// LIFECYCLE CONSIDERATIONS:
+// -------------------------
+// - Application.onCreate() runs before any Activity/Service
+// - CallMonitorService is started from MainActivity to avoid
+//   ForegroundServiceStartNotAllowedException on Android 14+
+// - Background workers are scheduled via WorkManager for battery efficiency
+//
+// =============================================================================
+
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -16,8 +70,42 @@ import com.phoneintegration.app.utils.InputValidation
 import net.sqlcipher.database.SQLiteDatabase
 import java.io.File
 
+/**
+ * Main Application class for SyncFlow Android app.
+ *
+ * This class serves as the entry point for the Android application and is responsible
+ * for initializing all core services, managers, and configurations before any Activity
+ * or Service is created.
+ *
+ * ## Initialization Flow
+ * The `onCreate()` method initializes services in a specific order to ensure proper
+ * dependency resolution. Each initialization is wrapped in try-catch to allow graceful
+ * degradation if a non-critical service fails.
+ *
+ * ## Image Loading
+ * Implements [ImageLoaderFactory] to provide a custom Coil [ImageLoader] with
+ * optimized caching strategies for contact photos and message attachments.
+ *
+ * ## Security
+ * Initializes multiple security layers:
+ * - Firebase certificate pinning for network security
+ * - SQLCipher for encrypted local database
+ * - SecurityMonitor for threat detection
+ * - InputValidation for injection prevention
+ *
+ * @see MainActivity Main activity that starts after Application initialization
+ * @see AuthManager Authentication and session management
+ * @see FirebaseSecurityConfig Network security configuration
+ */
 class SyncFlowApp : Application(), ImageLoaderFactory {
 
+    /**
+     * Called when the application is starting, before any activity, service, or receiver
+     * objects have been created.
+     *
+     * Initializes all core services in dependency order. Uses defensive try-catch
+     * wrapping to ensure partial functionality even if some services fail to initialize.
+     */
     override fun onCreate() {
         super.onCreate()
 
@@ -146,7 +234,17 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * Setup security alert handlers for critical security events
+     * Sets up handlers for security alerts from the SecurityMonitor.
+     *
+     * Security alerts are categorized by severity:
+     * - CRITICAL: Immediate threats requiring urgent action (e.g., tampering detected)
+     * - HIGH: Significant security concerns (e.g., repeated auth failures)
+     * - MEDIUM/LOW: Informational alerts for logging
+     *
+     * All alerts are logged, and critical/high alerts could trigger notifications
+     * or other defensive actions in production.
+     *
+     * @param securityMonitor The security monitor instance to attach handlers to
      */
     private fun setupSecurityAlertHandlers(securityMonitor: SecurityMonitor) {
         securityMonitor.addAlertHandler { alert ->
@@ -171,9 +269,22 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * Configure Coil ImageLoader with optimized caching for contact photos
-     * - Memory cache: 25% of available memory
-     * - Disk cache: 100MB for contact photos and images
+     * Creates a custom Coil ImageLoader with optimized caching for contact photos
+     * and message attachments.
+     *
+     * ## Caching Strategy
+     * - **Memory Cache**: 25% of available app memory for fast access to recently
+     *   viewed images. Uses strong references to prevent garbage collection of
+     *   frequently accessed images.
+     * - **Disk Cache**: 100MB persistent cache in the app's cache directory for
+     *   images that survive app restarts.
+     *
+     * ## Cache Policies
+     * - Both memory and disk caching are enabled
+     * - Network cache headers are respected for proper invalidation
+     * - Crossfade animation (200ms) for smooth image loading transitions
+     *
+     * @return Configured ImageLoader instance for use throughout the app
      */
     override fun newImageLoader(): ImageLoader {
         return ImageLoader.Builder(this)

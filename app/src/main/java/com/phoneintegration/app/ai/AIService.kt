@@ -1,3 +1,60 @@
+/**
+ * AIService.kt
+ *
+ * Local AI service for intelligent SMS analysis using enhanced pattern matching.
+ * Provides spending analysis, transaction tracking, conversation insights, and
+ * smart reply suggestions - all processed entirely on-device without external APIs.
+ *
+ * ## Architecture Overview
+ *
+ * ```
+ * User Query --> AIService
+ *                   |
+ *                   +-- trySmsAnalysisQuery() --> Spending/Transaction/OTP queries
+ *                   |
+ *                   +-- generateGeneralResponse() --> Greetings, help, etc.
+ *                   |
+ *                   +-- parseTransactions() --> Financial data extraction
+ * ```
+ *
+ * ## Key Features
+ *
+ * 1. **Spending Analysis**: Extracts transaction amounts, merchants, and spending patterns
+ * 2. **Transaction Parsing**: Identifies debits vs credits using keyword analysis
+ * 3. **OTP Detection**: Finds verification codes in messages
+ * 4. **Conversation Summary**: Generates intelligent summaries with sentiment analysis
+ * 5. **Smart Replies**: Suggests contextual reply options based on conversation
+ *
+ * ## Design Philosophy
+ *
+ * This service prioritizes:
+ * - **Privacy**: All processing is local, no data leaves the device
+ * - **Speed**: Pattern matching is fast, no network latency
+ * - **Cost**: No API keys required, completely free to use
+ * - **Reliability**: Works offline, no external dependencies
+ *
+ * ## Query Types Supported
+ *
+ * | Query Pattern           | Handler                    |
+ * |-------------------------|----------------------------|
+ * | "spent at Amazon"       | analyzeMerchantSpending()  |
+ * | "how much did I spend"  | analyzeSpending()          |
+ * | "show transactions"     | analyzeTransactions()      |
+ * | "OTP codes"             | findOTPs()                 |
+ * | "account balance"       | findBalanceInfo()          |
+ * | "summarize messages"    | summarizeConversation()    |
+ *
+ * ## Currency Support
+ *
+ * Supports parsing amounts in:
+ * - INR: Rs., Rs, INR, (Indian Rupees)
+ * - USD: $, USD (US Dollars)
+ *
+ * @param context Android context for resources and preferences
+ *
+ * @see SpamFilter for spam detection logic
+ * @see SmsMessage for message data structure
+ */
 package com.phoneintegration.app.ai
 
 import android.content.Context
@@ -11,16 +68,23 @@ import java.util.*
 import kotlin.math.abs
 
 /**
- * Advanced AI Service for intelligent SMS analysis using enhanced pattern matching
- * All processing is done locally - completely free and no API keys required
+ * Advanced AI Service for intelligent SMS analysis using enhanced pattern matching.
+ * All processing is done locally - completely free and no API keys required.
  */
 class AIService(private val context: Context) {
+
+    // ==========================================
+    // REGION: Constants and Configuration
+    // ==========================================
 
     companion object {
         private const val TAG = "AIService"
     }
 
-    // Known merchants with aliases
+    /**
+     * Known merchants with their common abbreviations and aliases.
+     * Used to normalize merchant names when parsing transactions.
+     */
     private val MERCHANT_ALIASES = mapOf(
         "amazon" to listOf("amazon", "amzn", "amazn", "amz"),
         "flipkart" to listOf("flipkart", "fkrt", "flip"),
@@ -41,18 +105,38 @@ class AIService(private val context: Context) {
         "gpay" to listOf("gpay", "googlepay", "google pay"),
     )
 
-    // Transaction keywords that MUST be present for a valid debit transaction
+    /**
+     * Keywords that indicate a debit (money spent) transaction.
+     * At least one of these must be present for a message to be considered a debit.
+     */
     private val DEBIT_KEYWORDS = listOf(
         "debited", "spent", "paid", "charged", "purchase", "payment",
         "debit", "deducted", "txn", "transaction", "pos", "withdrawn"
     )
 
-    // Keywords that indicate this is NOT a spending (credits, refunds, etc.)
+    /**
+     * Keywords that indicate a credit (money received) transaction.
+     * Messages containing these are excluded from spending analysis.
+     */
     private val CREDIT_KEYWORDS = listOf(
         "credited", "received", "refund", "reversal", "cashback",
         "credit", "deposit", "deposited", "added", "bonus", "reward"
     )
 
+    // ==========================================
+    // REGION: Data Classes
+    // ==========================================
+
+    /**
+     * Represents a parsed financial transaction from an SMS message.
+     *
+     * @property amount Transaction amount in the specified currency
+     * @property currency Currency code (INR, USD)
+     * @property merchant Extracted merchant name, if identified
+     * @property date Timestamp of the transaction
+     * @property messageBody Original message text for reference
+     * @property isDebit True if money was spent, false if received
+     */
     data class ParsedTransaction(
         val amount: Double,
         val currency: String,
@@ -62,6 +146,16 @@ class AIService(private val context: Context) {
         val isDebit: Boolean
     )
 
+    /**
+     * Context information extracted from recent messages in a conversation.
+     * Used to generate more relevant reply suggestions.
+     *
+     * @property messagesSent Number of messages sent by the user
+     * @property messagesReceived Number of messages received
+     * @property topics Identified topics being discussed
+     * @property sentiment Overall emotional tone of the conversation
+     * @property urgency Detected urgency level
+     */
     data class ConversationContext(
         val messagesSent: Int,
         val messagesReceived: Int,
@@ -70,16 +164,35 @@ class AIService(private val context: Context) {
         val urgency: Urgency
     )
 
+    /** Sentiment classification for conversation analysis */
     enum class Sentiment {
-        POSITIVE, NEGATIVE, NEUTRAL
+        POSITIVE,  // Happy, thankful, enthusiastic
+        NEGATIVE,  // Upset, disappointed, concerned
+        NEUTRAL    // Informational, neutral tone
     }
 
+    /** Urgency level detected from message content */
     enum class Urgency {
-        HIGH, MEDIUM, LOW
+        HIGH,   // Contains "urgent", "asap", "emergency", etc.
+        MEDIUM, // Contains "today", "tomorrow", "soon"
+        LOW     // No time pressure indicators
     }
+
+    // ==========================================
+    // REGION: Public API - Chat Interface
+    // ==========================================
 
     /**
-     * General AI conversation - provides intelligent responses to any query
+     * Main entry point for AI-powered chat queries.
+     *
+     * Analyzes the user's message and routes it to the appropriate handler:
+     * - SMS analysis queries (spending, transactions, OTPs) go to specialized handlers
+     * - General conversation (greetings, help) gets contextual responses
+     *
+     * @param userMessage The user's query or question
+     * @param messages List of SMS messages to analyze
+     * @param conversationHistory Previous chat exchanges for context
+     * @return AI-generated response string
      */
     suspend fun chatWithAI(
         userMessage: String,
@@ -105,8 +218,19 @@ class AIService(private val context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Query Routing
+    // ==========================================
+
     /**
-     * Check if this is an SMS analysis query and handle it
+     * Attempts to route the query to an SMS analysis handler.
+     *
+     * Checks for keywords that indicate the user wants to analyze their messages
+     * (spending, transactions, OTPs, etc.) and routes to the appropriate handler.
+     *
+     * @param question The user's query
+     * @param messages SMS messages to analyze
+     * @return Response string if this is an SMS query, null otherwise
      */
     private fun trySmsAnalysisQuery(question: String, messages: List<SmsMessage>): String? {
         val lowerQuestion = question.lowercase()
@@ -156,8 +280,23 @@ class AIService(private val context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Conversation Responses
+    // ==========================================
+
     /**
-     * Generate intelligent responses for general conversation
+     * Generates responses for general conversation queries (greetings, help, etc.).
+     *
+     * Handles common conversational patterns like:
+     * - Greetings: "hi", "hello", "good morning"
+     * - Status queries: "how are you"
+     * - Thanks: "thank you", "thanks"
+     * - Help requests: "what can you do"
+     *
+     * @param userMessage The user's message
+     * @param messages Available SMS messages (for context)
+     * @param conversationHistory Previous chat exchanges
+     * @return Friendly, helpful response string
      */
     private fun generateGeneralResponse(
         userMessage: String,
@@ -247,8 +386,29 @@ class AIService(private val context: Context) {
         return null
     }
 
+    // ==========================================
+    // REGION: Transaction Parsing
+    // ==========================================
+
     /**
-     * Parse transactions from messages with strict filtering
+     * Parses financial transactions from SMS messages using pattern matching.
+     *
+     * ## Parsing Strategy
+     *
+     * 1. Filter out credit/refund messages (we only want spending)
+     * 2. Require at least one debit keyword for validation
+     * 3. Extract amount using regex patterns for INR/USD
+     * 4. Filter out invalid amounts (too small, too large, or reference numbers)
+     * 5. Extract merchant name from common patterns
+     *
+     * ## Amount Validation
+     *
+     * - Must be > 0
+     * - Must be < 10,000,000 (filters out reference numbers)
+     * - Handles comma-separated thousands (e.g., 1,000.00)
+     *
+     * @param messages List of SMS messages to parse
+     * @return List of parsed transactions, sorted by date descending
      */
     private fun parseTransactions(messages: List<SmsMessage>): List<ParsedTransaction> {
         val transactions = mutableListOf<ParsedTransaction>()
@@ -318,7 +478,15 @@ class AIService(private val context: Context) {
     }
 
     /**
-     * Extract merchant name from message body
+     * Extracts merchant name from a transaction message body.
+     *
+     * Tries multiple strategies:
+     * 1. Check against known merchant aliases (Amazon, Uber, etc.)
+     * 2. Parse common patterns like "at [MERCHANT]", "to [MERCHANT]"
+     * 3. Filter out false positives (common words like "your", "the")
+     *
+     * @param body The message body text
+     * @return Extracted merchant name with proper capitalization, or null
      */
     private fun extractMerchantFromMessage(body: String): String? {
         val bodyLower = body.lowercase()
@@ -351,8 +519,21 @@ class AIService(private val context: Context) {
         return null
     }
 
+    // ==========================================
+    // REGION: Spending Analysis
+    // ==========================================
+
     /**
-     * Analyze spending for a specific merchant
+     * Analyzes spending for a specific merchant.
+     *
+     * Filters transactions to those matching the specified merchant,
+     * applies time filters if present in the query, and generates
+     * a formatted spending report.
+     *
+     * @param messages SMS messages to analyze
+     * @param merchant Merchant name to filter by
+     * @param query Original query (for time filter extraction)
+     * @return Formatted spending report for the merchant
      */
     private fun analyzeMerchantSpending(messages: List<SmsMessage>, merchant: String, query: String): String {
         val allTransactions = parseTransactions(messages)
@@ -401,7 +582,18 @@ class AIService(private val context: Context) {
     }
 
     /**
-     * Analyze general spending patterns
+     * Analyzes overall spending patterns across all merchants.
+     *
+     * Generates a comprehensive spending report including:
+     * - Total amount spent
+     * - Transaction count
+     * - Average transaction amount
+     * - Top spending categories/merchants
+     * - Recent transactions list
+     *
+     * @param messages SMS messages to analyze
+     * @param query Original query (for time filter extraction)
+     * @return Formatted spending analysis report
      */
     private fun analyzeSpending(messages: List<SmsMessage>, query: String): String {
         val allTransactions = parseTransactions(messages)
@@ -457,8 +649,22 @@ class AIService(private val context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Time Filtering
+    // ==========================================
+
     /**
-     * Apply time filter based on query
+     * Applies a time-based filter to transactions based on query keywords.
+     *
+     * Supports the following time ranges:
+     * - "today": Current calendar day
+     * - "week" / "7 days": Last 7 days
+     * - "month" / "30 days": Current calendar month
+     * - "year": Current calendar year
+     *
+     * @param transactions List of transactions to filter
+     * @param query User query containing time keywords
+     * @return Filtered transactions within the specified time range
      */
     private fun applyTimeFilter(transactions: List<ParsedTransaction>, query: String): List<ParsedTransaction> {
         val now = System.currentTimeMillis()
@@ -634,8 +840,24 @@ class AIService(private val context: Context) {
         return "🏦 Banking Messages (${bankingMessages.size} total):\n\n$banking"
     }
 
+    // ==========================================
+    // REGION: Conversation Summarization
+    // ==========================================
+
     /**
-     * Generate intelligent conversation summary using enhanced pattern analysis
+     * Generates an intelligent summary of a conversation.
+     *
+     * Analyzes the messages to produce insights including:
+     * - Message count and direction (sent vs received)
+     * - Detected topics and themes
+     * - Sentiment analysis (positive/negative/neutral)
+     * - Activity pattern (very active, moderate, slow)
+     * - Time period covered
+     * - Recent message highlights
+     * - Sentiment trend (improving/worsening)
+     *
+     * @param messages List of messages in the conversation
+     * @return Formatted summary with emoji indicators
      */
     suspend fun summarizeConversation(messages: List<SmsMessage>): String = withContext(Dispatchers.IO) {
         if (messages.isEmpty()) return@withContext "No messages to summarize."
@@ -758,8 +980,20 @@ class AIService(private val context: Context) {
         }
     }
 
+    // ==========================================
+    // REGION: Smart Reply Suggestions
+    // ==========================================
+
     /**
-     * Generate intelligent message suggestions using advanced pattern matching
+     * Generates contextual reply suggestions based on conversation history.
+     *
+     * Analyzes the last few messages to understand context and sentiment,
+     * then generates appropriate reply options that match the conversation tone.
+     *
+     * @param messages Recent messages in the conversation
+     * @param context Additional context string (optional)
+     * @param count Number of suggestions to generate (default 3)
+     * @return List of suggested reply strings
      */
     suspend fun generateMessageSuggestions(
         messages: List<SmsMessage>,
@@ -774,8 +1008,21 @@ class AIService(private val context: Context) {
         return@withContext generateContextualReplies(lastMessage.body, conversationContext, count)
     }
 
+    // ==========================================
+    // REGION: Conversation Analysis Helpers
+    // ==========================================
+
     /**
-     * Analyze conversation context for better suggestions
+     * Analyzes recent messages to extract conversation context.
+     *
+     * Examines the last few messages to determine:
+     * - Message direction balance (who's talking more)
+     * - Topics being discussed
+     * - Overall sentiment
+     * - Urgency level
+     *
+     * @param recentMessages Last few messages to analyze
+     * @return ConversationContext with extracted insights
      */
     private fun analyzeConversationContext(recentMessages: List<SmsMessage>): ConversationContext {
         val sent = recentMessages.count { it.type == 2 }
@@ -789,7 +1036,22 @@ class AIService(private val context: Context) {
     }
 
     /**
-     * Generate contextual replies based on conversation analysis
+     * Generates contextual reply suggestions based on the last message and conversation context.
+     *
+     * Uses pattern matching to identify message types:
+     * - Questions: Offers yes/no and clarification responses
+     * - Gratitude: Offers "you're welcome" variations
+     * - Apologies: Offers reassuring responses
+     * - Greetings: Offers friendly greetings
+     * - Scheduling: Offers availability responses
+     * - Work-related: Offers professional acknowledgments
+     *
+     * Results are filtered based on conversation sentiment to ensure appropriate tone.
+     *
+     * @param message The last message received
+     * @param context Conversation context for tone matching
+     * @param count Number of suggestions to return
+     * @return List of contextually appropriate reply suggestions
      */
     private fun generateContextualReplies(message: String, context: ConversationContext, count: Int): List<String> {
         val lowerMessage = message.lowercase()
@@ -891,8 +1153,23 @@ class AIService(private val context: Context) {
         return filtered.distinct().take(count)
     }
 
+    // ==========================================
+    // REGION: Sentiment and Topic Analysis
+    // ==========================================
+
     /**
-     * Extract topics from recent messages
+     * Extracts topics from messages using keyword matching.
+     *
+     * Categories detected:
+     * - work: meeting, project, office, deadline
+     * - personal: family, friend, home, weekend
+     * - shopping: buy, purchase, order, delivery
+     * - travel: flight, trip, vacation, hotel
+     * - health: doctor, appointment, medicine
+     * - finance: money, payment, bank, bill
+     *
+     * @param messages Messages to analyze for topics
+     * @return List of detected topic categories
      */
     private fun extractTopics(messages: List<SmsMessage>): List<String> {
         val topics = mutableSetOf<String>()
@@ -917,7 +1194,17 @@ class AIService(private val context: Context) {
     }
 
     /**
-     * Analyze sentiment of recent messages
+     * Analyzes the overall sentiment of a set of messages.
+     *
+     * Uses simple keyword counting:
+     * - Positive words: good, great, excellent, awesome, love, thanks
+     * - Negative words: bad, terrible, awful, hate, sorry, problem
+     *
+     * Returns POSITIVE if more positive words than negative,
+     * NEGATIVE if more negative words, NEUTRAL otherwise.
+     *
+     * @param messages Messages to analyze
+     * @return Overall sentiment classification
      */
     private fun analyzeSentiment(messages: List<SmsMessage>): Sentiment {
         val text = messages.joinToString(" ") { it.body.lowercase() }
@@ -938,7 +1225,13 @@ class AIService(private val context: Context) {
     }
 
     /**
-     * Detect urgency level from message
+     * Detects urgency level from a message.
+     *
+     * HIGH urgency keywords: urgent, asap, emergency, important, critical, immediately
+     * MEDIUM urgency keywords: today, tomorrow, this week, soon
+     *
+     * @param message Message text to analyze
+     * @return Detected urgency level
      */
     private fun detectUrgency(message: String): Urgency {
         val lowerMessage = message.lowercase()

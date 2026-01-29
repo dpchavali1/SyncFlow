@@ -2,7 +2,65 @@
 //  FirebaseService.swift
 //  SyncFlowMac
 //
-//  Firebase integration for real-time message sync
+//  Created by SyncFlow Team
+//  Copyright (c) SyncFlow. All rights reserved.
+//
+//  ============================================================================
+//  PURPOSE
+//  ============================================================================
+//  FirebaseService is the central hub for all Firebase Realtime Database operations
+//  in the SyncFlow macOS client. It provides:
+//
+//  - Device pairing: QR code-based pairing between macOS and Android devices
+//  - Message synchronization: Real-time SMS/MMS message sync from Android
+//  - Contact management: Two-way contact sync between devices
+//  - Call functionality: Remote call initiation and call history sync
+//  - Spam filtering: Spam message detection and whitelist/blocklist management
+//  - End-to-end encryption (E2EE): Secure message transmission
+//
+//  ============================================================================
+//  ARCHITECTURE
+//  ============================================================================
+//  This service implements the Singleton pattern (FirebaseService.shared) to ensure
+//  a single point of access for all Firebase operations across the app.
+//
+//  Data Flow:
+//  1. Android app syncs data to Firebase Realtime Database
+//  2. FirebaseService listens for changes via DatabaseHandle observers
+//  3. Data is decrypted (if E2EE enabled) and transformed to model objects
+//  4. Updates are dispatched to the main thread for UI consumption
+//
+//  Key Design Decisions:
+//  - Uses DatabaseHandle for real-time listeners (call removeObserver when done)
+//  - Background thread processing for large datasets to keep UI responsive
+//  - Supports both V1 (legacy) and V2 (device limits) pairing protocols
+//  - Graceful fallbacks when E2EE keys are unavailable
+//
+//  ============================================================================
+//  DEPENDENCIES
+//  ============================================================================
+//  - FirebaseDatabase: Real-time data synchronization
+//  - FirebaseAuth: Anonymous and custom token authentication
+//  - FirebaseFunctions: Cloud function invocation for secure operations
+//  - E2EEManager: End-to-end encryption for message content
+//  - SyncGroupManager: Multi-device sync group coordination
+//
+//  ============================================================================
+//  FIREBASE DATABASE STRUCTURE (abbreviated)
+//  ============================================================================
+//  users/
+//    {userId}/
+//      messages/          - Synced SMS/MMS messages
+//      outgoing_messages/ - Messages queued for sending
+//      contacts/          - Contact book sync
+//      call_history/      - Phone call records
+//      devices/           - Paired device registry
+//      spam_messages/     - Detected spam messages
+//      read_receipts/     - Message read status
+//      message_reactions/ - Emoji reactions to messages
+//  pairing_requests/      - V2 pairing session tokens
+//  pending_pairings/      - V1 legacy pairing tokens
+//  phone_to_uid/          - Phone number to user ID mapping
 //
 
 import Foundation
@@ -13,21 +71,73 @@ import FirebaseDatabase
 import FirebaseAuth
 import FirebaseFunctions
 
+// MARK: - FirebaseService
+
+/// Central service for all Firebase Realtime Database operations.
+///
+/// FirebaseService manages the entire data synchronization layer between the macOS
+/// client and the Android companion app via Firebase. It handles authentication,
+/// real-time data listeners, message encryption/decryption, and device pairing.
+///
+/// ## Usage
+/// ```swift
+/// // Access the singleton instance
+/// let firebase = FirebaseService.shared
+///
+/// // Start listening for messages
+/// let handle = firebase.listenToMessages(userId: userId) { messages in
+///     // Handle updated messages
+/// }
+///
+/// // Clean up when done
+/// firebase.removeMessageListener(userId: userId, handle: handle)
+/// ```
+///
+/// ## Thread Safety
+/// - All completion handlers are dispatched to the main thread
+/// - Heavy data processing occurs on background queues
+/// - Always call remove*Listener methods when views disappear
 class FirebaseService {
 
+    // MARK: - Singleton
+
+    /// Shared singleton instance for app-wide Firebase access.
     static let shared = FirebaseService()
 
+    // MARK: - Firebase References
+
+    /// Firebase Realtime Database instance.
+    /// Marked fileprivate to allow access from extensions while preventing external modification.
     fileprivate let database = Database.database()
+
+    /// Firebase Authentication instance for user identity management.
     private let auth = Auth.auth()
+
+    /// Firebase Cloud Functions client for secure server-side operations.
+    /// Region is set to us-central1 to match the deployed functions.
     private let functions = Functions.functions(region: "us-central1")
 
-    /// Ensure Firebase database is online before write operations
+    // MARK: - Connection Management
+
+    /// Ensures Firebase database connection is active before write operations.
+    ///
+    /// Firebase may go offline due to network changes or power saving. This method
+    /// forces the connection back online before critical write operations like
+    /// sending messages or updating device status.
+    ///
+    /// - Note: Called automatically by all write methods (send*, update*, delete*, etc.)
     private func ensureOnline() {
         database.goOnline()
     }
 
-    // Sync Group Manager for device pairing
+    // MARK: - Sync Group Management
+
+    /// Manager for multi-device sync group coordination.
+    /// Handles grouping multiple devices (macOS, web, etc.) under a single sync umbrella.
     let syncGroupManager = SyncGroupManager.shared
+
+    /// Current sync group identifier, persisted to UserDefaults on change.
+    /// Sync groups allow multiple secondary devices to share access to the same Android phone's data.
     private var _syncGroupId: String? {
         didSet {
             if let id = _syncGroupId {
@@ -36,22 +146,44 @@ class FirebaseService {
         }
     }
 
+    // MARK: - Initialization
+
+    /// Private initializer enforcing singleton pattern.
+    /// Restores sync group ID from UserDefaults on app launch.
     private init() {
-        // Restore sync group ID on init
+        // Restore sync group ID on init to maintain pairing state across app restarts
         self._syncGroupId = syncGroupManager.syncGroupId
     }
 
     // MARK: - Authentication
 
+    /// Signs in anonymously to Firebase Auth.
+    ///
+    /// Anonymous authentication is used during the initial pairing flow before
+    /// the user's identity is established. After successful pairing, this is
+    /// replaced with a custom token from the Android device's user ID.
+    ///
+    /// - Returns: The Firebase UID for the anonymous user
+    /// - Throws: `FirebaseError.authFailed` if authentication fails
+    ///
+    /// - Note: Also initializes E2EE keys after successful sign-in
     func signInAnonymously() async throws -> String {
         let result = try await auth.signInAnonymously()
         guard let uid = result.user.uid as String? else {
             throw FirebaseError.authFailed
         }
+        // Initialize encryption keys for secure message transmission
         try? await E2EEManager.shared.initializeKeys()
         return uid
     }
 
+    /// Gets the current authenticated user's ID.
+    ///
+    /// Prioritizes the stored paired user ID over the Firebase Auth current user
+    /// to handle cases where the auth session expires but the pairing is still valid.
+    /// This prevents data from being written to the wrong location.
+    ///
+    /// - Returns: The user ID string, or nil if not authenticated
     func getCurrentUser() -> String? {
         // Prefer the stored paired user ID over the current auth user
         // This prevents data being written to wrong location when auth session expires
@@ -63,6 +195,12 @@ class FirebaseService {
         return auth.currentUser?.uid
     }
 
+    /// Gets the unique device identifier for this Mac.
+    ///
+    /// Returns the paired device ID if available, otherwise generates a new
+    /// persistent device ID based on hardware UUID.
+    ///
+    /// - Returns: A unique device identifier string
     func getDeviceId() -> String {
         if let pairedDeviceId = UserDefaults.standard.string(forKey: "syncflow_device_id"),
            !pairedDeviceId.isEmpty {
@@ -71,15 +209,25 @@ class FirebaseService {
         return getOrCreateDeviceId()
     }
 
+    /// The current sync group identifier, if the device is part of a sync group.
     var syncGroupId: String? {
         _syncGroupId
     }
 
     // MARK: - Sync Group Pairing
 
-    /**
-     * Initiate sync group pairing (called on first app launch or when not paired)
-     */
+    /// Initiates sync group pairing for first-time setup or re-pairing.
+    ///
+    /// Sync groups allow multiple secondary devices to share access to the same
+    /// Android phone's data. This method creates a new sync group if one doesn't exist.
+    ///
+    /// - Parameter completion: Callback with the sync group ID on success or error
+    ///
+    /// ## Pairing Flow
+    /// 1. Check if sync group already exists (return immediately if so)
+    /// 2. Ensure anonymous authentication
+    /// 3. Create new sync group via SyncGroupManager
+    /// 4. Store sync group ID for persistence
     func initiateSyncGroupPairing(completion: @escaping (Result<String, Error>) -> Void) {
         // Check if already has sync group
         if let existing = syncGroupManager.syncGroupId {
@@ -110,6 +258,13 @@ class FirebaseService {
         }
     }
 
+    /// Determines if an address is an RCS (Rich Communication Services) address.
+    ///
+    /// RCS messages are filtered out because they use Google's messaging infrastructure
+    /// rather than traditional SMS/MMS. SyncFlow focuses on SMS/MMS synchronization.
+    ///
+    /// - Parameter address: The message address to check
+    /// - Returns: true if the address appears to be an RCS address
     fileprivate func isRcsAddress(_ address: String) -> Bool {
         let lower = address.lowercased()
         return lower.contains("@rcs") ||
@@ -121,6 +276,16 @@ class FirebaseService {
 
     // MARK: - Pairing
 
+    /// Pairs this Mac with an Android device using a pairing token.
+    ///
+    /// This is the legacy pairing method using a 6-digit token entered manually.
+    /// The newer QR code pairing flow (initiatePairing) is preferred.
+    ///
+    /// - Parameters:
+    ///   - token: The 6-digit pairing token from the Android app
+    ///   - deviceName: Display name for this Mac device
+    /// - Returns: The paired user's Firebase UID
+    /// - Throws: FirebaseError if pairing fails
     func pairWithToken(_ token: String, deviceName: String) async throws -> String {
         do {
             let result = try await functions
@@ -162,8 +327,22 @@ class FirebaseService {
 
     // MARK: - QR Code Pairing V2 (Uses persistent device IDs)
 
-    /// Initiate a pairing session using V2 protocol with persistent device ID
-    /// Uses DeviceIdentifier for hardware-based ID that survives reinstalls
+    /// Initiates a new pairing session for QR code-based device pairing.
+    ///
+    /// This is the primary pairing method for new users. It generates a QR code
+    /// that the Android app scans to establish the connection.
+    ///
+    /// - Parameters:
+    ///   - deviceName: Optional custom name for this Mac (defaults to system hostname)
+    ///   - syncGroupId: Optional existing sync group to join
+    /// - Returns: A PairingSession containing the QR code payload and expiration time
+    /// - Throws: FirebaseError on failure
+    ///
+    /// ## Pairing Protocol Versions
+    /// - **V2 (preferred)**: Uses persistent device IDs with device limit enforcement
+    /// - **V1 (fallback)**: Legacy system for backwards compatibility with older Android versions
+    ///
+    /// The method automatically tries V2 first and falls back to V1 if needed.
     func initiatePairing(deviceName: String? = nil, syncGroupId: String? = nil) async throws -> PairingSession {
         // Get persistent device ID from DeviceIdentifier (Keychain-backed)
         let deviceId = DeviceIdentifier.shared.getDeviceId()
@@ -522,6 +701,39 @@ class FirebaseService {
 
     // MARK: - Messages
 
+    /// Starts listening for real-time message updates from Firebase.
+    ///
+    /// This is the primary method for receiving SMS/MMS messages synced from the Android device.
+    /// Messages are processed on a background thread and delivered to the completion handler
+    /// on the main thread.
+    ///
+    /// - Parameters:
+    ///   - userId: The Firebase user ID to listen for messages
+    ///   - startTime: Optional timestamp (milliseconds) to filter messages after this time
+    ///   - limit: Maximum number of messages to load (default 3000, prevents memory issues)
+    ///   - completion: Callback invoked with the updated message array on every change
+    /// - Returns: DatabaseHandle to remove the listener when done
+    ///
+    /// ## Message Processing
+    /// 1. Raw Firebase data is received as dictionary
+    /// 2. E2EE encrypted messages are decrypted using device's private key
+    /// 3. MMS attachments are parsed and linked
+    /// 4. Messages are sorted by date (newest first)
+    /// 5. Results are dispatched to main thread
+    ///
+    /// ## Important
+    /// Always call `removeMessageListener(userId:handle:)` when the view disappears
+    /// to prevent memory leaks and unnecessary network traffic.
+    ///
+    /// ```swift
+    /// // Start listening
+    /// let handle = firebaseService.listenToMessages(userId: userId) { messages in
+    ///     self.messages = messages
+    /// }
+    ///
+    /// // Stop listening
+    /// firebaseService.removeMessageListener(userId: userId, handle: handle)
+    /// ```
     func listenToMessages(userId: String, startTime: Double? = nil, limit: Int = 3000, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
         let messagesRef = database.reference()
             .child("users")
@@ -1052,6 +1264,27 @@ class FirebaseService {
 
     // MARK: - Send Message
 
+    /// Sends an SMS message through the paired Android device.
+    ///
+    /// The message is queued in Firebase and picked up by the Android app,
+    /// which then sends it via the device's native SMS capability.
+    ///
+    /// - Parameters:
+    ///   - userId: The Firebase user ID
+    ///   - address: The recipient's phone number
+    ///   - body: The message text content
+    /// - Throws: Error if message queueing fails
+    ///
+    /// ## Encryption
+    /// If E2EE is initialized, the message body is encrypted before transmission.
+    /// The Android app decrypts it before sending via SMS.
+    ///
+    /// ## Delivery Flow
+    /// 1. Message queued to `outgoing_messages` in Firebase
+    /// 2. Android app receives the queued message
+    /// 3. Android sends SMS via native API
+    /// 4. Message is deleted from queue (or marked failed)
+    /// 5. Sent message appears in `messages` via sync
     func sendMessage(userId: String, to address: String, body: String) async throws {
         ensureOnline()
 
@@ -1086,6 +1319,27 @@ class FirebaseService {
 
     // MARK: - Send MMS Message
 
+    /// Sends an MMS message with attachment through the paired Android device.
+    ///
+    /// Attachments are uploaded to Cloudflare R2 storage (or sent inline for small files),
+    /// then the Android app downloads and sends via MMS.
+    ///
+    /// - Parameters:
+    ///   - userId: The Firebase user ID
+    ///   - address: The recipient's phone number
+    ///   - body: Optional message text content
+    ///   - attachmentData: Raw data of the attachment (image, video, etc.)
+    ///   - fileName: Display name for the attachment
+    ///   - contentType: MIME type (e.g., "image/jpeg", "video/mp4")
+    ///   - attachmentType: Category ("image", "video", "audio", "file")
+    /// - Throws: FirebaseError.quotaExceeded if storage limits reached
+    ///
+    /// ## Storage Strategy
+    /// - Files > 500KB: Uploaded to R2 cloud storage via presigned URL
+    /// - Files < 500KB: Fallback to inline base64 if R2 upload fails
+    ///
+    /// ## Usage Tracking
+    /// MMS uploads count toward the user's storage quota (free vs paid tier).
     func sendMmsMessage(
         userId: String,
         to address: String,

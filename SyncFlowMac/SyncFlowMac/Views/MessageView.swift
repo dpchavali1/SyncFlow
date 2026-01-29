@@ -4,6 +4,37 @@
 //
 //  Main message view showing conversation and compose bar
 //
+//  =============================================================================
+//  PURPOSE:
+//  This is the primary conversation view that displays messages for a selected
+//  conversation. It renders the message history, handles sending new messages
+//  (SMS/MMS), supports attachments, voice recording, reply threading, and
+//  provides message management features like selection and deletion.
+//
+//  USER INTERACTIONS:
+//  - Scroll through message history (with lazy loading for older messages)
+//  - Type and send SMS messages via the compose bar
+//  - Attach images/videos/audio via file picker or drag-and-drop
+//  - Record and send voice messages
+//  - Reply to specific messages (inline quote format)
+//  - Long-press/right-click messages for context menu (react, copy, pin, delete)
+//  - Use keyboard shortcuts for common actions
+//  - Select multiple messages for bulk operations
+//  - Search within the conversation
+//
+//  STATE MANAGEMENT:
+//  - @EnvironmentObject for AppState (app-wide state) and MessageStore (data)
+//  - Conversation passed as a parameter, triggers view updates on change
+//  - Message caching done asynchronously to prevent UI blocking
+//  - Local @State for compose text, attachments, selection state, etc.
+//
+//  PERFORMANCE CONSIDERATIONS:
+//  - Messages are loaded incrementally (initial 50, then 30 more per "load more")
+//  - Message filtering and caching done on background thread
+//  - Conversation ID checked after async processing to avoid stale data
+//  - LazyVStack used for message virtualization
+//  - Link previews loaded with 500ms delay to avoid blocking initial render
+//  =============================================================================
 
 import SwiftUI
 import AppKit
@@ -11,43 +42,104 @@ import AppKit
 // Theme imports for design system
 // SyncFlowColors, SyncFlowTypography, SyncFlowSpacing are defined in Theme/
 
+// MARK: - Main Message View
+
+/// The primary conversation view displaying message history and compose functionality.
+/// Handles SMS/MMS messaging, attachments, voice recording, and message management.
 struct MessageView: View {
+
+    // MARK: - Environment Objects
+
+    /// App-wide state including user ID, continuity service, and feature flags
     @EnvironmentObject var appState: AppState
+    /// Message data store containing all conversations and messages
     @EnvironmentObject var messageStore: MessageStore
 
+    // MARK: - Properties
+
+    /// The conversation being displayed
     let conversation: Conversation
 
+    // MARK: - Compose State
+
+    /// Current text in the compose field
     @State private var messageText = ""
+    /// Whether a message is currently being sent
     @State private var isSending = false
+    /// Trigger to scroll to the bottom of the message list
     @State private var scrollToBottom = false
+    /// Whether the emoji picker popover is shown
     @State private var showEmojiPicker = false
+
+    // MARK: - Search State
+
+    /// Search text for filtering messages in conversation
     @State private var searchText = ""
+    /// Whether the search bar is visible
     @State private var showSearch = false
+
+    // MARK: - Reply and Attachment State
+
+    /// Message being replied to (nil if not replying)
     @State private var replyToMessage: Message? = nil
+    /// Currently selected attachment to send
     @State private var selectedAttachment: SelectedAttachment? = nil
+    /// Whether the attachment file picker is shown
     @State private var showAttachmentPicker = false
+    /// Whether a file is being dragged over the view
     @State private var isDragOver = false
+
+    // MARK: - Voice Recording State
+
+    /// Whether voice recording mode is active
     @State private var isRecordingVoice = false
+    /// Audio recorder service for voice messages
     @StateObject private var audioRecorder = AudioRecorderService.shared
+
+    // MARK: - Selection State
+
+    /// Whether bulk selection mode is active
     @State private var isSelectionMode = false
+    /// Set of message IDs currently selected for bulk operations
     @State private var selectedMessageIds: Set<String> = []
+    /// Whether to show bulk delete confirmation alert
     @State private var showBulkDeleteConfirmation = false
 
-    // Cached messages to avoid expensive recomputation on every render
+    // MARK: - Message Cache State
+    // These properties optimize performance by caching filtered messages
+    // and avoiding expensive recomputation on every render
+
+    /// Cached array of messages to display (filtered and limited)
     @State private var cachedMessages: [Message] = []
+    /// Cached array of pinned messages
     @State private var cachedPinnedMessages: [Message] = []
+    /// Last conversation ID used for cache validation
     @State private var lastConversationId: String = ""
+    /// Last search text used for cache validation
     @State private var lastSearchText: String = ""
+    /// Last total message count for cache validation
     @State private var lastMessageCount: Int = 0
+    /// Number of messages currently displayed (for pagination)
     @State private var displayedMessageCount: Int = 50 // Start with 50 messages
+    /// Whether messages are currently being loaded
     @State private var isLoadingMessages: Bool = true
+    /// Whether more messages are being loaded (pagination)
     @State private var isLoadingMore: Bool = false
+    /// Total count of messages in this conversation
     @State private var totalMessageCount: Int = 0
+    /// Preferred phone number to send from (for multi-SIM contacts)
     @State private var preferredSendAddress: String? = nil
 
+    // MARK: - Constants
+
+    /// Number of messages to load initially
     private let initialMessageCount = 50
+    /// Number of additional messages to load when paginating
     private let loadMoreIncrement = 30
 
+    // MARK: - Computed Properties
+
+    /// All phone numbers associated with this contact (for multi-number contacts)
     private var allSendAddresses: [String] {
         if !conversation.allAddresses.isEmpty {
             return conversation.allAddresses
@@ -55,14 +147,19 @@ struct MessageView: View {
         return [conversation.address]
     }
 
+    /// The phone number to use when sending messages
     private var activeSendAddress: String {
         return preferredSendAddress ?? conversation.address
     }
 
+    // MARK: - Preferred Address Persistence
+
+    /// UserDefaults key for storing preferred send address
     private func preferredSendKey() -> String {
         return "preferred_send_address_\(conversation.id)"
     }
 
+    /// Loads the user's preferred send address from UserDefaults
     private func loadPreferredSendAddress() {
         let stored = UserDefaults.standard.string(forKey: preferredSendKey())
         if let stored = stored, allSendAddresses.contains(stored) {
@@ -72,6 +169,8 @@ struct MessageView: View {
         }
     }
 
+    /// Saves the user's preferred send address to UserDefaults
+    /// - Parameter address: The address to save, or nil to clear preference
     private func persistPreferredSendAddress(_ address: String?) {
         if let address = address, !address.isEmpty {
             UserDefaults.standard.set(address, forKey: preferredSendKey())
@@ -81,18 +180,26 @@ struct MessageView: View {
         preferredSendAddress = address
     }
 
+    // MARK: - Message Loading & Caching
+
+    /// Asynchronously updates the cached messages array.
+    /// Performs filtering on a background thread to avoid blocking the UI.
+    /// Includes validation to discard stale results if conversation changed.
     private func updateCachedMessagesAsync() {
         isLoadingMessages = true
+
+        // Capture current state for async processing
         let conversationId = conversation.id
         let currentSearchText = searchText
         let currentDisplayCount = displayedMessageCount
         let allMessages = messageStore.messages
 
-        // Process on background thread
+        // Process on background thread for performance
         DispatchQueue.global(qos: .userInitiated).async {
             // Filter messages for this conversation using normalized matching
             let conversationMsgs = messageStore.messages(for: conversation)
 
+            // Apply search filter if active
             let filtered: [Message]
             if currentSearchText.isEmpty {
                 filtered = conversationMsgs
@@ -100,14 +207,14 @@ struct MessageView: View {
                 filtered = conversationMsgs.filter { $0.body.localizedCaseInsensitiveContains(currentSearchText) }
             }
 
-            // Get pinned messages
+            // Get pinned messages from UserDefaults
             let pinnedIds = UserDefaults.standard.array(forKey: "pinned_messages") as? [String] ?? []
             let pinnedSet = Set(pinnedIds)
             let pinned = conversationMsgs
                 .filter { pinnedSet.contains($0.id) }
                 .sorted { $0.date > $1.date }
 
-            // Only show the most recent messages up to displayedMessageCount
+            // Paginate: only show the most recent messages up to displayedMessageCount
             let displayMessages: [Message]
             if filtered.count > currentDisplayCount {
                 displayMessages = Array(filtered.suffix(currentDisplayCount))
@@ -136,6 +243,8 @@ struct MessageView: View {
         }
     }
 
+    /// Loads additional older messages (pagination).
+    /// Increments the display count and triggers a cache refresh.
     private func loadMoreMessages() {
         guard !isLoadingMore else { return }
         isLoadingMore = true
@@ -144,13 +253,19 @@ struct MessageView: View {
         isLoadingMore = false
     }
 
+    /// Returns whether there are more messages available to load.
     private func hasMoreMessages() -> Bool {
         return totalMessageCount > displayedMessageCount
     }
 
+    // MARK: - Body
+
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+            // =================================================================
+            // CONVERSATION HEADER
+            // Shows contact info, action buttons (search, call, etc.)
+            // =================================================================
             ConversationHeader(
                 conversation: conversation,
                 messageStore: messageStore,
@@ -230,7 +345,11 @@ struct MessageView: View {
                 Divider()
             }
 
-            // Messages
+            // =================================================================
+            // MESSAGE LIST
+            // Scrollable area containing message bubbles, pinned messages,
+            // and load more button. Uses LazyVStack for performance.
+            // =================================================================
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
@@ -374,7 +493,13 @@ struct MessageView: View {
 
             Divider()
 
-            // Templates popover
+            // =================================================================
+            // COMPOSE AREA
+            // Templates popover, attachment preview, reply bar, voice recording,
+            // and main compose bar
+            // =================================================================
+
+            // Templates popover - shows pre-defined message templates
             if appState.showTemplates {
                 TemplatesView(
                     onSelect: { template in
@@ -537,6 +662,9 @@ struct MessageView: View {
 
     // MARK: - Drag & Drop
 
+    /// Handles drag-and-drop of files onto the message view.
+    /// Supports images and file URLs; converts dropped items into attachments.
+    /// - Parameter providers: Array of NSItemProviders from the drop operation
     private func handleDrop(providers: [NSItemProvider]) {
         for provider in providers {
             // Try to load as image first
@@ -575,6 +703,11 @@ struct MessageView: View {
         }
     }
 
+    /// Creates an attachment from raw data (e.g., from drag-and-drop).
+    /// Saves data to a temporary file and creates SelectedAttachment object.
+    /// - Parameters:
+    ///   - data: The file data
+    ///   - type: The attachment type (e.g., "image")
     private func loadAttachmentFromData(_ data: Data, type: String) {
         let fileName = "dropped_\(type)_\(Int(Date().timeIntervalSince1970))"
         var contentType = "application/octet-stream"
@@ -614,6 +747,9 @@ struct MessageView: View {
 
     // MARK: - Load Attachment
 
+    /// Loads an attachment from a file URL (from file picker or drag-and-drop).
+    /// Handles security-scoped resource access for sandbox compliance.
+    /// - Parameter url: The file URL to load
     private func loadAttachment(from url: URL) {
         guard url.startAccessingSecurityScopedResource() else {
             print("Failed to access security scoped resource")
@@ -647,6 +783,9 @@ struct MessageView: View {
         }
     }
 
+    /// Determines the MIME content type based on file extension.
+    /// - Parameter url: The file URL to analyze
+    /// - Returns: MIME type string (e.g., "image/jpeg")
     private func getContentType(for url: URL) -> String {
         let ext = url.pathExtension.lowercased()
         switch ext {
@@ -665,6 +804,9 @@ struct MessageView: View {
         }
     }
 
+    /// Determines the attachment category from MIME type.
+    /// - Parameter contentType: MIME type string
+    /// - Returns: Category string ("image", "video", "audio", or "file")
     private func getAttachmentType(for contentType: String) -> String {
         if contentType.hasPrefix("image/") { return "image" }
         if contentType.hasPrefix("video/") { return "video" }
@@ -674,6 +816,8 @@ struct MessageView: View {
 
     // MARK: - Voice Recording
 
+    /// Starts voice recording for a voice message.
+    /// Checks microphone permission before starting.
     private func startVoiceRecording() {
         guard audioRecorder.hasPermission else {
             audioRecorder.requestPermission()
@@ -683,6 +827,10 @@ struct MessageView: View {
         isRecordingVoice = true
     }
 
+    /// Sends a recorded voice message as an MMS attachment.
+    /// - Parameters:
+    ///   - url: URL of the recorded audio file
+    ///   - duration: Duration of the recording
     private func sendVoiceMessage(url: URL, duration: TimeInterval) async {
         guard let userId = appState.userId else { return }
 
@@ -723,6 +871,8 @@ struct MessageView: View {
 
     // MARK: - Send Message
 
+    /// Sends the current message (SMS or MMS with attachment).
+    /// Handles reply prefixes, clears compose state on success.
     private func sendMessage() async {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasAttachment = selectedAttachment != nil
@@ -767,6 +917,8 @@ struct MessageView: View {
 
     // MARK: - Schedule Message
 
+    /// Schedules a message to be sent at a future time.
+    /// - Parameter date: The date/time to send the message
     private func scheduleMessage(for date: Date) {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard hasText else { return }
@@ -793,6 +945,13 @@ struct MessageView: View {
         }
     }
 
+    // MARK: - Reply Helpers
+
+    /// Combines reply prefix with message body.
+    /// - Parameters:
+    ///   - prefix: Optional reply quote prefix (e.g., "> John: Hello")
+    ///   - body: The main message body
+    /// - Returns: Combined message string
     private func mergeReplyPrefix(prefix: String?, body: String) -> String {
         guard let prefix = prefix, !prefix.isEmpty else {
             return body
@@ -806,12 +965,19 @@ struct MessageView: View {
         return "\(prefix)\n\(trimmedBody)"
     }
 
+    /// Builds a reply prefix string for quoting a message.
+    /// Format: "> [Sender]: [Snippet]"
+    /// - Parameter message: The message being replied to
+    /// - Returns: Formatted reply prefix string
     private func buildReplyPrefix(for message: Message) -> String {
         let sender = replySenderName(for: message)
         let snippet = replySnippet(for: message)
         return "> \(sender): \(snippet)"
     }
 
+    /// Gets the display name for the sender in a reply context.
+    /// - Parameter message: The message to get sender name from
+    /// - Returns: "You" for sent messages, contact name/address for received
     private func replySenderName(for message: Message) -> String {
         if message.isReceived {
             return message.contactName ?? message.address
@@ -819,6 +985,10 @@ struct MessageView: View {
         return "You"
     }
 
+    /// Creates a short snippet of the message for the reply quote.
+    /// Truncates to 80 characters and handles attachments.
+    /// - Parameter message: The message to create snippet from
+    /// - Returns: Short preview string
     private func replySnippet(for message: Message) -> String {
         let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
@@ -847,6 +1017,10 @@ struct MessageView: View {
         return "Message"
     }
 
+    // MARK: - Continuity Helpers
+
+    /// Applies a draft message from continuity state if applicable.
+    /// Part of Handoff feature - allows continuing draft from another device.
     private func applyContinuityDraftIfNeeded() {
         guard let suggestion = appState.continuitySuggestion else { return }
 
@@ -863,6 +1037,9 @@ struct MessageView: View {
         appState.dismissContinuitySuggestion()
     }
 
+    /// Normalizes a phone number by keeping only numeric characters.
+    /// - Parameter value: The address string to normalize
+    /// - Returns: String containing only digits
     private func normalizeAddress(_ value: String) -> String {
         return value.filter { $0.isNumber }
     }
@@ -870,22 +1047,37 @@ struct MessageView: View {
 
 // MARK: - Selected Attachment Model
 
+/// Represents an attachment selected by the user for sending.
+/// Contains all necessary data for MMS transmission.
 struct SelectedAttachment {
+    /// URL of the attachment file
     let url: URL
+    /// Raw file data
     let data: Data
+    /// Original file name
     let fileName: String
+    /// MIME content type (e.g., "image/jpeg")
     let contentType: String
-    let type: String  // "image", "video", "audio", "file"
+    /// Category: "image", "video", "audio", or "file"
+    let type: String
+    /// Preview thumbnail for images (nil for other types)
     let thumbnail: NSImage?
 }
 
 // MARK: - Attachment Preview Bar
 
+/// Preview bar shown above compose area when an attachment is selected.
+/// Displays thumbnail/icon, file name, size, and remove button.
 struct AttachmentPreviewBar: View {
+    /// The attachment to preview
     let attachment: SelectedAttachment
+    /// Callback when remove button is tapped
     let onRemove: () -> Void
 
+    /// Hover state for remove button animation
     @State private var isHoveringRemove = false
+
+    // MARK: - Body
 
     var body: some View {
         HStack(spacing: 14) {
@@ -1015,17 +1207,34 @@ struct AttachmentPreviewBar: View {
 
 // MARK: - Conversation Header
 
+/// Header component for the message view displaying contact info and action buttons.
+/// Includes: avatar, name, phone number, search, selection mode, call buttons, and more menu.
 struct ConversationHeader: View {
+
+    // MARK: - Properties
+
+    /// The conversation being displayed
     let conversation: Conversation
+    /// Message store for actions like pin/archive
     let messageStore: MessageStore
+    /// Whether search bar is visible
     @Binding var showSearch: Bool
+    /// All phone numbers associated with this contact
     let allAddresses: [String]
+    /// User's preferred send address for multi-number contacts
     @Binding var preferredSendAddress: String?
+    /// Callback when user selects a send address
     let onSelectSendAddress: (String?) -> Void
+    /// Whether bulk selection mode is active
     @Binding var isSelectionMode: Bool
+    /// Number of messages currently selected
     let selectedCount: Int
+    /// Callback when delete button is tapped in selection mode
     let onDeleteSelected: () -> Void
+    /// Callback when selection is cleared
     let onClearSelection: () -> Void
+
+    // MARK: - Environment
 
     @EnvironmentObject var appState: AppState
     @State private var showCallAlert = false
@@ -1415,9 +1624,14 @@ struct ConversationHeader: View {
 
 // MARK: - Pinned Message Row
 
+/// Compact row for displaying pinned messages at the top of the message list.
+/// Shows sender, timestamp, preview, and unpin button.
 struct PinnedMessageRow: View {
+    /// The pinned message to display
     let message: Message
+    /// Callback when row is tapped (to scroll to message)
     let onTap: () -> Void
+    /// Callback when unpin button is tapped
     let onUnpin: () -> Void
 
     var body: some View {
@@ -1465,58 +1679,115 @@ struct PinnedMessageRow: View {
 
 // MARK: - Message Bubble
 
+/// Individual message bubble component displaying message content with interactions.
+/// Supports text, attachments, reactions, reply quotes, link previews, and context menu.
+///
+/// Features:
+/// - Adaptive styling for sent vs received messages
+/// - Search text highlighting
+/// - Reaction emoji display and interaction
+/// - Read receipt indicators
+/// - Link detection and preview cards
+/// - Reply quote parsing and display
+/// - Context menu for copy, reply, pin, delete, etc.
+/// - Double-tap for quick thumbs-up reaction
+///
+/// Performance Note: Link previews are loaded with a 500ms delay to avoid
+/// blocking initial render. Formatted body is cached to avoid re-computation.
 struct MessageBubble: View {
+
+    // MARK: - Properties
+
+    /// The message to display
     let message: Message
+    /// Search text for highlighting (empty string if not searching)
     var searchText: String = ""
+    /// Current reaction emoji on this message (nil if none)
     let reaction: String?
+    /// Read receipt data for this message
     let readReceipt: ReadReceipt?
+    /// Callback when user reacts to message (nil to remove reaction)
     let onReact: (String?) -> Void
+    /// Callback when user taps reply (optional)
     var onReply: (() -> Void)? = nil
+    /// Callback when user deletes message (optional, only for sent messages)
     var onDelete: (() -> Void)? = nil
+    /// Whether this message is pinned
     var isPinned: Bool = false
+    /// Callback to toggle pin status
     var onTogglePin: (() -> Void)? = nil
+    /// Whether bulk selection mode is active
     var selectionMode: Bool = false
+    /// Whether this message is selected in bulk mode
     var isBulkSelected: Bool = false
+    /// Callback to toggle selection state
     var onToggleSelect: (() -> Void)? = nil
 
+    // MARK: - Local State
+
+    /// Whether mouse is hovering over this bubble
     @State private var isHovering = false
+    /// Whether delete confirmation alert is shown
     @State private var showDeleteConfirmation = false
+    /// Loaded link preview data for URLs in message
     @State private var linkPreviews: [LinkPreview] = []
+    /// Whether link previews are currently loading
     @State private var loadingPreviews = false
+    /// Cached formatted message body (for search highlighting)
     @State private var cachedFormattedBody: AttributedString? = nil
+    /// Last search text used for cache validation
     @State private var lastSearchText: String = ""
+
+    // MARK: - Constants
+
+    /// Available reaction emoji options
     private let reactionOptions = ["👍", "❤️", "😂", "😮", "😢", "😡"]
 
+    // MARK: - Helper Types
+
+    /// Represents parsed reply quote content
     private struct ReplyContent {
         let sender: String
         let snippet: String
     }
 
+    /// Represents a parsed message with optional reply and body
     private struct ParsedMessage {
         let reply: ReplyContent?
         let body: String
     }
 
+    // MARK: - Computed Properties
+
+    /// Parses the message body to extract reply quote (if present)
     private var parsedMessage: ParsedMessage {
         parseReplyBody(message.body)
     }
 
+    /// The reply quote content (nil if not a reply)
     private var replyContent: ReplyContent? {
         parsedMessage.reply
     }
 
+    /// The main message body (without reply prefix)
     private var displayBody: String {
         parsedMessage.body
     }
 
+    /// Whether the display body contains any URLs
     private var displayBodyHasLinks: Bool {
         hasLinks(in: displayBody)
     }
 
+    /// Reusable bubble shape with consistent corner radius
     private var bubbleShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: SyncFlowSpacing.bubbleRadius, style: .continuous)
     }
 
+    // MARK: - Subviews
+
+    /// Creates the background fill for a message bubble.
+    /// Applies gradient if enabled in settings, otherwise solid color.
     @ViewBuilder
     private func bubbleBackground(isReceived: Bool) -> some View {
         if SyncFlowColors.bubbleGradientEnabled {
@@ -1530,6 +1801,10 @@ struct MessageBubble: View {
         }
     }
 
+    /// Creates a styled message bubble container with padding and background.
+    /// - Parameters:
+    ///   - isReceived: Whether this is a received (vs sent) message
+    ///   - content: The content to display inside the bubble
     @ViewBuilder
     private func messageBubble<Content: View>(isReceived: Bool, @ViewBuilder content: () -> Content) -> some View {
         content()
@@ -1541,6 +1816,8 @@ struct MessageBubble: View {
             }
             .clipShape(bubbleShape)
     }
+
+    // MARK: - Body
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -1781,6 +2058,10 @@ struct MessageBubble: View {
         }
     }
 
+    // MARK: - Reply Quote Block
+
+    /// Displays a quoted reply reference at the top of a message.
+    /// Shows sender name and message snippet with accent color bar.
     private struct ReplyQuoteBlock: View {
         let reply: ReplyContent
         let isReceived: Bool
@@ -1815,6 +2096,9 @@ struct MessageBubble: View {
         }
     }
 
+    // MARK: - Helper Methods
+
+    /// Formats a timestamp into a short time string.
     private func formattedReadTime(_ timestamp: Double) -> String {
         guard timestamp > 0 else { return "just now" }
         let date = Date(timeIntervalSince1970: timestamp / 1000.0)
@@ -1824,6 +2108,8 @@ struct MessageBubble: View {
         return formatter.string(from: date)
     }
 
+    /// Asynchronously loads link previews for URLs in the message.
+    /// Limited to 1 preview per message for performance.
     @MainActor
     private func loadLinkPreviews() async {
         guard displayBodyHasLinks, linkPreviews.isEmpty, !loadingPreviews else { return }
@@ -1841,14 +2127,19 @@ struct MessageBubble: View {
         loadingPreviews = false
     }
 
+    // MARK: - Reaction Actions
+
+    /// Sets a reaction on this message.
     private func setReaction(_ value: String) {
         onReact(value)
     }
 
+    /// Removes the reaction from this message.
     private func clearReaction() {
         onReact(nil)
     }
 
+    /// Toggles the quick thumbs-up reaction (double-tap gesture).
     private func toggleQuickReaction() {
         if reaction == "👍" {
             clearReaction()
@@ -1857,6 +2148,10 @@ struct MessageBubble: View {
         }
     }
 
+    // MARK: - Text Formatting
+
+    /// Creates an AttributedString with search highlighting and markdown formatting.
+    /// Supports *bold* and _italic_ text, plus search term highlighting.
     private var formattedMessageBody: AttributedString {
         var attributedString = AttributedString(displayBody)
 
@@ -1920,6 +2215,9 @@ struct MessageBubble: View {
         return attributedString
     }
 
+    // MARK: - Context Menu Actions
+
+    /// Copies all URLs from the message to the clipboard.
     private func copyAllLinks() {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return }
         let matches = detector.matches(in: displayBody, range: NSRange(displayBody.startIndex..., in: displayBody))
@@ -1935,12 +2233,13 @@ struct MessageBubble: View {
         }
     }
 
+    /// Copies the full message body to the clipboard.
     private func selectMessage() {
-        // Copy to pasteboard for selection
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(message.body, forType: .string)
     }
 
+    /// Shows the macOS share sheet for the message.
     private func shareMessage() {
         let picker = NSSharingServicePicker(items: [message.body])
         if let window = NSApp.keyWindow {
@@ -1948,6 +2247,12 @@ struct MessageBubble: View {
         }
     }
 
+    // MARK: - Reply Parsing
+
+    /// Parses message text to extract reply quote prefix.
+    /// Looks for "> Sender: snippet" format at the start of the message.
+    /// - Parameter text: The full message text
+    /// - Returns: ParsedMessage with optional reply content and remaining body
     private func parseReplyBody(_ text: String) -> ParsedMessage {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("> ") else {
@@ -1978,6 +2283,9 @@ struct MessageBubble: View {
         return ParsedMessage(reply: reply, body: remainder)
     }
 
+    /// Checks if text contains any URLs using NSDataDetector.
+    /// - Parameter text: The text to check
+    /// - Returns: True if at least one URL is found
     private func hasLinks(in text: String) -> Bool {
         let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         let matches = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text))
@@ -1987,18 +2295,34 @@ struct MessageBubble: View {
 
 // MARK: - Attachment View
 
+/// Displays MMS attachments (images, videos, audio, contacts, files).
+/// Supports full-screen preview, video/audio playback, and save to downloads.
 struct AttachmentView: View {
+    /// The MMS attachment to display
     let attachment: MmsAttachment
 
+    // MARK: - State
+
+    /// Whether mouse is hovering (shows action buttons)
     @State private var isHovering = false
+    /// Loaded image data (for images)
     @State private var loadedImage: NSImage? = nil
+    /// Whether the attachment is currently loading
     @State private var isLoading = true
+    /// Whether loading failed
     @State private var loadError = false
+    /// Whether full-screen image viewer is shown
     @State private var showFullScreen = false
+    /// Whether video player sheet is shown
     @State private var showVideoPlayer = false
+    /// Whether audio player sheet is shown
     @State private var showAudioPlayer = false
+    /// Whether save operation is in progress
     @State private var isSaving = false
+    /// Whether save completed successfully
     @State private var saveSuccess = false
+
+    // MARK: - Body
 
     var body: some View {
         Group {

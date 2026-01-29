@@ -5,13 +5,83 @@
 //  Main application entry point for SyncFlow macOS app
 //
 
+// =============================================================================
+// MARK: - Architecture Overview
+// =============================================================================
+//
+// SyncFlowMacApp is the main entry point for the SyncFlow macOS application.
+// It serves as the companion app to the SyncFlow Android application, enabling
+// users to send/receive SMS messages, manage calls, and sync data from their
+// phone to their Mac.
+//
+// ARCHITECTURE:
+// -------------
+// The app follows a SwiftUI App lifecycle pattern with:
+// - @main entry point (SyncFlowMacApp)
+// - Central state management via AppState (ObservableObject)
+// - Environment object injection for state propagation
+// - Firebase backend for real-time sync with Android companion
+//
+// INITIALIZATION FLOW:
+// --------------------
+// 1. Firebase Configuration - Initializes Firebase SDK for real-time database
+//    and authentication
+// 2. Firebase Authentication - Signs in anonymously for unpaired devices,
+//    or uses existing auth session for paired devices
+// 3. Appearance Configuration - Sets up app-wide visual styling
+// 4. Performance Optimization - Initializes battery-aware service management
+//    and memory optimization utilities
+//
+// SCENE STRUCTURE:
+// ----------------
+// - WindowGroup: Main application window with ContentView
+// - Settings: Preferences window accessible via Cmd+,
+// - MenuBarExtra: System menu bar icon with quick actions
+//
+// DEPENDENCY INJECTION:
+// ---------------------
+// AppState is created as a @StateObject and injected into the view hierarchy
+// via .environmentObject(). All views access shared state through
+// @EnvironmentObject var appState: AppState
+//
+// SERVICES MANAGED BY APPSTATE:
+// -----------------------------
+// - PhoneStatusService: Monitors phone battery, signal, connectivity
+// - ClipboardSyncService: Syncs clipboard between Mac and phone
+// - FileTransferService: Handles Quick Drop file transfers
+// - ContinuityService: Manages continuity features
+// - PhotoSyncService: Syncs photos from phone
+// - NotificationMirrorService: Mirrors phone notifications to Mac
+// - HotspotControlService: Controls phone hotspot remotely
+// - DNDSyncService: Syncs Do Not Disturb status
+// - MediaControlService: Controls phone media playback
+// - ScheduledMessageService: Manages scheduled SMS messages
+// - VoicemailSyncService: Syncs voicemails from phone
+// - SyncFlowCallManager: Handles WebRTC calling between devices
+//
+// LIFECYCLE CONSIDERATIONS:
+// -------------------------
+// - AppState is initialized once and persists for app lifetime
+// - Firebase listeners are set up on pairing and torn down on unpair
+// - Background activity token prevents suspension for incoming calls
+// - Battery state monitoring adjusts sync frequency based on power status
+//
+// =============================================================================
+
 import SwiftUI
 import FirebaseCore
 import FirebaseDatabase
 import FirebaseAuth
 import Combine
 
+// =============================================================================
+// MARK: - ColorScheme Extension
+// =============================================================================
+/// Extension to support initializing ColorScheme from user preference strings.
+/// Used for persisting and restoring the user's preferred color scheme setting.
 extension ColorScheme {
+    /// Initializes a ColorScheme from a raw string value.
+    /// - Parameter rawValue: "light", "dark", or any other value returns nil (system default)
     init?(rawValue: String) {
         switch rawValue {
         case "light": self = .light
@@ -21,13 +91,52 @@ extension ColorScheme {
     }
 }
 
+// =============================================================================
+// MARK: - SyncFlowMacApp (Main Entry Point)
+// =============================================================================
+/// The main application struct and entry point for SyncFlow macOS.
+///
+/// This struct conforms to the SwiftUI `App` protocol and is marked with `@main`
+/// to indicate it's the application entry point. It manages:
+/// - Application-wide state via `AppState`
+/// - Firebase initialization and authentication
+/// - Performance optimization services
+/// - Window and menu bar configuration
+///
+/// ## State Management
+/// `AppState` is created as a `@StateObject` ensuring it persists across view
+/// updates and is initialized only once. It's injected into the view hierarchy
+/// via `.environmentObject()` for access throughout the app.
+///
+/// ## Scenes
+/// The app provides three scenes:
+/// 1. **WindowGroup**: Main application window containing `ContentView`
+/// 2. **Settings**: Preferences window with `SettingsView`
+/// 3. **MenuBarExtra**: System menu bar presence with quick actions
 @main
 struct SyncFlowMacApp: App {
 
+    // =========================================================================
+    // MARK: - State Properties
+    // =========================================================================
+
+    /// The central application state object.
+    /// Created once at app launch and injected into the view hierarchy.
+    /// Contains all shared state, service references, and business logic.
     @StateObject private var appState = AppState()
 
+    // =========================================================================
+    // MARK: - Initialization
+    // =========================================================================
+
+    /// Initializes the application and its core services.
+    ///
+    /// Initialization order is important:
+    /// 1. Firebase must be configured before any Firebase services are used
+    /// 2. Authentication follows to establish user session
+    /// 3. Appearance and performance services are initialized last
     init() {
-        // Configure Firebase
+        // Configure Firebase - must be first before any Firebase SDK usage
         FirebaseApp.configure()
 
         // Initialize Firebase authentication (sign in anonymously if needed)
@@ -40,6 +149,20 @@ struct SyncFlowMacApp: App {
         setupPerformanceOptimizations()
     }
 
+    // =========================================================================
+    // MARK: - Firebase Authentication
+    // =========================================================================
+
+    /// Initializes Firebase authentication based on pairing status.
+    ///
+    /// Authentication Strategy:
+    /// - **Paired Devices**: Use existing custom token authentication from pairing flow.
+    ///   We don't create anonymous auth as it would create a new UID and break the
+    ///   connection to the paired phone.
+    /// - **Unpaired Devices**: Sign in anonymously to enable the pairing flow.
+    ///   Anonymous auth provides a temporary UID for generating QR codes.
+    ///
+    /// The user ID is stored in UserDefaults under "syncflow_user_id" after successful pairing.
     private func initializeFirebaseAuth() {
         let auth = Auth.auth()
 
@@ -71,6 +194,25 @@ struct SyncFlowMacApp: App {
         }
     }
 
+    // =========================================================================
+    // MARK: - Performance Optimization
+    // =========================================================================
+
+    /// Sets up battery-aware service management and memory optimization.
+    ///
+    /// Performance Management Strategy:
+    /// - **Battery Monitoring**: Tracks battery level and charging status
+    /// - **Service State**: Adjusts sync frequency based on power conditions
+    /// - **Memory Optimization**: Proactively manages memory to prevent issues
+    ///
+    /// Service States:
+    /// - `.full`: Normal operation, all features active
+    /// - `.reduced`: Lower sync frequency, reduce background activity
+    /// - `.minimal`: Pause non-essential syncs (clipboard, photo)
+    /// - `.suspended`: Stop most services, only essential features remain
+    ///
+    /// This helps extend battery life on MacBooks when unplugged while ensuring
+    /// critical features (incoming calls, messages) remain functional.
     private func setupPerformanceOptimizations() {
         // Start battery-aware service management
         BatteryAwareServiceManager.shared.startBatteryMonitoring()
@@ -118,6 +260,24 @@ struct SyncFlowMacApp: App {
         }
     }
 
+    // =========================================================================
+    // MARK: - Scene Body
+    // =========================================================================
+
+    /// The main scene body defining the application's window structure.
+    ///
+    /// Scene Hierarchy:
+    /// 1. **WindowGroup**: Main app window containing ContentView
+    ///    - Minimum size: 900x600 for optimal layout
+    ///    - Color scheme follows user preference or system setting
+    ///    - AppState injected as environment object
+    /// 2. **Settings**: Preferences window (Cmd+,)
+    /// 3. **MenuBarExtra**: System tray icon with quick actions
+    ///
+    /// Custom Menu Commands:
+    /// - Messages: New message (Cmd+N), templates (Cmd+T), search (Cmd+F)
+    /// - Calls: Dialer, answer/reject/end call shortcuts
+    /// - Phone: Photos, notifications, scheduled messages, Find My Phone, etc.
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -361,14 +521,19 @@ struct SyncFlowMacApp: App {
     }
 }
 
-// MARK: - App State
+// =============================================================================
+// MARK: - App Tab Enumeration
+// =============================================================================
 
+/// Represents the main navigation tabs in the application.
+/// Each tab corresponds to a major feature area in the side rail navigation.
 enum AppTab: String, CaseIterable {
-    case messages = "Messages"
-    case contacts = "Contacts"
-    case callHistory = "Calls"
-    case deals = "Deals"
+    case messages = "Messages"    /// SMS/MMS message conversations
+    case contacts = "Contacts"    /// Phone contacts synced from device
+    case callHistory = "Calls"    /// Call log and dialer
+    case deals = "Deals"          /// Promotional deals and offers
 
+    /// SF Symbol icon name for each tab
     var icon: String {
         switch self {
         case .messages:
@@ -383,100 +548,229 @@ enum AppTab: String, CaseIterable {
     }
 }
 
+// =============================================================================
+// MARK: - AppState (Central State Management)
+// =============================================================================
+
+/// The central state management class for the SyncFlow macOS application.
+///
+/// AppState serves as the single source of truth for all application state and
+/// coordinates communication between various services. It follows the ObservableObject
+/// pattern for SwiftUI integration.
+///
+/// ## Architecture Role
+/// AppState acts as a coordinator/mediator between:
+/// - UI layer (SwiftUI views)
+/// - Service layer (sync services, Firebase)
+/// - Data layer (UserDefaults, Firebase Realtime Database)
+///
+/// ## State Categories
+///
+/// ### Authentication & Pairing
+/// - `userId`: Firebase user ID (set after successful pairing)
+/// - `isPaired`: Whether the Mac is paired with a phone
+///
+/// ### Navigation & UI
+/// - `selectedTab`: Current main navigation tab
+/// - `selectedConversation`: Currently selected message thread
+/// - `showNewMessage`, `showDialer`, etc.: Modal/sheet presentation state
+///
+/// ### Phone Calls
+/// - `activeCalls`: List of active phone calls on the paired device
+/// - `incomingCall`: Current incoming call (triggers UI overlay)
+/// - `incomingSyncFlowCall`: Incoming WebRTC call from another SyncFlow device
+/// - `activeSyncFlowCall`: Currently active WebRTC call
+///
+/// ### Services (Singleton References)
+/// Each service is initialized as a shared singleton and configured with userId on pairing.
+/// Services are started/stopped based on pairing status and battery conditions.
+///
+/// ## Lifecycle
+/// 1. **Init**: Check for existing pairing, restore state, start services if paired
+/// 2. **Pairing**: Call `setPaired(userId:)` to configure services and start listeners
+/// 3. **Unpairing**: Call `unpair()` to stop services and clear state
+/// 4. **Deallocation**: Clean up listeners and background activity tokens
+///
+/// ## Thread Safety
+/// All @Published properties must be updated on the main thread.
+/// Service callbacks use `DispatchQueue.main.async` for UI updates.
 class AppState: ObservableObject {
+
+    // =========================================================================
+    // MARK: - Authentication & Pairing State
+    // =========================================================================
+
+    /// Firebase user ID, set after successful pairing with phone
     @Published var userId: String?
+
+    /// Whether the Mac is successfully paired with a phone
     @Published var isPaired: Bool = false
+
+    // =========================================================================
+    // MARK: - UI State
+    // =========================================================================
+
+    /// Whether to show the media control bar in main view
     @Published var showMediaBar: Bool = UserDefaults.standard.object(forKey: "syncflow_show_media_bar") as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(showMediaBar, forKey: "syncflow_show_media_bar")
         }
     }
+
+    /// Modal presentation flags
     @Published var showNewMessage: Bool = false
     @Published var showDialer: Bool = false
     @Published var showTemplates: Bool = false
     @Published var focusSearch: Bool = false
+
+    /// Currently selected conversation for message detail view
     @Published var selectedConversation: Conversation?
+
+    /// Currently selected navigation tab
     @Published var selectedTab: AppTab = .messages
-    @Published var activeCalls: [ActiveCall] = []
+
+    /// Continuity handoff suggestion from phone
     @Published var continuitySuggestion: ContinuityService.ContinuityState?
 
-    // SyncFlow calling
-    @Published var incomingSyncFlowCall: SyncFlowCall?
-    @Published var activeSyncFlowCall: SyncFlowCall?
-    @Published var showSyncFlowCallView: Bool = false
-    let syncFlowCallManager = SyncFlowCallManager()
+    // =========================================================================
+    // MARK: - Phone Call State
+    // =========================================================================
+
+    /// Active phone calls on the paired Android device
+    @Published var activeCalls: [ActiveCall] = []
+
+    /// Current incoming phone call (triggers full-screen overlay)
     @Published var incomingCall: ActiveCall? = nil {
         didSet {
             handleIncomingCallChange(oldValue: oldValue, newValue: incomingCall)
         }
     }
+
+    /// ID of call that was answered from Mac (shows in-progress banner)
     @Published var lastAnsweredCallId: String? = nil
+
+    // =========================================================================
+    // MARK: - SyncFlow WebRTC Calling
+    // =========================================================================
+
+    /// Incoming device-to-device WebRTC call
+    @Published var incomingSyncFlowCall: SyncFlowCall?
+
+    /// Currently active WebRTC call
+    @Published var activeSyncFlowCall: SyncFlowCall?
+
+    /// Whether to show the call view overlay
+    @Published var showSyncFlowCallView: Bool = false
+
+    /// WebRTC call manager for device-to-device audio/video calls
+    let syncFlowCallManager = SyncFlowCallManager()
+
+    // =========================================================================
+    // MARK: - Message State
+    // =========================================================================
+
+    /// Count of unread messages (shown in menu bar badge)
     @Published var unreadCount: Int = 0
+
+    /// Recent conversations for quick access
     @Published var recentConversations: [Conversation] = []
 
-    // Phone status
+    // =========================================================================
+    // MARK: - Phone Status
+    // =========================================================================
+
+    /// Current status of paired phone (battery, signal, etc.)
     @Published var phoneStatus = PhoneStatus()
+
+    /// Service for monitoring phone status
     let phoneStatusService = PhoneStatusService.shared
 
-    // Clipboard sync
+    // =========================================================================
+    // MARK: - Sync Services
+    // =========================================================================
+
+    /// Clipboard sync between Mac and phone
     @Published var clipboardSyncEnabled: Bool = true
     let clipboardSyncService = ClipboardSyncService.shared
 
-    // File transfer (Quick Drop)
+    /// File transfer (Quick Drop) service
     let fileTransferService = FileTransferService.shared
+
+    /// Continuity/handoff service
     let continuityService = ContinuityService.shared
 
-    // Find My Phone
+    /// Find My Phone feature state
     @Published var isPhoneRinging: Bool = false
 
-    // Photo Sync
+    /// Photo sync service
     let photoSyncService = PhotoSyncService.shared
     @Published var showPhotoGallery: Bool = false
 
-    // Notification Mirroring
+    /// Notification mirroring service
     let notificationMirrorService = NotificationMirrorService.shared
     @Published var showNotifications: Bool = false
 
-    // Hotspot Control
+    /// Remote hotspot control service
     let hotspotControlService = HotspotControlService.shared
 
-    // DND Sync
+    /// Do Not Disturb sync service
     let dndSyncService = DNDSyncService.shared
 
-    // Media Control
+    /// Remote media control service
     let mediaControlService = MediaControlService.shared
 
-    // Scheduled Messages
+    /// Scheduled message service
     let scheduledMessageService = ScheduledMessageService.shared
     @Published var showScheduledMessages: Bool = false
 
-    // Voicemail Sync
+    /// Voicemail sync service
     let voicemailSyncService = VoicemailSyncService.shared
     @Published var showVoicemails: Bool = false
 
+    // =========================================================================
+    // MARK: - Private Properties
+    // =========================================================================
+
+    /// Firebase database listener handles (for cleanup)
     private var activeCallsListenerHandle: DatabaseHandle?
     private var phoneStatusCancellable: AnyCancellable?
     private var messagesListenerHandle: DatabaseHandle?
-    private var cancellables = Set<AnyCancellable>()
     private var deviceStatusHandle: DatabaseHandle?
     private var deviceStatusRef: DatabaseReference?
 
-    // Ringtone manager
+    /// Combine subscriptions for reactive updates
+    private var cancellables = Set<AnyCancellable>()
+
+    /// Ringtone manager for incoming call sounds
     let ringtoneManager = CallRingtoneManager.shared
     private var pendingCallNotificationId: String?
 
-    // Background activity token to prevent app suspension when minimized
-    // This ensures Firebase listeners remain active for incoming calls
+    /// Background activity token to prevent app suspension when minimized.
+    /// This ensures Firebase listeners remain active for incoming calls.
+    /// Critical for receiving calls when the app is not in foreground.
     private var backgroundActivity: NSObjectProtocol?
 
+    // =========================================================================
+    // MARK: - Lifecycle
+    // =========================================================================
+
+    /// Cleanup when AppState is deallocated.
+    /// NOTE: This only cleans up local resources (listeners, background activity).
+    /// Do NOT call unpair() here - that should only happen on explicit user request.
+    /// Otherwise the app will unpair every time it restarts or AppState is recreated.
     deinit {
-        // Clean up local resources when AppState is deallocated
-        // NOTE: Do NOT call unpair() here - that should only happen on explicit user request
-        // Otherwise the app will unpair every time it restarts or AppState is recreated
         stopBackgroundActivity()
         stopListeningForCalls()
     }
 
+    /// Initializes AppState and restores previous pairing if available.
+    ///
+    /// Initialization Flow:
+    /// 1. Check UserDefaults for existing pairing (syncflow_user_id)
+    /// 2. If paired, start all services with stored userId
+    /// 3. Set up notification observers for call actions
+    /// 4. Subscribe to call state changes for UI updates
+    /// 5. Subscribe to continuity state for handoff suggestions
     init() {
         // Check for existing pairing
         if let storedUserId = UserDefaults.standard.string(forKey: "syncflow_user_id") {

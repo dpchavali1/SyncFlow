@@ -4,32 +4,98 @@
 //
 //  Sidebar view showing all conversations
 //
+//  =============================================================================
+//  PURPOSE:
+//  This view displays the conversation list in the sidebar of the SyncFlow app.
+//  It serves as the primary navigation interface for users to browse, search,
+//  filter, and select message conversations. The view supports multiple features
+//  including conversation search, label-based filtering, bulk selection/deletion,
+//  spam management, and continuity suggestions for cross-device workflows.
+//
+//  USER INTERACTIONS:
+//  - Tap a conversation to select it and view messages
+//  - Use the search field to filter conversations and search within messages
+//  - Toggle filter buttons (All, Unread, Archived, Spam) to filter conversations
+//  - Long-press/right-click for context menu options (pin, archive, delete, etc.)
+//  - Use selection mode to bulk-select and delete multiple conversations
+//  - Tap label chips to filter by assigned labels
+//  - Tap "Load More" to paginate and load older conversations
+//  - Interact with continuity banner to continue conversations from other devices
+//
+//  STATE MANAGEMENT:
+//  - Uses @EnvironmentObject for MessageStore (data) and AppState (app-wide state)
+//  - Uses @Binding for searchText and selectedConversation (parent-managed state)
+//  - Local @State for UI-specific state like selection mode, search focus, etc.
+//  - @FocusState for keyboard focus management on search field
+//
+//  PERFORMANCE CONSIDERATIONS:
+//  - Computed properties (filteredConversations, pinnedConversations, etc.) are
+//    re-evaluated on every state change; keep them efficient
+//  - LazyVStack used for conversation list to virtualize off-screen items
+//  - Message search limited to 20 results to prevent UI lag
+//  - Background color and styling use design system constants for consistency
+//  =============================================================================
 
 import SwiftUI
 
+// MARK: - Main Conversation List View
+
+/// The sidebar view that displays all user conversations with search, filter, and selection capabilities.
+/// This is the primary navigation component for the messaging interface.
 struct ConversationListView: View {
+
+    // MARK: - Environment Objects
+
+    /// The message store containing all conversations and messages
     @EnvironmentObject var messageStore: MessageStore
+    /// App-wide state including continuity suggestions and user preferences
     @EnvironmentObject var appState: AppState
+
+    // MARK: - Bindings (Parent-Managed State)
+
+    /// Search text bound to parent view for global search coordination
     @Binding var searchText: String
+    /// Currently selected conversation; changes trigger message view updates
     @Binding var selectedConversation: Conversation?
 
+    // MARK: - Local State
+
+    /// Whether to show message search results in addition to conversation results
     @State private var showMessageResults = false
+    /// ID of the currently selected label filter (nil = no label filter)
     @State private var selectedLabelId: String? = nil
+    /// Cached list of available labels for filtering UI
     @State private var availableLabels: [PreferencesService.ConversationLabel] = []
+    /// Whether bulk selection mode is active
     @State private var isSelectionMode = false
+    /// Set of conversation IDs currently selected for bulk operations
     @State private var selectedConversationIds: Set<String> = []
+    /// Controls visibility of bulk delete confirmation alert
     @State private var showBulkDeleteConfirmation = false
+    /// Tracks whether search UI elements should be expanded
     @State private var isSearchActive = false
+
+    // MARK: - Focus State
+
+    /// Manages keyboard focus for the search text field
     @FocusState private var isSearchFieldFocused: Bool
 
+    // MARK: - Services
+
+    /// Shared preferences service for label management
     private let preferences = PreferencesService.shared
 
+    // MARK: - Computed Properties
+
+    /// Returns filtered conversations based on search text and selected label.
+    /// This is the main data source for the conversation list.
     var filteredConversations: [Conversation] {
+        // Start with either all conversations or search-filtered results
         var conversations = searchText.isEmpty
             ? messageStore.displayedConversations
             : messageStore.search(query: searchText, in: messageStore.displayedConversations)
 
-        // Filter by label if selected
+        // Apply label filter if a label is selected
         if let labelId = selectedLabelId {
             let labeledAddresses = Set(preferences.getConversations(with: labelId))
             conversations = conversations.filter { labeledAddresses.contains($0.address) }
@@ -38,19 +104,25 @@ struct ConversationListView: View {
         return conversations
     }
 
+    /// Returns messages matching the search query.
+    /// Limited to 20 results for performance; requires at least 2 characters.
     var messageSearchResults: [Message] {
+        // Require minimum 2 characters to avoid expensive searches on single chars
         guard searchText.count >= 2 else { return [] }
         return Array(messageStore.searchMessages(query: searchText).prefix(20))
     }
 
+    /// Filtered conversations that are pinned, shown in a separate section
     private var pinnedConversations: [Conversation] {
         filteredConversations.filter { $0.isPinned }
     }
 
+    /// Filtered conversations that are not pinned, shown in the main section
     private var regularConversations: [Conversation] {
         filteredConversations.filter { !$0.isPinned }
     }
 
+    /// Returns appropriate SF Symbol name for empty state based on current context
     var emptyStateIcon: String {
         if !searchText.isEmpty {
             return "magnifyingglass"
@@ -67,6 +139,7 @@ struct ConversationListView: View {
         }
     }
 
+    /// Returns appropriate empty state message based on current context
     var emptyStateMessage: String {
         if !searchText.isEmpty {
             return "No results found"
@@ -83,11 +156,19 @@ struct ConversationListView: View {
         }
     }
 
+    // MARK: - Helper Methods
+
+    /// Attempts to find a conversation matching the continuity state from another device.
+    /// Uses multiple matching strategies: exact match, normalized phone number match, and name match.
+    /// - Parameter state: The continuity state containing address/contact info from another device
+    /// - Returns: The matching conversation if found, nil otherwise
     private func resolveConversation(for state: ContinuityService.ContinuityState) -> Conversation? {
+        // Strategy 1: Exact address match
         if let exact = messageStore.conversations.first(where: { $0.address == state.address }) {
             return exact
         }
 
+        // Strategy 2: Normalized phone number match (strips non-numeric characters)
         let normalizedTarget = normalizeAddress(state.address)
         if !normalizedTarget.isEmpty,
            let normalizedMatch = messageStore.conversations.first(where: {
@@ -96,6 +177,7 @@ struct ConversationListView: View {
             return normalizedMatch
         }
 
+        // Strategy 3: Contact name match (case-insensitive)
         if let name = state.contactName?.lowercased(),
            let nameMatch = messageStore.conversations.first(where: {
                $0.contactName?.lowercased() == name
@@ -106,23 +188,39 @@ struct ConversationListView: View {
         return nil
     }
 
+    /// Checks if a conversation matches the given continuity state.
+    /// Used to avoid showing continuity banner for already-selected conversations.
+    /// - Parameters:
+    ///   - conversation: The conversation to check
+    ///   - state: The continuity state to compare against
+    /// - Returns: True if the conversation matches the state
     private func isSameConversation(_ conversation: Conversation?, state: ContinuityService.ContinuityState) -> Bool {
         guard let conversation = conversation else { return false }
         if conversation.address == state.address {
             return true
         }
+        // Fall back to normalized comparison for phone number format differences
         let normalizedConversation = normalizeAddress(conversation.address)
         let normalizedState = normalizeAddress(state.address)
         return !normalizedConversation.isEmpty && normalizedConversation == normalizedState
     }
 
+    /// Strips non-numeric characters from an address/phone number for comparison.
+    /// - Parameter value: The address string to normalize
+    /// - Returns: String containing only numeric characters
     private func normalizeAddress(_ value: String) -> String {
         return value.filter { $0.isNumber }
     }
 
+    // MARK: - Body
+
     var body: some View {
         VStack(spacing: 0) {
-            // Search bar and filter toggle
+            // =================================================================
+            // SEARCH BAR AND FILTER TOGGLE SECTION
+            // Contains: search field, selection mode toggle, filter buttons,
+            // label chips, and selection toolbar
+            // =================================================================
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
                     // Search field
@@ -282,6 +380,10 @@ struct ConversationListView: View {
             }
             .padding()
 
+            // =================================================================
+            // CONTINUITY BANNER
+            // Shown when there's a suggestion to continue from another device
+            // =================================================================
             if let state = appState.continuitySuggestion,
                !isSameConversation(selectedConversation, state: state) {
                 ContinuityBannerView(
@@ -299,13 +401,19 @@ struct ConversationListView: View {
                 .padding(.bottom, 8)
             }
 
+            // Quick drop zone for drag-and-drop functionality
             QuickDropView()
                 .padding(.horizontal)
                 .padding(.bottom, 8)
 
             Divider()
 
-            // Conversations list
+            // =================================================================
+            // CONVERSATIONS LIST
+            // Main scrollable area containing conversation rows
+            // Handles: loading state, spam view, empty state, and normal list
+            // Uses LazyVStack for virtualized rendering performance
+            // =================================================================
             if messageStore.isLoading && messageStore.conversations.isEmpty && messageStore.spamMessages.isEmpty {
                 VStack(spacing: 10) {
                     ProgressView()
@@ -557,6 +665,10 @@ struct ConversationListView: View {
     }
 }
 
+// MARK: - Spam Conversation Row
+
+/// A row component for displaying spam conversation entries.
+/// Shows contact initials, name, preview text, and message count with spam-themed styling.
 struct SpamConversationRow: View {
     let conversation: SpamConversation
     let isSelected: Bool
@@ -618,8 +730,12 @@ struct SpamConversationRow: View {
 
 // MARK: - Message Search Result Row
 
+/// Displays individual message search results with highlighted search terms.
+/// Shows avatar, contact name, message preview with highlighted text, and timestamp.
 struct MessageSearchResultRow: View {
+    /// The message to display
     let message: Message
+    /// The search text to highlight within the message body
     let searchText: String
 
     var body: some View {
@@ -661,6 +777,14 @@ struct MessageSearchResultRow: View {
         .contentShape(Rectangle())
     }
 
+    // MARK: - Subviews / Helpers
+
+    /// Creates a Text view with the search term highlighted in blue.
+    /// Performs case-insensitive search and highlights only the first occurrence.
+    /// - Parameters:
+    ///   - text: The full text to display
+    ///   - searchText: The term to highlight
+    /// - Returns: A styled Text view with highlighting applied
     private func highlightedText(_ text: String, searchText: String) -> Text {
         guard !searchText.isEmpty else {
             return Text(text)
@@ -683,6 +807,10 @@ struct MessageSearchResultRow: View {
         return Text(before) + Text(match).bold().foregroundColor(.blue) + Text(after)
     }
 
+    /// Formats a timestamp into a human-readable date string.
+    /// Shows time for today, "Yesterday" for yesterday, and date for older messages.
+    /// - Parameter timestamp: Unix timestamp in milliseconds
+    /// - Returns: Formatted date string
     private func formatDate(_ timestamp: Double) -> String {
         let date = Date(timeIntervalSince1970: timestamp / 1000)
         let formatter = DateFormatter()
@@ -701,10 +829,15 @@ struct MessageSearchResultRow: View {
 
 // MARK: - Conversation Context Menu
 
+/// Context menu for conversation rows providing quick actions.
+/// Includes: pin/unpin, mark as read, labels, archive, block, and delete options.
 struct ConversationContextMenu: View {
+    /// The conversation this menu operates on
     let conversation: Conversation
+    /// The message store for executing actions
     let messageStore: MessageStore
 
+    /// Preferences service for label management
     private let preferences = PreferencesService.shared
 
     var body: some View {
@@ -780,21 +913,37 @@ struct ConversationContextMenu: View {
 
 // MARK: - Conversation Row
 
+/// Individual conversation row component displaying contact info, preview, and status indicators.
+/// Supports selection mode for bulk operations and shows labels, pin status, and unread count.
 struct ConversationRow: View {
+
+    // MARK: - Properties
+
+    /// The conversation data to display
     let conversation: Conversation
+    /// Whether this row is currently selected (highlighted)
     let isSelected: Bool
+    /// Whether bulk selection mode is active
     let selectionMode: Bool
+    /// Whether this conversation is selected in bulk mode
     let isBulkSelected: Bool
+    /// Callback when selection checkbox is toggled
     let onToggleSelect: () -> Void
 
+    /// Preferences service for label access
     private let preferences = PreferencesService.shared
+
+    /// Reusable rounded rectangle shape for row styling
     private var rowShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
     }
 
+    /// Labels assigned to this conversation
     var conversationLabels: [PreferencesService.ConversationLabel] {
         preferences.getLabels(for: conversation.address)
     }
+
+    // MARK: - Body
 
     var body: some View {
         HStack(spacing: 12) {
@@ -905,6 +1054,7 @@ struct ConversationRow: View {
     }
 }
 
+/// Visual separator between conversation rows with proper indentation.
 struct ConversationSeparator: View {
     var body: some View {
         Rectangle()
@@ -917,7 +1067,9 @@ struct ConversationSeparator: View {
 
 // MARK: - Sidebar Section Header
 
+/// Section header for the sidebar with title and padding.
 struct SidebarSectionHeader: View {
+    /// The section title to display
     let title: String
 
     var body: some View {
@@ -928,7 +1080,9 @@ struct SidebarSectionHeader: View {
     }
 }
 
+/// Styled section title text (uppercase, small, secondary color).
 struct SidebarSectionTitle: View {
+    /// The title text to display
     let title: String
 
     var body: some View {
@@ -942,10 +1096,16 @@ struct SidebarSectionTitle: View {
 
 // MARK: - Filter Button
 
+/// A toggleable filter button for conversation filtering (All, Unread, Archived, Spam).
+/// Shows icon, label, and optional badge count. Highlights when selected.
 struct FilterButton: View {
+    /// The filter type this button represents
     let filter: MessageStore.ConversationFilter
+    /// Whether this filter is currently active
     let isSelected: Bool
+    /// Badge count to show (e.g., unread count); only shown for specific filter types
     let badgeCount: Int
+    /// Callback when button is tapped
     let action: () -> Void
 
     var body: some View {
@@ -984,9 +1144,14 @@ struct FilterButton: View {
 
 // MARK: - Continuity Banner
 
+/// Banner view suggesting the user continue a conversation from another device.
+/// Part of the Handoff/Continuity feature for cross-device workflow.
 struct ContinuityBannerView: View {
+    /// The continuity state containing device name and conversation info
     let state: ContinuityService.ContinuityState
+    /// Callback when user taps "Open" to continue the conversation
     let onOpen: () -> Void
+    /// Callback when user dismisses the banner
     let onDismiss: () -> Void
 
     var body: some View {

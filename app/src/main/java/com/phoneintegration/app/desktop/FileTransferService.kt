@@ -20,42 +20,194 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Service that handles file transfers between macOS/desktop and Android.
- * Files are uploaded to Cloudflare R2 and synced via Realtime Database.
+ * FileTransferService.kt - Cross-Platform File Transfer Service for SyncFlow
  *
- * Tiered Limits:
- * - Free: 50MB per file
- * - Pro: 1GB per file
+ * This service enables seamless file sharing between Android devices and macOS/desktop
+ * clients using Cloudflare R2 for storage and Firebase Realtime Database for coordination.
+ *
+ * ## Architecture Overview
+ *
+ * The file transfer system uses a three-component architecture:
+ *
+ * 1. **Firebase Realtime Database** - Coordinates transfers and stores metadata
+ *    - Path: `users/{userId}/file_transfers/{transferId}`
+ *    - Stores: fileName, fileSize, contentType, r2Key, status, timestamp
+ *
+ * 2. **Cloudflare R2 Storage** - Stores actual file content
+ *    - Accessed via presigned URLs from Cloud Functions
+ *    - No egress fees (unlike S3), enabling generous transfer limits
+ *
+ * 3. **Firebase Cloud Functions** - Provides secure presigned URL generation
+ *    - `getR2UploadUrl` - Generate presigned PUT URL for uploads
+ *    - `getR2DownloadUrl` - Generate presigned GET URL for downloads
+ *    - `confirmR2Upload` - Confirm upload completion and record usage
+ *    - `deleteR2File` - Clean up files after successful download
+ *
+ * ## Transfer Flow
+ *
+ * **Upload (Android -> Desktop):**
+ * 1. App calls [uploadFile] with local file
+ * 2. Service checks subscription tier limits via [canTransfer]
+ * 3. Gets presigned upload URL from `getR2UploadUrl` Cloud Function
+ * 4. Uploads file directly to R2 via HTTP PUT
+ * 5. Confirms upload via `confirmR2Upload` (records usage)
+ * 6. Creates transfer record in Firebase Database
+ * 7. Desktop client receives transfer via Firebase listener
+ *
+ * **Download (Desktop -> Android):**
+ * 1. Desktop creates transfer record with r2Key in Firebase
+ * 2. This service's [ChildEventListener] detects new transfer
+ * 3. Service validates transfer (source, status, age, size)
+ * 4. Gets presigned download URL from Cloud Function
+ * 5. Downloads file to temp directory
+ * 6. Saves to Downloads/SyncFlow via MediaStore (Android 10+) or direct file access
+ * 7. Updates transfer status and cleans up R2 file
+ *
+ * ## Subscription Tiers
+ *
+ * | Tier | Max File Size |
+ * |------|---------------|
+ * | Free | 50 MB         |
+ * | Pro  | 1 GB          |
+ *
+ * Note: No daily transfer limits since R2 has free egress.
+ *
+ * ## Battery Optimization Considerations
+ *
+ * - Uses Firebase Realtime Database listeners (efficient long-polling)
+ * - Downloads run on [Dispatchers.IO] to avoid blocking
+ * - File age check (5 minutes) prevents processing stale transfers
+ * - Duplicate prevention via [processingFileIds] set
+ *
+ * ## Notification Handling
+ *
+ * - Creates notification channel "file_transfer_channel" on init
+ * - Shows progress notification during download
+ * - Shows completion notification when file is saved
+ * - Notifications are auto-cancelled on tap
+ *
+ * @see ClipboardSyncService For text-based sync
+ * @see PhotoSyncService For photo thumbnail sync
+ */
+
+// =============================================================================
+// REGION: FileTransferService - Main Service Class
+// =============================================================================
+
+/**
+ * Service that handles file transfers between macOS/desktop and Android.
+ *
+ * Files are uploaded to Cloudflare R2 and synced via Realtime Database.
+ * This service provides bidirectional file transfer capabilities with
+ * subscription-based size limits.
+ *
+ * ## Usage
+ *
+ * ```kotlin
+ * val service = FileTransferService(context)
+ * service.startListening()  // Start receiving files from desktop
+ *
+ * // Upload a file to share with desktop
+ * val success = service.uploadFile(file, "document.pdf", "application/pdf")
+ *
+ * // When done
+ * service.stopListening()
+ * ```
+ *
+ * ## Thread Safety
+ *
+ * - File listeners run on [Dispatchers.IO] via coroutines
+ * - [processingFileIds] is synchronized for thread-safe duplicate detection
+ * - Toast messages are posted to MainScope
+ *
+ * @param context Application context (will be converted to applicationContext)
  */
 class FileTransferService(context: Context) {
+
+    // -------------------------------------------------------------------------
+    // Service Dependencies and State
+    // -------------------------------------------------------------------------
+
+    /** Application context for system services and content resolver access */
     private val context: Context = context.applicationContext
+
+    /** Firebase Auth instance for user identification */
     private val auth = FirebaseAuth.getInstance()
+
+    /** Firebase Realtime Database for transfer metadata and coordination */
     private val database = FirebaseDatabase.getInstance()
+
+    /** Firebase Cloud Functions for R2 presigned URL generation */
     private val functions = FirebaseFunctions.getInstance()
 
+    /** Active listener for incoming file transfers from Firebase */
     private var fileListenerHandle: ChildEventListener? = null
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val processingFileIds = mutableSetOf<String>() // Track files being processed to prevent duplicates
 
+    /** Coroutine scope for async operations, uses SupervisorJob for independent failure handling */
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Set of file IDs currently being processed.
+     *
+     * Prevents duplicate processing when Firebase sends multiple events
+     * for the same transfer (e.g., on reconnection). Access is synchronized.
+     */
+    private val processingFileIds = mutableSetOf<String>()
+
+    /** System notification manager for download progress and completion notifications */
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+    // -------------------------------------------------------------------------
+    // Companion Object: Constants and Tier Limits
+    // -------------------------------------------------------------------------
 
     companion object {
         private const val TAG = "FileTransferService"
+
+        /** Firebase Database path for file transfer records */
         private const val FILE_TRANSFERS_PATH = "file_transfers"
+
+        /** Firebase Database root path for user data */
         private const val USERS_PATH = "users"
+
+        /** Notification channel ID for file transfer notifications */
         private const val CHANNEL_ID = "file_transfer_channel"
+
+        /** Notification ID (reused for download progress updates) */
         private const val NOTIFICATION_ID = 9001
 
-        // Tiered limits (no daily limits - R2 has free egress)
+        // -----------------------------------------------------------------
+        // Subscription Tier Limits
+        // -----------------------------------------------------------------
+
+        /**
+         * Maximum file size for free tier users (50 MB).
+         * Free egress from R2 allows generous limits without daily caps.
+         */
         const val MAX_FILE_SIZE_FREE = 50 * 1024 * 1024L     // 50MB for free users
+
+        /**
+         * Maximum file size for Pro tier users (1 GB).
+         * Enables transfer of large media files and documents.
+         */
         const val MAX_FILE_SIZE_PRO = 1024 * 1024 * 1024L    // 1GB for pro users
 
-        // Legacy constant for backward compatibility
+        /**
+         * Legacy constant for backward compatibility with older code.
+         * @deprecated Use [MAX_FILE_SIZE_FREE] or tier-aware [canTransfer] instead.
+         */
         private const val MAX_FILE_SIZE = 50 * 1024 * 1024L
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Subscription Tier Management
+    // -------------------------------------------------------------------------
+
     /**
-     * Data class for transfer limits
+     * Data class representing current transfer limits based on subscription tier.
+     *
+     * @property maxFileSize Maximum allowed file size in bytes
+     * @property isPro Whether user has Pro subscription
      */
     data class TransferLimits(
         val maxFileSize: Long,
@@ -63,7 +215,21 @@ class FileTransferService(context: Context) {
     )
 
     /**
-     * Check if user has pro subscription
+     * Check if the current user has a Pro subscription.
+     *
+     * Queries Firebase Database for the user's subscription plan.
+     * Returns true for any non-free plan (pro, premium, etc.).
+     *
+     * ## Firebase Path
+     *
+     * `users/{userId}/subscription/plan`
+     *
+     * ## Failure Handling
+     *
+     * On query failure (network issues, etc.), defaults to allowing
+     * transfers to avoid blocking legitimate users due to connectivity.
+     *
+     * @return true if user has Pro subscription, false for free tier
      */
     private suspend fun isPro(): Boolean {
         return try {
@@ -87,7 +253,9 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Get current transfer limits based on subscription
+     * Get current transfer limits based on user's subscription tier.
+     *
+     * @return [TransferLimits] containing max file size and Pro status
      */
     suspend fun getTransferLimits(): TransferLimits {
         val isPro = isPro()
@@ -100,13 +268,25 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Check if transfer is allowed
+     * Result of a transfer eligibility check.
+     *
+     * @property allowed Whether the transfer is permitted
+     * @property reason Human-readable explanation if not allowed (null if allowed)
      */
     data class TransferCheck(
         val allowed: Boolean,
         val reason: String? = null
     )
 
+    /**
+     * Check if a file transfer is allowed based on subscription limits.
+     *
+     * Validates the file size against the user's tier limit.
+     * For free users, includes upgrade suggestion in rejection message.
+     *
+     * @param fileSize Size of the file to transfer in bytes
+     * @return [TransferCheck] indicating if transfer is allowed and why not
+     */
     suspend fun canTransfer(fileSize: Long): TransferCheck {
         val limits = getTransferLimits()
 
@@ -121,11 +301,29 @@ class FileTransferService(context: Context) {
     }
 
     init {
+        // Create notification channel on service instantiation
         createNotificationChannel()
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Data Classes
+    // -------------------------------------------------------------------------
+
     /**
-     * Data class representing a file transfer
+     * Data class representing a file transfer record.
+     *
+     * Maps to Firebase Database structure at:
+     * `users/{userId}/file_transfers/{id}`
+     *
+     * @property id Unique transfer identifier (Firebase push key or timestamp)
+     * @property originalId Original ID from source device (for deduplication)
+     * @property fileName Display name of the file
+     * @property fileSize File size in bytes
+     * @property contentType MIME type (e.g., "image/jpeg", "application/pdf")
+     * @property downloadUrl Presigned download URL (legacy Firebase Storage)
+     * @property source Origin device type ("android" or "macos")
+     * @property timestamp Unix timestamp of transfer creation
+     * @property status Transfer status: "pending", "downloading", "downloaded", "failed"
      */
     data class FileTransfer(
         val id: String,
@@ -138,8 +336,20 @@ class FileTransferService(context: Context) {
         val status: String
     )
 
+    // -------------------------------------------------------------------------
+    // REGION: Service Lifecycle Management
+    // -------------------------------------------------------------------------
+
     /**
-     * Start listening for file transfers
+     * Start listening for incoming file transfers from desktop clients.
+     *
+     * Initializes Firebase connection and registers a [ChildEventListener]
+     * on the user's file_transfers path to receive real-time updates.
+     *
+     * Call this when:
+     * - App starts and user is authenticated
+     * - Desktop sync feature is enabled
+     * - After [stopListening] to resume
      */
     fun startListening() {
         Log.d(TAG, "Starting file transfer service")
@@ -148,7 +358,13 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Stop listening for file transfers
+     * Stop listening for file transfers and clean up resources.
+     *
+     * Removes Firebase listener and cancels the coroutine scope.
+     * Call this when:
+     * - User signs out
+     * - Desktop sync feature is disabled
+     * - App is being destroyed
      */
     fun stopListening() {
         Log.d(TAG, "Stopping file transfer service")
@@ -156,8 +372,26 @@ class FileTransferService(context: Context) {
         scope.cancel()
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Firebase Listener Management
+    // -------------------------------------------------------------------------
+
     /**
-     * Listen for incoming file transfers
+     * Register Firebase listener for incoming file transfers.
+     *
+     * Creates a [ChildEventListener] on the user's file_transfers path.
+     * Only processes transfers from non-Android sources (i.e., desktop).
+     *
+     * ## Firebase Path
+     *
+     * `users/{userId}/file_transfers`
+     *
+     * ## Listener Behavior
+     *
+     * - `onChildAdded`: Triggers [handleFileTransfer] for new transfers
+     * - `onChildChanged`: Reserved for status updates (currently no-op)
+     * - `onChildRemoved/Moved`: No-op (cleanup handled elsewhere)
+     * - `onCancelled`: Logs error for debugging
      */
     private fun listenForFileTransfers() {
         scope.launch {
@@ -212,8 +446,28 @@ class FileTransferService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Incoming File Transfer Processing
+    // -------------------------------------------------------------------------
+
     /**
-     * Handle incoming file transfer
+     * Process an incoming file transfer from Firebase.
+     *
+     * Validates the transfer and initiates download if eligible.
+     *
+     * ## Validation Checks
+     *
+     * 1. **Duplicate prevention** - Skip if already in [processingFileIds]
+     * 2. **Source filter** - Skip transfers from Android (we're Android)
+     * 3. **Status check** - Only process "pending" transfers
+     * 4. **Age check** - Skip transfers older than 5 minutes (stale data)
+     *
+     * ## Thread Safety
+     *
+     * Access to [processingFileIds] is synchronized to prevent race conditions
+     * when multiple Firebase events arrive simultaneously.
+     *
+     * @param snapshot Firebase DataSnapshot containing transfer metadata
      */
     private fun handleFileTransfer(snapshot: DataSnapshot) {
         val fileId = snapshot.key ?: return
@@ -279,7 +533,36 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Download file from R2 or legacy Firebase Storage
+     * Download a file from R2 storage or legacy Firebase Storage URL.
+     *
+     * ## Download Flow
+     *
+     * 1. Validate file size against tier limits
+     * 2. Show download progress notification
+     * 3. Update transfer status to "downloading"
+     * 4. Get presigned URL (R2) or use legacy URL directly
+     * 5. Download to temp file
+     * 6. Save to Downloads/SyncFlow via MediaStore
+     * 7. Update status to "downloaded"
+     * 8. Clean up R2 file and Firebase record
+     *
+     * ## R2 vs Legacy Firebase Storage
+     *
+     * - **R2 (preferred)**: Uses `r2Key` field, gets presigned URL via Cloud Function
+     * - **Legacy**: Uses `downloadUrl` field directly (Firebase Storage URL)
+     *
+     * ## Error Handling
+     *
+     * - Shows toast on failure
+     * - Updates transfer status to "failed" with error message
+     * - Always removes fileId from [processingFileIds] (in finally block of caller)
+     *
+     * @param fileId Unique identifier for this transfer
+     * @param fileName Display name for the downloaded file
+     * @param fileSize Size in bytes for validation
+     * @param contentType MIME type for MediaStore
+     * @param r2Key Cloudflare R2 storage key (null if legacy)
+     * @param legacyDownloadUrl Direct Firebase Storage URL (null if R2)
      */
     private suspend fun downloadFile(
         fileId: String,
@@ -399,8 +682,32 @@ class FileTransferService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: File System Operations
+    // -------------------------------------------------------------------------
+
     /**
-     * Save file to Downloads folder
+     * Save a downloaded file to the public Downloads folder.
+     *
+     * Uses different APIs based on Android version:
+     * - **Android 10+ (Q)**: MediaStore API with scoped storage
+     * - **Android 9 and below**: Direct file system access
+     *
+     * Files are saved to `Downloads/SyncFlow/` subdirectory.
+     *
+     * ## MediaStore (Android 10+)
+     *
+     * Uses ContentResolver to insert file metadata and write content.
+     * Respects scoped storage restrictions without WRITE_EXTERNAL_STORAGE.
+     *
+     * ## Legacy (Android 9-)
+     *
+     * Directly accesses Environment.DIRECTORY_DOWNLOADS.
+     * Requires WRITE_EXTERNAL_STORAGE permission.
+     *
+     * @param fileName Target file name (will overwrite if exists on legacy)
+     * @param contentType MIME type for MediaStore
+     * @param sourceFile Temp file containing downloaded content
      */
     private fun saveToDownloads(fileName: String, contentType: String, sourceFile: File) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -437,9 +744,50 @@ class FileTransferService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Outgoing File Upload (Android -> Desktop)
+    // -------------------------------------------------------------------------
+
     /**
-     * Upload a file to share with other devices via R2
-     * Respects tiered limits (Free: 50MB/file | Pro: 1GB/file)
+     * Upload a file to share with other devices via Cloudflare R2.
+     *
+     * Respects subscription tier limits:
+     * - **Free**: 50MB per file
+     * - **Pro**: 1GB per file
+     *
+     * ## Upload Flow
+     *
+     * 1. Check tier limits via [canTransfer]
+     * 2. Get presigned upload URL from `getR2UploadUrl` Cloud Function
+     * 3. Upload file directly to R2 via HTTP PUT
+     * 4. Confirm upload via `confirmR2Upload` (records usage statistics)
+     * 5. Create transfer record in Firebase Database
+     * 6. Desktop clients receive notification via Firebase listener
+     *
+     * ## Firebase Cloud Function Calls
+     *
+     * **getR2UploadUrl:**
+     * ```
+     * Request: { syncGroupUserId, fileName, contentType, fileSize, transferType }
+     * Response: { uploadUrl, r2Key }
+     * ```
+     *
+     * **confirmR2Upload:**
+     * ```
+     * Request: { syncGroupUserId, fileKey, fileSize, transferType }
+     * Response: { success: true }
+     * ```
+     *
+     * ## Error Handling
+     *
+     * - Shows toast message on failure
+     * - Returns false for any error (auth, network, limits, upload failure)
+     * - Logs detailed error for debugging
+     *
+     * @param file Local file to upload
+     * @param fileName Display name for the file
+     * @param contentType MIME type (e.g., "image/png", "application/pdf")
+     * @return true if upload succeeded, false otherwise
      */
     suspend fun uploadFile(file: File, fileName: String, contentType: String): Boolean {
         return try {
@@ -545,8 +893,22 @@ class FileTransferService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Firebase Status Updates
+    // -------------------------------------------------------------------------
+
     /**
-     * Update transfer status
+     * Update the status of a file transfer in Firebase Database.
+     *
+     * Status values:
+     * - "pending" - Transfer created, awaiting download
+     * - "downloading" - Download in progress
+     * - "downloaded" - Successfully downloaded
+     * - "failed" - Download failed (includes error message)
+     *
+     * @param fileId Unique identifier of the transfer
+     * @param status New status value
+     * @param error Optional error message (for "failed" status)
      */
     private suspend fun updateTransferStatus(fileId: String, status: String, error: String? = null) {
         try {
@@ -571,8 +933,20 @@ class FileTransferService(context: Context) {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: Notification Management
+    // -------------------------------------------------------------------------
+
     /**
-     * Create notification channel
+     * Create the notification channel for file transfer notifications.
+     *
+     * Required for Android 8.0 (API 26) and above. Called during service
+     * initialization to ensure channel exists before notifications are posted.
+     *
+     * Channel properties:
+     * - **ID**: "file_transfer_channel"
+     * - **Name**: "File Transfers"
+     * - **Importance**: Default (shows in shade, makes sound)
      */
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -588,7 +962,13 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Show download progress notification
+     * Show a download progress notification.
+     *
+     * Uses the same [NOTIFICATION_ID] for all progress updates so each
+     * update replaces the previous notification.
+     *
+     * @param fileName Name of the file being downloaded
+     * @param progress Download progress (0-100), 0 shows indeterminate progress
      */
     private fun showDownloadNotification(fileName: String, progress: Int) {
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
@@ -603,7 +983,12 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Show download complete notification
+     * Show a notification indicating download completed successfully.
+     *
+     * Replaces the progress notification with a completion message.
+     * Notification auto-cancels when tapped.
+     *
+     * @param fileName Name of the downloaded file
      */
     private fun showDownloadCompleteNotification(fileName: String) {
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
@@ -617,8 +1002,17 @@ class FileTransferService(context: Context) {
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
+    // -------------------------------------------------------------------------
+    // REGION: UI Feedback
+    // -------------------------------------------------------------------------
+
     /**
-     * Show toast message
+     * Show a toast message on the main thread.
+     *
+     * Uses [MainScope] to ensure Toast is shown on the UI thread,
+     * as this may be called from coroutines on [Dispatchers.IO].
+     *
+     * @param message Text to display in the toast
      */
     private fun showToast(message: String) {
         MainScope().launch {
