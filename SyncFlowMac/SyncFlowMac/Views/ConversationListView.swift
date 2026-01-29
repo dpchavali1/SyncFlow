@@ -124,34 +124,52 @@ struct ConversationListView: View {
         VStack(spacing: 0) {
             // Search bar and filter toggle
             VStack(spacing: 8) {
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("Search conversations", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .focused($isSearchFieldFocused)
-                        .onChange(of: isSearchFieldFocused) { _, focused in
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                isSearchActive = focused
+                HStack(spacing: 8) {
+                    // Search field
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Search conversations", text: $searchText)
+                            .textFieldStyle(.plain)
+                            .focused($isSearchFieldFocused)
+                            .onChange(of: isSearchFieldFocused) { _, focused in
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isSearchActive = focused
+                                }
                             }
-                        }
 
-                    if !searchText.isEmpty || isSearchActive {
+                        if !searchText.isEmpty || isSearchActive {
+                            Button(action: {
+                                searchText = ""
+                                isSearchFieldFocused = false
+                                isSearchActive = false
+                                selectedLabelId = nil
+                            }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(8)
+                    .background(SyncFlowColors.surfaceSecondary)
+                    .cornerRadius(8)
+
+                    // Selection mode toggle button (compact icon)
+                    if !isSelectionMode {
                         Button(action: {
-                            searchText = ""
-                            isSearchFieldFocused = false
-                            isSearchActive = false
-                            selectedLabelId = nil
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isSelectionMode = true
+                            }
                         }) {
-                            Image(systemName: "xmark.circle.fill")
+                            Image(systemName: "checkmark.circle")
+                                .font(.system(size: 16))
                                 .foregroundColor(.secondary)
                         }
                         .buttonStyle(.plain)
+                        .help("Select conversations")
                     }
                 }
-                .padding(8)
-                .background(SyncFlowColors.surfaceSecondary)
-                .cornerRadius(8)
 
                 // Filter buttons - only show when search is active
                 if isSearchActive || !searchText.isEmpty {
@@ -210,32 +228,56 @@ struct ConversationListView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                HStack {
-                    if isSelectionMode {
+                // Selection toolbar - only visible when in selection mode
+                if isSelectionMode {
+                    HStack(spacing: 12) {
+                        // Selection count
                         Text("\(selectedConversationIds.count) selected")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .fontWeight(.medium)
+                            .foregroundColor(.primary)
+
                         Spacer()
-                        Button("Select All") {
+
+                        // Action buttons
+                        Button(action: {
                             selectedConversationIds = Set(filteredConversations.map { $0.id })
+                        }) {
+                            Label("All", systemImage: "checkmark.circle.fill")
+                                .font(.caption)
                         }
-                        Button("Clear") {
-                            selectedConversationIds.removeAll()
+                        .buttonStyle(.plain)
+                        .foregroundColor(.blue)
+
+                        if !selectedConversationIds.isEmpty {
+                            Button(action: {
+                                showBulkDeleteConfirmation = true
+                            }) {
+                                Label("Delete", systemImage: "trash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.red)
                         }
-                        Button("Done") {
-                            selectedConversationIds.removeAll()
-                            isSelectionMode = false
+
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                selectedConversationIds.removeAll()
+                                isSelectionMode = false
+                            }
+                        }) {
+                            Text("Done")
+                                .font(.caption)
+                                .fontWeight(.semibold)
                         }
-                        Button("Delete") {
-                            showBulkDeleteConfirmation = true
-                        }
-                        .disabled(selectedConversationIds.isEmpty)
-                    } else {
-                        Spacer()
-                        Button("Select") {
-                            isSelectionMode = true
-                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.blue)
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.blue.opacity(0.08))
+                    .cornerRadius(8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
             .padding()
