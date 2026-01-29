@@ -370,11 +370,11 @@ class AIAssistantService: ObservableObject {
             var amount: Double? = nil
             var currency = "USD"
 
-            if let match = body.range(of: usdPattern, options: String.CompareOptionsString.CompareOptions.regularExpression) {
+            if let match = body.range(of: usdPattern, options: String.CompareOptions.regularExpression) {
                 let amountStr = String(body[match]).replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
                 amount = Double(amountStr)
                 currency = "USD"
-            } else if let match = body.range(of: inrPattern, options: String.CompareOptionsString.CompareOptions.regularExpression) {
+            } else if let match = body.range(of: inrPattern, options: String.CompareOptions.regularExpression) {
                 var amountStr = String(body[match])
                 amountStr = amountStr.replacingOccurrences(of: "Rs.", with: "")
                     .replacingOccurrences(of: "Rs", with: "")
