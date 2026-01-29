@@ -246,8 +246,28 @@ struct FeaturedDealCard: View {
     }
 
     private func openDeal() {
-        guard let url = deal.dealURL else { return }
-        NSWorkspace.shared.open(url)
+        guard let url = deal.dealURL else {
+            print("[FeaturedDealCard] Invalid deal URL for: \(deal.title)")
+            return
+        }
+
+        print("[FeaturedDealCard] Opening URL: \(url.absoluteString)")
+
+        // Use the configuration-based open for better reliability
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+
+        NSWorkspace.shared.open(url, configuration: configuration) { app, error in
+            if let error = error {
+                print("[FeaturedDealCard] Failed to open URL: \(error.localizedDescription)")
+                // Fallback: try with default browser
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                print("[FeaturedDealCard] Successfully opened URL")
+            }
+        }
     }
 }
 
@@ -575,8 +595,28 @@ struct DealCard: View {
     }
 
     private func openDeal() {
-        guard let url = deal.dealURL else { return }
-        NSWorkspace.shared.open(url)
+        guard let url = deal.dealURL else {
+            print("[DealCard] Invalid deal URL for: \(deal.title)")
+            return
+        }
+
+        print("[DealCard] Opening URL: \(url.absoluteString)")
+
+        // Use the configuration-based open for better reliability
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+
+        NSWorkspace.shared.open(url, configuration: configuration) { app, error in
+            if let error = error {
+                print("[DealCard] Failed to open URL: \(error.localizedDescription)")
+                // Fallback: try with default browser
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                print("[DealCard] Successfully opened URL")
+            }
+        }
     }
 }
 
