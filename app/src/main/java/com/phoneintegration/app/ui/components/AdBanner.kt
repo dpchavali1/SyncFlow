@@ -122,7 +122,7 @@ private suspend fun isPremiumUser(context: Context): Boolean {
         val now = System.currentTimeMillis()
 
         when (planRaw) {
-            "lifetime" -> true
+            "lifetime", "3year" -> true
             "monthly", "yearly", "paid" -> planExpiresAt?.let { it > now } ?: true
             else -> false // Trial and free users see ads
         }

@@ -11,7 +11,6 @@ import CryptoKit
 import FirebaseCore
 import FirebaseDatabase
 import FirebaseAuth
-import FirebaseStorage
 import FirebaseFunctions
 
 class FirebaseService {
@@ -20,7 +19,6 @@ class FirebaseService {
 
     fileprivate let database = Database.database()
     private let auth = Auth.auth()
-    private let storage = Storage.storage()
     private let functions = Functions.functions(region: "us-central1")
 
     /// Ensure Firebase database is online before write operations
@@ -524,18 +522,22 @@ class FirebaseService {
 
     // MARK: - Messages
 
-    func listenToMessages(userId: String, startTime: Double? = nil, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
+    func listenToMessages(userId: String, startTime: Double? = nil, limit: Int = 3000, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
         let messagesRef = database.reference()
             .child("users")
             .child(userId)
             .child("messages")
 
         // Apply time filter if provided (for pagination - load last N days)
+        // Limit to most recent messages to prevent memory issues with large message counts
         var query = messagesRef.queryOrdered(byChild: "date")
         if let startTime = startTime {
             query = query.queryStarting(atValue: startTime)
             print("[Firebase] Listening to messages from \(Date(timeIntervalSince1970: startTime/1000)) onwards")
         }
+        // Always limit to prevent loading too many messages (default 3000)
+        query = query.queryLimited(toLast: UInt(limit))
+        print("[Firebase] Message query limited to last \(limit) messages")
 
         let handle = query.observe(.value) { [weak self] snapshot in
             guard let self = self else { return }
@@ -1095,29 +1097,10 @@ class FirebaseService {
     ) async throws {
         ensureOnline()
 
-        // Ensure user is authenticated for storage access
-        var currentUser = auth.currentUser
-        if currentUser == nil {
-            print("[Firebase] No authenticated user, signing in anonymously for storage upload...")
-            _ = try await signInAnonymously()
-            currentUser = auth.currentUser
-        }
-
-        guard let user = currentUser else {
-            print("[Firebase] Error: Failed to authenticate for storage upload")
-            throw FirebaseError.authFailed
-        }
-
-        print("[Firebase] Uploading MMS as user: \(user.uid), isAnonymous: \(user.isAnonymous)")
-
         // Generate unique attachment ID
         let attachmentId = UUID().uuidString
 
-        // Create storage path: users/{userId}/mms_attachments/{attachmentId}
-        let storagePath = "users/\(userId)/mms_attachments/\(attachmentId)/\(fileName)"
-        let storageRef = storage.reference().child(storagePath)
-
-        print("[Firebase] Storage path: \(storagePath)")
+        print("[Firebase] Preparing MMS upload to R2: \(fileName)")
 
         // Encrypt attachment data if E2EE is available
         var dataToUpload = attachmentData
@@ -1146,61 +1129,55 @@ class FirebaseService {
             throw FirebaseError.quotaExceeded(reason: usageDecision.reason ?? "quota")
         }
 
-        // Set metadata
-        let metadata = StorageMetadata()
-        metadata.contentType = contentType
-        metadata.customMetadata = [
-            "encrypted": String(isEncrypted),
-            "originalFileName": fileName,
-            "attachmentType": attachmentType
-        ]
-
-        // Upload to Firebase Storage with retry on auth failure
-        var downloadURLString: String? = nil
+        // Upload to R2 via Cloud Functions
+        var r2Key: String? = nil
         var useInlineData = false
 
         do {
-            print("[Firebase] Starting upload of \(dataToUpload.count) bytes...")
-            _ = try await storageRef.putDataAsync(dataToUpload, metadata: metadata)
-            print("[Firebase] Upload completed successfully")
+            print("[Firebase] Getting R2 upload URL...")
 
-            // Get download URL
-            let downloadURL = try await storageRef.downloadURL()
-            downloadURLString = downloadURL.absoluteString
-            print("[Firebase] Download URL obtained: \(downloadURLString?.prefix(50) ?? "nil")...")
+            // Step 1: Get presigned upload URL from R2
+            let uploadUrlResult = try await functions.httpsCallable("getR2UploadUrl").call([
+                "fileName": fileName,
+                "contentType": contentType,
+                "fileSize": dataToUpload.count,
+                "transferType": "mms",
+                "messageId": attachmentId
+            ])
+
+            guard let response = uploadUrlResult.data as? [String: Any],
+                  let uploadUrl = response["uploadUrl"] as? String,
+                  let returnedR2Key = response["r2Key"] as? String,
+                  let fileId = response["fileId"] as? String else {
+                throw FirebaseError.r2Error("Failed to get R2 upload URL")
+            }
+
+            print("[Firebase] Got R2 upload URL, uploading \(dataToUpload.count) bytes...")
+
+            // Step 2: Upload directly to R2 via presigned URL
+            try await uploadToR2(url: uploadUrl, data: dataToUpload, contentType: contentType)
+
+            print("[Firebase] R2 upload completed, confirming...")
+
+            // Step 3: Confirm upload
+            _ = try await functions.httpsCallable("confirmR2Upload").call([
+                "fileId": fileId,
+                "r2Key": returnedR2Key,
+                "fileName": fileName,
+                "fileSize": dataToUpload.count,
+                "contentType": contentType,
+                "transferType": "mms"
+            ])
+
+            r2Key = returnedR2Key
+            print("[Firebase] R2 upload confirmed: \(returnedR2Key)")
+
         } catch {
-            print("[Firebase] Upload failed: \(error)")
+            print("[Firebase] R2 upload failed: \(error)")
 
-            // Check if it's an auth error and try to refresh token
-            let nsError = error as NSError
-            if nsError.domain == "FIRStorageErrorDomain" && nsError.code == -13021 {
-                print("[Firebase] Auth error detected, refreshing token and retrying...")
-
-                // Force token refresh
-                if let user = auth.currentUser {
-                    _ = try? await user.getIDTokenResult(forcingRefresh: true)
-                    print("[Firebase] Token refreshed, retrying upload...")
-
-                    do {
-                        _ = try await storageRef.putDataAsync(dataToUpload, metadata: metadata)
-                        let downloadURL = try await storageRef.downloadURL()
-                        downloadURLString = downloadURL.absoluteString
-                        print("[Firebase] Retry upload completed successfully")
-                    } catch {
-                        // If retry fails and file is small enough, fall back to inline data
-                        if dataToUpload.count < 500_000 {
-                            print("[Firebase] Storage failed, using inline base64 for small file")
-                            useInlineData = true
-                        } else {
-                            throw error
-                        }
-                    }
-                } else {
-                    throw error
-                }
-            } else if dataToUpload.count < 500_000 {
-                // For small files, fall back to inline base64 encoding
-                print("[Firebase] Storage unavailable, using inline base64 for small file (\(dataToUpload.count) bytes)")
+            // For small files, fall back to inline base64 encoding
+            if dataToUpload.count < 500_000 {
+                print("[Firebase] Using inline base64 for small file (\(dataToUpload.count) bytes)")
                 useInlineData = true
             } else {
                 throw error
@@ -1217,15 +1194,15 @@ class FirebaseService {
             "size": attachmentData.count
         ]
 
-        if let url = downloadURLString {
-            attachment["url"] = url
+        if let key = r2Key {
+            attachment["r2Key"] = key
         } else if useInlineData {
-            // For small files when storage fails, include inline data
+            // For small files when upload fails, include inline data
             attachment["inlineData"] = dataToUpload.base64EncodedString()
             attachment["isInline"] = true
         }
 
-        let countsTowardStorage = downloadURLString != nil
+        let countsTowardStorage = r2Key != nil
         await UsageTracker.shared.recordUpload(
             userId: userId,
             bytes: Int64(dataToUpload.count),
@@ -1265,6 +1242,27 @@ class FirebaseService {
         ])
 
         print("[Firebase] MMS message sent with attachment: \(fileName)")
+    }
+
+    /// Upload data directly to R2 via presigned URL
+    private func uploadToR2(url: String, data: Data, contentType: String) async throws {
+        guard let uploadURL = URL(string: url) else {
+            throw FirebaseError.r2Error("Invalid R2 upload URL")
+        }
+
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "PUT"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.setValue("\(data.count)", forHTTPHeaderField: "Content-Length")
+        request.timeoutInterval = 60
+
+        let (_, response) = try await URLSession.shared.upload(for: request, from: data)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw FirebaseError.r2Error("R2 upload failed with status: \(statusCode)")
+        }
     }
 
     // MARK: - Delivery Tracking
@@ -1595,37 +1593,43 @@ class FirebaseService {
             .child(userId)
             .child("contacts")
 
-
         let handle = contactsRef.observe(.value) { snapshot in
-
             guard snapshot.exists() else {
-                completion([])
+                DispatchQueue.main.async { completion([]) }
                 return
             }
 
             guard let contactsDict = snapshot.value as? [String: [String: Any]] else {
                 print("[Firebase] Failed to parse contacts as dictionary. Raw value type: \(type(of: snapshot.value))")
-                completion([])
+                DispatchQueue.main.async { completion([]) }
                 return
             }
 
-            var contacts: [Contact] = []
-            var parseFailCount = 0
+            // Process contacts on background thread to avoid blocking UI
+            DispatchQueue.global(qos: .userInitiated).async {
+                var contacts: [Contact] = []
+                contacts.reserveCapacity(contactsDict.count)
+                var parseFailCount = 0
 
-            for (contactId, contactData) in contactsDict {
-                if let contact = Contact.from(contactData, id: contactId) {
-                    contacts.append(contact)
-                } else {
-                    parseFailCount += 1
-                    print("[Firebase] Failed to parse contact: \(contactId), keys: \(contactData.keys.sorted())")
+                for (contactId, contactData) in contactsDict {
+                    if let contact = Contact.from(contactData, id: contactId) {
+                        contacts.append(contact)
+                    } else {
+                        parseFailCount += 1
+                    }
+                }
+
+                if parseFailCount > 0 {
+                    print("[Firebase] Parsed \(contacts.count) contacts, \(parseFailCount) failed")
+                }
+
+                // Sort by display name
+                contacts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+                DispatchQueue.main.async {
+                    completion(contacts)
                 }
             }
-
-
-            // Sort by display name
-            contacts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
-            completion(contacts)
         }
 
         return handle
@@ -1817,47 +1821,64 @@ class FirebaseService {
     // MARK: - Call History
 
     /// Listen for call history changes
-    func listenToCallHistory(userId: String, completion: @escaping ([CallHistoryEntry]) -> Void) -> DatabaseHandle {
+    func listenToCallHistory(userId: String, limit: Int = 500, completion: @escaping ([CallHistoryEntry]) -> Void) -> DatabaseHandle {
         let callHistoryRef = database.reference()
             .child("users")
             .child(userId)
             .child("call_history")
 
-        print("[Firebase] Starting call history listener for user: \(userId)")
+        print("[Firebase] Starting call history listener for user: \(userId), limit: \(limit)")
 
-        let handle = callHistoryRef.observe(.value) { snapshot in
+        // Limit call history to most recent entries to prevent memory issues
+        let query = callHistoryRef.queryOrderedByKey().queryLimited(toLast: UInt(limit))
+
+        let handle = query.observe(.value) { snapshot in
             print("[Firebase] Call history snapshot received: exists=\(snapshot.exists()), childrenCount=\(snapshot.childrenCount)")
 
             guard snapshot.exists() else {
                 print("[Firebase] No call history data found for user: \(userId)")
-                completion([])
+                DispatchQueue.main.async { completion([]) }
                 return
             }
 
             guard let callsDict = snapshot.value as? [String: [String: Any]] else {
                 print("[Firebase] Failed to parse call history as dictionary. Raw value type: \(type(of: snapshot.value))")
-                completion([])
+                DispatchQueue.main.async { completion([]) }
                 return
             }
 
-            var calls: [CallHistoryEntry] = []
-            var parseFailCount = 0
+            // Process call history on background thread to avoid blocking UI
+            DispatchQueue.global(qos: .userInitiated).async {
+                var calls: [CallHistoryEntry] = []
+                calls.reserveCapacity(callsDict.count)
+                var parseFailCount = 0
+                var sampleFailure: (String, [String])? = nil
 
-            for (callId, callData) in callsDict {
-                if let call = CallHistoryEntry.from(callData, id: callId) {
-                    calls.append(call)
+                for (callId, callData) in callsDict {
+                    if let call = CallHistoryEntry.from(callData, id: callId) {
+                        calls.append(call)
+                    } else {
+                        parseFailCount += 1
+                        // Only capture one sample for debugging
+                        if sampleFailure == nil {
+                            sampleFailure = (callId, callData.keys.sorted())
+                        }
+                    }
+                }
+
+                if parseFailCount > 0, let sample = sampleFailure {
+                    print("[Firebase] Parsed \(calls.count) call history entries, \(parseFailCount) failed. Sample: \(sample.0), keys: \(sample.1)")
                 } else {
-                    parseFailCount += 1
-                    print("[Firebase] Failed to parse call entry: \(callId), keys: \(callData.keys.sorted())")
+                    print("[Firebase] Parsed \(calls.count) call history entries")
+                }
+
+                // Sort by date (newest first)
+                calls.sort { $0.callDate > $1.callDate }
+
+                DispatchQueue.main.async {
+                    completion(calls)
                 }
             }
-
-            print("[Firebase] Parsed \(calls.count) call history entries, \(parseFailCount) failed")
-
-            // Sort by date (newest first)
-            calls.sort { $0.callDate > $1.callDate }
-
-            completion(calls)
         }
 
         return handle
@@ -2413,6 +2434,7 @@ enum FirebaseError: LocalizedError {
     case tokenExpired
     case sendFailed
     case quotaExceeded(reason: String)
+    case r2Error(String)
 
     var errorDescription: String? {
         switch self {
@@ -2437,6 +2459,8 @@ enum FirebaseError: LocalizedError {
             default:
                  return "Upload limit reached. Please try again later."
              }
+        case .r2Error(let message):
+            return "R2 storage error: \(message)"
          }
      }
 }

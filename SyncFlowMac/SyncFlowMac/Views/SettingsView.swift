@@ -50,9 +50,9 @@ struct SettingsView: View {
                     Label("Usage", systemImage: "chart.bar")
                 }
 
-            RecordingsView()
+            SupportSettingsView()
                 .tabItem {
-                    Label("Recordings", systemImage: "waveform")
+                    Label("Support", systemImage: "questionmark.circle")
                 }
 
             AboutView()
@@ -71,6 +71,7 @@ struct GeneralSettingsView: View {
     @AppStorage("auto_start") private var autoStart = false
 
     @State private var showingUnpairAlert = false
+    @State private var showingDeleteAccountSheet = false
 
     @AppStorage("chat_color_theme") private var chatColorTheme = ChatColorTheme.apple.rawValue
     @AppStorage("chat_use_system_accent") private var chatUseSystemAccent = false
@@ -135,6 +136,29 @@ struct GeneralSettingsView: View {
                     showingUnpairAlert = true
                 }
                 .disabled(!appState.isPaired)
+
+                // Only show Delete Account if user has paired (has an account)
+                if appState.isPaired {
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    Button(action: { showingDeleteAccountSheet = true }) {
+                        HStack {
+                            Image(systemName: "trash.fill")
+                            Text("Delete Account")
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.8))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+
+                    Text("Permanently delete your account and all data")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             } header: {
                 Text("Actions")
             }
@@ -240,6 +264,9 @@ struct GeneralSettingsView: View {
             }
         } message: {
             Text("This will reset the conversation background to match your current theme (light or dark). Your custom color will be lost.")
+        }
+        .sheet(isPresented: $showingDeleteAccountSheet) {
+            DeleteAccountView()
         }
     }
 
@@ -490,16 +517,22 @@ struct SubscriptionSettingsView: View {
                         }
                     }
 
-                case .lifetime:
+                case .threeYear(let expires):
                     HStack {
                         Image(systemName: "star.fill")
                             .foregroundColor(.yellow)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Lifetime Access")
+                            Text("3-Year Plan")
                                 .font(.subheadline)
-                            Text("Thank you for your support!")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            if let expires = expires {
+                                Text("Expires on \(expires.formatted(date: .abbreviated, time: .omitted))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text("Thank you for your support!")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
@@ -528,9 +561,9 @@ struct SubscriptionSettingsView: View {
 
             Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    pricingRow("Monthly", price: "$3.99/month")
-                    pricingRow("Yearly", price: "$29.99/year", badge: "Save 37%")
-                    pricingRow("Lifetime", price: "$99.99", badge: "One-time")
+                    pricingRow("Monthly", price: "$4.99/month")
+                    pricingRow("Yearly", price: "$39.99/year", badge: "Save 33%")
+                    pricingRow("3-Year", price: "$79.99", badge: "Best Value")
                 }
             } header: {
                 Text("Pricing")
@@ -542,7 +575,7 @@ struct SubscriptionSettingsView: View {
                     featureRow("Phone calls from Mac")
                     featureRow("Photo sync (Premium)")
                     featureRow("3GB uploads/month")
-                    featureRow("15GB cloud storage")
+                    featureRow("500MB cloud storage")
                     featureRow("End-to-end encryption")
                     featureRow("Priority support")
                 }
@@ -568,7 +601,7 @@ struct SubscriptionSettingsView: View {
                 .padding(.vertical, 4)
                 .background(Color.orange)
                 .cornerRadius(4)
-        case .subscribed, .lifetime:
+        case .subscribed, .threeYear:
             Text("PRO")
                 .font(.caption)
                 .fontWeight(.semibold)
@@ -699,6 +732,92 @@ struct SyncSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Support Settings View
+
+struct SupportSettingsView: View {
+    @State private var showSupportChat = false
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "sparkles")
+                            .font(.title)
+                            .foregroundColor(.blue)
+                        Text("AI Support Assistant")
+                            .font(.headline)
+                    }
+
+                    Text("Get instant help with SyncFlow. Our AI assistant can answer questions about pairing, syncing, features, and troubleshooting.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+
+                    Button("Open AI Support Chat") {
+                        showSupportChat = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(.vertical, 8)
+            } header: {
+                Text("Get Help")
+            }
+
+            Section {
+                Link(destination: URL(string: "mailto:syncflow.contact@gmail.com")!) {
+                    HStack {
+                        Image(systemName: "envelope")
+                        Text("Email Support")
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Link(destination: URL(string: "https://github.com/dpchavali1/SyncFlow/issues")!) {
+                    HStack {
+                        Image(systemName: "ladybug")
+                        Text("Report an Issue")
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } header: {
+                Text("Contact")
+            } footer: {
+                Text("For complex issues, please email us or report an issue on GitHub")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Common Topics")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    ForEach(["Device pairing", "Message syncing", "Subscription & billing", "Privacy & security"], id: \.self) { topic in
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.caption)
+                            Text(topic)
+                                .font(.subheadline)
+                        }
+                    }
+                }
+            } header: {
+                Text("AI Can Help With")
+            }
+        }
+        .formStyle(.grouped)
+        .sheet(isPresented: $showSupportChat) {
+            SupportChatView()
+        }
     }
 }
 

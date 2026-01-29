@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.phoneintegration.app.MainActivity
 import com.phoneintegration.app.data.PreferencesManager
+import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.utils.DefaultSmsHelper
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -34,14 +35,60 @@ fun SettingsScreen(
     onNavigateToBackup: () -> Unit,
     onNavigateToDesktop: () -> Unit = {},
     onNavigateToUsage: () -> Unit = {},
-    onNavigateToSync: () -> Unit = {}
+    onNavigateToSync: () -> Unit = {},
+    onNavigateToSpamFilter: () -> Unit = {},
+    onNavigateToSupport: () -> Unit = {},
+    onNavigateToFileTransfer: () -> Unit = {},
+    onNavigateToDeleteAccount: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
     var isDefaultSmsApp by remember { mutableStateOf(false) }
+    var showWebAccessDialog by remember { mutableStateOf(false) }
+    var isPaired by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         isDefaultSmsApp = DefaultSmsHelper.isDefaultSmsApp(context)
+        isPaired = DesktopSyncService.hasPairedDevices(context)
+    }
+
+    // Web Access Instructions Dialog
+    if (showWebAccessDialog) {
+        AlertDialog(
+            onDismissRequest = { showWebAccessDialog = false },
+            icon = { Icon(Icons.Filled.Language, contentDescription = null) },
+            title = { Text("Web Access") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Access your messages from any browser:")
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("1. Open ")
+                        Text(
+                            "https://sfweb.app",
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+                            )
+                        )
+                    }
+                    Text("2. A QR code will be displayed on the website")
+                    Text("3. In this app, go to Settings → Pair Device")
+                    Text("4. Tap \"Scan QR Code\" and scan the code from your browser")
+
+                    Text(
+                        "Tip: Sync your message history first to see older messages on the web.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showWebAccessDialog = false }) {
+                    Text("Got it")
+                }
+            }
+        )
     }
 
     Scaffold(
@@ -104,21 +151,37 @@ fun SettingsScreen(
             // -------------------------
             // Desktop Integration (at the top for visibility)
             // -------------------------
-            SettingsSection("Desktop Integration")
+            SettingsSection("Desktop & Web Access")
 
             SettingsItem(
                 icon = Icons.Filled.Computer,
-                title = "Desktop Sync",
-                subtitle = "Use SyncFlow on MacBook or PC",
+                title = "Pair Device",
+                subtitle = "Connect Mac app or Web browser",
                 onClick = onNavigateToDesktop
             )
 
             SettingsItem(
-                icon = Icons.Filled.Sync,
-                title = "Sync Message History",
-                subtitle = "Load older messages to Mac/PC",
-                onClick = onNavigateToSync
+                icon = Icons.Filled.Language,
+                title = "Web Access",
+                subtitle = "Access messages from any browser",
+                onClick = { showWebAccessDialog = true }
             )
+
+            if (isPaired) {
+                SettingsItem(
+                    icon = Icons.Filled.Sync,
+                    title = "Sync Message History",
+                    subtitle = "Load older messages to Mac and Web",
+                    onClick = onNavigateToSync
+                )
+
+                SettingsItem(
+                    icon = Icons.Filled.CloudUpload,
+                    title = "Send Files to Mac",
+                    subtitle = "Share photos, videos, and files",
+                    onClick = onNavigateToFileTransfer
+                )
+            }
 
             Divider(Modifier.padding(vertical = 8.dp))
 
@@ -194,6 +257,38 @@ fun SettingsScreen(
                 subtitle = "Manage blocked numbers",
                 onClick = { /* TODO */ }
             )
+
+            SettingsItem(
+                icon = Icons.Filled.Shield,
+                title = "Spam Filter",
+                subtitle = "AI-powered spam detection",
+                onClick = onNavigateToSpamFilter
+            )
+
+            Divider(Modifier.padding(vertical = 8.dp))
+
+            SettingsSection("Help & Support")
+
+            SettingsItem(
+                icon = Icons.Filled.AutoAwesome,
+                title = "AI Support Chat",
+                subtitle = "Get help from our AI assistant",
+                onClick = onNavigateToSupport
+            )
+
+            // Only show Account section if user has paired (has an account)
+            if (isPaired) {
+                Divider(Modifier.padding(vertical = 8.dp))
+
+                SettingsSection("Account")
+
+                SettingsItem(
+                    icon = Icons.Filled.DeleteForever,
+                    title = "Delete Account",
+                    subtitle = "Schedule account for deletion",
+                    onClick = onNavigateToDeleteAccount
+                )
+            }
 
             Divider(Modifier.padding(vertical = 8.dp))
 

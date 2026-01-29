@@ -83,6 +83,7 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
             "call_status_changed" -> handleCallStatusChanged(data)
             "call_ended_by_remote" -> handleCallEndedByRemote(data)
             "outgoing_message" -> handleOutgoingMessage(data)
+            "make_phone_call" -> handleMakePhoneCall(data)
             else -> Log.d(TAG, "Unknown message type: ${data["type"]}")
         }
     }
@@ -242,6 +243,23 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
         // Start OutgoingMessageService to process the message
         // The service will process pending messages and stop itself when done
         OutgoingMessageService.start(this)
+    }
+
+    /**
+     * Handle make phone call request from Mac/Web via FCM
+     * This allows making calls without keeping CallMonitorService running constantly
+     */
+    private fun handleMakePhoneCall(data: Map<String, String>) {
+        val phoneNumber = data["phoneNumber"] ?: return
+        val requestId = data["requestId"] ?: return
+
+        Log.d(TAG, "📞 FCM: Make phone call request - phoneNumber: $phoneNumber, requestId: $requestId")
+
+        // Start CallMonitorService to handle the call
+        // It will process the call_request from Firebase and make the call
+        CallMonitorService.start(this)
+
+        Log.d(TAG, "📞 FCM: Started CallMonitorService for outgoing call")
     }
 
     private fun insertSms(senderId: String, body: String) {

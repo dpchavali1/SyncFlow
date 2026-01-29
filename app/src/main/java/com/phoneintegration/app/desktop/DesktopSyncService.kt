@@ -36,6 +36,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.SecureRandom
 
 /**
@@ -901,8 +903,8 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Upload MMS attachments to Firebase Storage with E2EE encryption
-     * Returns a list of attachment metadata including download URLs
+     * Upload MMS attachments to R2 storage with E2EE encryption
+     * Returns a list of attachment metadata including R2 keys
      */
     private suspend fun uploadMmsAttachments(
         userId: String,
@@ -970,10 +972,8 @@ class DesktopSyncService(context: Context) {
                     continue
                 }
 
-                // Create storage reference
                 val extension = getFileExtension(attachment.contentType)
-                val storagePath = "$USERS_PATH/$userId/$ATTACHMENTS_PATH/$messageId/${attachment.id}.$extension"
-                val storageRef = storage.reference.child(storagePath)
+                val fileName = "${attachment.id}.$extension"
 
                 // Use the loaded bytes
                 val bytes = attachmentBytes
@@ -1010,21 +1010,64 @@ class DesktopSyncService(context: Context) {
                     continue
                 }
 
-                var downloadUrl: String? = null
+                var r2Key: String? = null
                 var useInlineData = false
 
                 try {
-                    // Upload the file (encrypted or plaintext)
-                    val uploadTask = storageRef.putBytes(bytesToUpload)
-                    uploadTask.await()
+                    // Step 1: Get presigned upload URL from R2
+                    val uploadUrlData = hashMapOf(
+                        "fileName" to fileName,
+                        "contentType" to attachment.contentType,
+                        "fileSize" to bytesToUpload.size,
+                        "transferType" to "mms",
+                        "messageId" to messageId.toString()
+                    )
 
-                    // Get download URL
-                    downloadUrl = storageRef.downloadUrl.await().toString()
-                    Log.d(TAG, "Uploaded attachment: ${attachment.id} -> $downloadUrl (encrypted: $isEncrypted)")
+                    val uploadUrlResult = functions
+                        .getHttpsCallable("getR2UploadUrl")
+                        .call(uploadUrlData)
+                        .await()
+
+                    @Suppress("UNCHECKED_CAST")
+                    val uploadResponse = uploadUrlResult.data as? Map<String, Any>
+                    val uploadUrl = uploadResponse?.get("uploadUrl") as? String
+                    r2Key = uploadResponse?.get("r2Key") as? String
+                    val fileId = uploadResponse?.get("fileId") as? String
+
+                    if (uploadUrl == null || r2Key == null || fileId == null) {
+                        throw Exception("Failed to get R2 upload URL")
+                    }
+
+                    // Step 2: Upload directly to R2 via presigned URL
+                    val uploaded = withContext(Dispatchers.IO) {
+                        uploadBytesToR2(uploadUrl, bytesToUpload, attachment.contentType)
+                    }
+
+                    if (!uploaded) {
+                        throw Exception("Failed to upload to R2")
+                    }
+
+                    // Step 3: Confirm upload
+                    val confirmData = hashMapOf(
+                        "fileId" to fileId,
+                        "r2Key" to r2Key,
+                        "fileName" to fileName,
+                        "fileSize" to bytesToUpload.size,
+                        "contentType" to attachment.contentType,
+                        "transferType" to "mms"
+                    )
+
+                    functions
+                        .getHttpsCallable("confirmR2Upload")
+                        .call(confirmData)
+                        .await()
+
+                    Log.d(TAG, "Uploaded attachment to R2: ${attachment.id} -> $r2Key (encrypted: $isEncrypted)")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error uploading attachment ${attachment.id}", e)
+                    Log.e(TAG, "Error uploading attachment ${attachment.id} to R2", e)
                     if (bytesToUpload.size < 500_000) {
                         useInlineData = true
+                        r2Key = null
                         Log.w(TAG, "Falling back to inline data for attachment ${attachment.id}")
                     } else {
                         continue
@@ -1040,8 +1083,8 @@ class DesktopSyncService(context: Context) {
                     "originalSize" to bytes.size
                 )
 
-                if (downloadUrl != null) {
-                    metadata["url"] = downloadUrl
+                if (r2Key != null) {
+                    metadata["r2Key"] = r2Key
                 } else if (useInlineData) {
                     metadata["inlineData"] = android.util.Base64.encodeToString(bytesToUpload, android.util.Base64.NO_WRAP)
                     metadata["isInline"] = true
@@ -1054,7 +1097,7 @@ class DesktopSyncService(context: Context) {
                         userId = userId,
                         bytes = bytesToUpload.size.toLong(),
                         category = UsageCategory.MMS,
-                        countsTowardStorage = downloadUrl != null
+                        countsTowardStorage = r2Key != null
                     )
                 }.onFailure { error ->
                     Log.w(TAG, "Failed to record MMS usage for ${attachment.id}: ${error.message}")
@@ -1065,6 +1108,36 @@ class DesktopSyncService(context: Context) {
         }
 
         return uploadedAttachments
+    }
+
+    /**
+     * Upload bytes directly to R2 via presigned URL
+     */
+    private fun uploadBytesToR2(uploadUrl: String, data: ByteArray, contentType: String): Boolean {
+        var connection: HttpURLConnection? = null
+        try {
+            val url = URL(uploadUrl)
+            connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", contentType)
+            connection.setRequestProperty("Content-Length", data.size.toString())
+            connection.connectTimeout = 30000
+            connection.readTimeout = 60000
+
+            connection.outputStream.use { outputStream ->
+                outputStream.write(data)
+                outputStream.flush()
+            }
+
+            val responseCode = connection.responseCode
+            return responseCode in 200..299
+        } catch (e: Exception) {
+            Log.e(TAG, "Error uploading to R2", e)
+            return false
+        } finally {
+            connection?.disconnect()
+        }
     }
 
     private fun loadMmsAttachmentsFromProvider(mmsId: Long): List<MmsAttachment> {

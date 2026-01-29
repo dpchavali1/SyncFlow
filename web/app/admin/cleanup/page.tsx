@@ -22,6 +22,10 @@ import {
   Activity,
   Search,
   UserX,
+  Cloud,
+  FileImage,
+  File,
+  Calendar,
 } from 'lucide-react'
 import {
   getOrphanCounts,
@@ -61,8 +65,15 @@ import {
   deleteUserAccount,
   getCostOptimizationRecommendations,
   clearAdminCache,
+  getR2Analytics,
+  getR2FileList,
+  cleanupOldR2Files,
+  deleteR2FileAdmin,
+  recalculateUserStorage,
   OrphanCounts,
   CleanupStats,
+  R2Analytics,
+  R2File,
   database,
   auth,
 } from '@/lib/firebase'
@@ -145,7 +156,7 @@ export default function AdminCleanupPage() {
   const [cleanupLog, setCleanupLog] = useState<string[]>([])
 
   // Comprehensive admin state
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'data' | 'costs' | 'testing'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'data' | 'costs' | 'storage' | 'testing'>('overview')
   const [systemOverview, setSystemOverview] = useState<SystemOverview | null>(null)
   const [detailedUsers, setDetailedUsers] = useState<DetailedUser[]>([])
   const [costRecommendations, setCostRecommendations] = useState<CostRecommendation[]>([])
@@ -178,6 +189,16 @@ export default function AdminCleanupPage() {
   const [testPlan, setTestPlan] = useState<'free' | 'monthly' | 'yearly' | 'lifetime'>('free')
   const [testDaysValid, setTestDaysValid] = useState('7')
   const [isSettingPlan, setIsSettingPlan] = useState(false)
+
+  // R2 Storage state
+  const [r2Analytics, setR2Analytics] = useState<R2Analytics | null>(null)
+  const [r2FileList, setR2FileList] = useState<R2File[]>([])
+  const [isLoadingR2, setIsLoadingR2] = useState(false)
+  const [isCleaningR2, setIsCleaningR2] = useState(false)
+  const [r2CleanupDays, setR2CleanupDays] = useState('90')
+  const [r2FileTypeFilter, setR2FileTypeFilter] = useState<'all' | 'files' | 'mms' | 'photos'>('all')
+  const [deletingR2File, setDeletingR2File] = useState<string | null>(null)
+  const [recalculatingUser, setRecalculatingUser] = useState<string | null>(null)
 
   const logContainerRef = useRef<HTMLDivElement>(null)
 
@@ -810,6 +831,111 @@ export default function AdminCleanupPage() {
     }
   }
 
+  // R2 Storage handlers
+  const loadR2Analytics = async () => {
+    setIsLoadingR2(true)
+    addLog('Loading R2 storage analytics...')
+    try {
+      const analytics = await getR2Analytics()
+      setR2Analytics(analytics)
+      addLog(`R2 Analytics loaded: ${analytics.totalFiles} files, ${(analytics.totalSize / (1024 * 1024)).toFixed(2)}MB total`)
+    } catch (error) {
+      addLog(`Error loading R2 analytics: ${error}`)
+      console.error(error)
+    } finally {
+      setIsLoadingR2(false)
+    }
+  }
+
+  const loadR2FileList = async () => {
+    setIsLoadingR2(true)
+    try {
+      const filterType = r2FileTypeFilter === 'all' ? undefined : r2FileTypeFilter
+      const result = await getR2FileList(filterType, 50)
+      setR2FileList(result.files)
+      addLog(`Loaded ${result.files.length} R2 files (${result.totalCount} total)`)
+    } catch (error) {
+      addLog(`Error loading R2 file list: ${error}`)
+      console.error(error)
+    } finally {
+      setIsLoadingR2(false)
+    }
+  }
+
+  const handleCleanupR2Files = async () => {
+    const days = parseInt(r2CleanupDays)
+    if (isNaN(days) || days < 1) {
+      addLog('Invalid days threshold')
+      return
+    }
+
+    if (!confirm(`Are you sure you want to delete all R2 files older than ${days} days?\n\nThis action cannot be undone.`)) {
+      return
+    }
+
+    setIsCleaningR2(true)
+    addLog(`Starting R2 cleanup for files older than ${days} days...`)
+
+    try {
+      const filterType = r2FileTypeFilter === 'all' ? undefined : r2FileTypeFilter
+      const result = await cleanupOldR2Files(days, filterType)
+
+      if (result.success) {
+        addLog(`R2 cleanup complete: ${result.deletedFiles} files deleted, ${(result.freedBytes / (1024 * 1024)).toFixed(2)}MB freed`)
+        await loadR2Analytics()
+      } else {
+        addLog(`R2 cleanup failed: ${result.errors.join(', ')}`)
+      }
+    } catch (error) {
+      addLog(`Error during R2 cleanup: ${error}`)
+      console.error(error)
+    } finally {
+      setIsCleaningR2(false)
+    }
+  }
+
+  const handleDeleteR2File = async (r2Key: string) => {
+    if (!confirm(`Delete file: ${r2Key}?\n\nThis action cannot be undone.`)) {
+      return
+    }
+
+    setDeletingR2File(r2Key)
+    try {
+      const result = await deleteR2FileAdmin(r2Key)
+      if (result.success) {
+        addLog(`Deleted R2 file: ${r2Key}`)
+        setR2FileList(prev => prev.filter(f => f.key !== r2Key))
+        await loadR2Analytics()
+      } else {
+        addLog(`Failed to delete R2 file: ${result.error}`)
+      }
+    } catch (error) {
+      addLog(`Error deleting R2 file: ${error}`)
+    } finally {
+      setDeletingR2File(null)
+    }
+  }
+
+  const handleRecalculateStorage = async (targetUserId: string) => {
+    setRecalculatingUser(targetUserId)
+    try {
+      const result = await recalculateUserStorage(targetUserId)
+      if (result.success) {
+        const diffKB = (result.difference / 1024).toFixed(2)
+        const actualMB = (result.actualBytes / (1024 * 1024)).toFixed(2)
+        const prevMB = (result.previousBytes / (1024 * 1024)).toFixed(2)
+        addLog(`Recalculated storage for ${targetUserId.slice(0, 8)}...: ${result.fileCount} files, ${actualMB}MB actual (was ${prevMB}MB, diff: ${diffKB}KB)`)
+        await loadR2Analytics() // Refresh to show updated values
+      } else {
+        addLog(`Failed to recalculate storage: ${result.error}`)
+      }
+    } catch (error) {
+      addLog(`Error recalculating storage: ${error}`)
+    } finally {
+      setRecalculatingUser(null)
+    }
+  }
+
   const handleLogout = () => {
     localStorage.removeItem('syncflow_admin_session')
     localStorage.removeItem('syncflow_user_id')
@@ -955,6 +1081,7 @@ export default function AdminCleanupPage() {
           { id: 'overview', label: 'Overview', icon: BarChart3 },
           { id: 'users', label: 'Users', icon: Users },
           { id: 'data', label: 'Data & Cleanup', icon: Database },
+          { id: 'storage', label: 'R2 Storage', icon: Cloud },
           { id: 'costs', label: 'Costs & Analytics', icon: DollarSign },
           { id: 'testing', label: 'Testing', icon: Zap },
         ].map(({ id, label, icon: Icon }) => (
@@ -965,6 +1092,7 @@ export default function AdminCleanupPage() {
               if (id === 'overview' && !systemOverview) loadSystemOverview()
               if (id === 'users' && detailedUsers.length === 0) loadDetailedUsers()
               if (id === 'costs' && costRecommendations.length === 0) loadCostRecommendations()
+              if (id === 'storage' && !r2Analytics) loadR2Analytics()
             }}
             className={`flex items-center gap-2 px-4 py-3 border-b-2 font-medium text-sm transition-colors ${
               activeTab === id
@@ -1600,6 +1728,362 @@ export default function AdminCleanupPage() {
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'storage' && (
+          <div className="space-y-6">
+            {/* R2 Storage Header */}
+            <div className="bg-gradient-to-br from-sky-600 to-blue-700 rounded-2xl p-8 border border-sky-500 shadow-2xl">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-white/20 rounded-xl shadow-lg">
+                    <Cloud className="w-8 h-8 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-white mb-1">R2 Storage Management</h2>
+                    <p className="text-sky-100">Cloudflare R2 file storage analytics and cleanup</p>
+                  </div>
+                </div>
+                <button
+                  onClick={loadR2Analytics}
+                  disabled={isLoadingR2}
+                  className="flex items-center gap-2 px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {isLoadingR2 ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Refresh Analytics
+                </button>
+              </div>
+
+              {/* Analytics Summary */}
+              {r2Analytics && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="bg-white/10 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <File className="w-5 h-5 text-sky-200" />
+                      <span className="text-sm text-sky-200">Total Files</span>
+                    </div>
+                    <p className="text-2xl font-bold text-white">{r2Analytics.totalFiles.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-white/10 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <HardDrive className="w-5 h-5 text-sky-200" />
+                      <span className="text-sm text-sky-200">Total Size</span>
+                    </div>
+                    <p className="text-2xl font-bold text-white">{(r2Analytics.totalSize / (1024 * 1024)).toFixed(2)} MB</p>
+                  </div>
+                  <div className="bg-white/10 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <DollarSign className="w-5 h-5 text-sky-200" />
+                      <span className="text-sm text-sky-200">Est. Monthly Cost</span>
+                    </div>
+                    <p className="text-2xl font-bold text-white">${r2Analytics.estimatedCost.toFixed(4)}</p>
+                  </div>
+                  <div className="bg-white/10 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <TrendingUp className="w-5 h-5 text-green-300" />
+                      <span className="text-sm text-sky-200">Free Egress</span>
+                    </div>
+                    <p className="text-2xl font-bold text-green-300">Unlimited</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* File Type Breakdown */}
+            {r2Analytics && (
+              <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                <div className="bg-gradient-to-r from-gray-700 to-gray-800 p-6">
+                  <h3 className="text-xl font-bold text-white flex items-center gap-3">
+                    <FileImage className="w-6 h-6" />
+                    Storage by Category
+                  </h3>
+                </div>
+                <div className="p-6">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="bg-gradient-to-br from-blue-50 to-cyan-50 border border-blue-200 rounded-xl p-6">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="p-2 bg-blue-100 rounded-lg">
+                          <File className="w-5 h-5 text-blue-600" />
+                        </div>
+                        <span className="font-semibold text-gray-900">File Transfers</span>
+                      </div>
+                      <p className="text-2xl font-bold text-blue-600">{r2Analytics.fileCounts.files.toLocaleString()}</p>
+                      <p className="text-sm text-gray-600">{(r2Analytics.sizeCounts.files / (1024 * 1024)).toFixed(2)} MB</p>
+                    </div>
+                    <div className="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-6">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="p-2 bg-orange-100 rounded-lg">
+                          <MessageSquare className="w-5 h-5 text-orange-600" />
+                        </div>
+                        <span className="font-semibold text-gray-900">MMS Attachments</span>
+                      </div>
+                      <p className="text-2xl font-bold text-orange-600">{r2Analytics.fileCounts.mms.toLocaleString()}</p>
+                      <p className="text-sm text-gray-600">{(r2Analytics.sizeCounts.mms / (1024 * 1024)).toFixed(2)} MB</p>
+                    </div>
+                    <div className="bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-xl p-6">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="p-2 bg-purple-100 rounded-lg">
+                          <FileImage className="w-5 h-5 text-purple-600" />
+                        </div>
+                        <span className="font-semibold text-gray-900">Photo Sync</span>
+                      </div>
+                      <p className="text-2xl font-bold text-purple-600">{r2Analytics.fileCounts.photos.toLocaleString()}</p>
+                      <p className="text-sm text-gray-600">{(r2Analytics.sizeCounts.photos / (1024 * 1024)).toFixed(2)} MB</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Cleanup Operations */}
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-red-500 to-orange-500 p-6">
+                <h3 className="text-xl font-bold text-white flex items-center gap-3">
+                  <Trash2 className="w-6 h-6" />
+                  Cleanup Operations
+                </h3>
+                <p className="text-red-100 mt-1">Remove old files to reduce storage costs</p>
+              </div>
+              <div className="p-6">
+                <div className="flex flex-wrap items-end gap-4 mb-6">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Delete files older than</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        value={r2CleanupDays}
+                        onChange={(e) => setR2CleanupDays(e.target.value)}
+                        className="w-24 px-3 py-2 border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-red-500"
+                        min="1"
+                      />
+                      <span className="text-gray-600">days</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">File type</label>
+                    <select
+                      value={r2FileTypeFilter}
+                      onChange={(e) => setR2FileTypeFilter(e.target.value as any)}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-red-500"
+                    >
+                      <option value="all">All Types</option>
+                      <option value="files">File Transfers</option>
+                      <option value="mms">MMS Attachments</option>
+                      <option value="photos">Photo Sync</option>
+                    </select>
+                  </div>
+                  <button
+                    onClick={handleCleanupR2Files}
+                    disabled={isCleaningR2}
+                    className="flex items-center gap-2 px-6 py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
+                  >
+                    {isCleaningR2 ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    {isCleaningR2 ? 'Cleaning...' : 'Clean Old Files'}
+                  </button>
+                </div>
+
+                {/* Quick cleanup buttons */}
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    onClick={() => { setR2CleanupDays('90'); setTimeout(handleCleanupR2Files, 100) }}
+                    disabled={isCleaningR2}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 transition-colors text-sm"
+                  >
+                    Clean 90+ days
+                  </button>
+                  <button
+                    onClick={() => { setR2CleanupDays('30'); setTimeout(handleCleanupR2Files, 100) }}
+                    disabled={isCleaningR2}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50 transition-colors text-sm"
+                  >
+                    Clean 30+ days
+                  </button>
+                  <button
+                    onClick={() => { setR2CleanupDays('7'); setTimeout(handleCleanupR2Files, 100) }}
+                    disabled={isCleaningR2}
+                    className="px-4 py-2 bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200 disabled:opacity-50 transition-colors text-sm"
+                  >
+                    Clean 7+ days (aggressive)
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Top Files Lists */}
+            {r2Analytics && (r2Analytics.largestFiles.length > 0 || r2Analytics.oldestFiles.length > 0) && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Largest Files */}
+                <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                  <div className="bg-gradient-to-r from-amber-500 to-orange-500 p-4">
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <HardDrive className="w-5 h-5" />
+                      Largest Files
+                    </h3>
+                  </div>
+                  <div className="p-4">
+                    {r2Analytics.largestFiles.length === 0 ? (
+                      <p className="text-gray-500 text-center py-4">No files found</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {r2Analytics.largestFiles.slice(0, 10).map((file, idx) => (
+                          <div key={file.key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{file.key.split('/').pop()}</p>
+                              <p className="text-xs text-gray-500">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
+                            </div>
+                            <button
+                              onClick={() => handleDeleteR2File(file.key)}
+                              disabled={deletingR2File === file.key}
+                              className="ml-2 p-2 text-red-600 hover:bg-red-100 rounded-lg disabled:opacity-50 transition-colors"
+                            >
+                              {deletingR2File === file.key ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Oldest Files */}
+                <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                  <div className="bg-gradient-to-r from-slate-500 to-gray-600 p-4">
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <Calendar className="w-5 h-5" />
+                      Oldest Files
+                    </h3>
+                  </div>
+                  <div className="p-4">
+                    {r2Analytics.oldestFiles.length === 0 ? (
+                      <p className="text-gray-500 text-center py-4">No files found</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {r2Analytics.oldestFiles.slice(0, 10).map((file, idx) => (
+                          <div key={file.key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{file.key.split('/').pop()}</p>
+                              <p className="text-xs text-gray-500">{new Date(file.uploadedAt).toLocaleDateString()}</p>
+                            </div>
+                            <button
+                              onClick={() => handleDeleteR2File(file.key)}
+                              disabled={deletingR2File === file.key}
+                              className="ml-2 p-2 text-red-600 hover:bg-red-100 rounded-lg disabled:opacity-50 transition-colors"
+                            >
+                              {deletingR2File === file.key ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Top Users by Storage */}
+            {r2Analytics && r2Analytics.userStorage && r2Analytics.userStorage.length > 0 && (
+              <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                <div className="bg-gradient-to-r from-indigo-500 to-purple-600 p-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <Users className="w-5 h-5" />
+                      Top Users by Storage
+                    </h3>
+                    <span className="text-sm text-indigo-100">
+                      {r2Analytics.totalUsersWithStorage} users with storage
+                    </span>
+                  </div>
+                </div>
+                <div className="p-4">
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-gray-200">
+                          <th className="text-left py-2 px-3 text-sm font-semibold text-gray-600">#</th>
+                          <th className="text-left py-2 px-3 text-sm font-semibold text-gray-600">User ID</th>
+                          <th className="text-right py-2 px-3 text-sm font-semibold text-gray-600">Storage</th>
+                          <th className="text-right py-2 px-3 text-sm font-semibold text-gray-600">Last Updated</th>
+                          <th className="text-center py-2 px-3 text-sm font-semibold text-gray-600">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {r2Analytics.userStorage.map((user, idx) => (
+                          <tr key={user.userId} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="py-2 px-3 text-sm text-gray-500">{idx + 1}</td>
+                            <td className="py-2 px-3">
+                              <code className="text-sm bg-gray-100 px-2 py-1 rounded font-mono">
+                                {user.userId.slice(0, 12)}...
+                              </code>
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <span className={`text-sm font-medium ${
+                                user.storageBytes > 100 * 1024 * 1024 ? 'text-red-600' :
+                                user.storageBytes > 50 * 1024 * 1024 ? 'text-orange-600' :
+                                'text-gray-900'
+                              }`}>
+                                {user.storageBytes > 1024 * 1024
+                                  ? `${(user.storageBytes / (1024 * 1024)).toFixed(2)} MB`
+                                  : `${(user.storageBytes / 1024).toFixed(1)} KB`}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-right text-sm text-gray-500">
+                              {user.lastUpdatedAt ? new Date(user.lastUpdatedAt).toLocaleDateString() : '-'}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              <button
+                                onClick={() => handleRecalculateStorage(user.userId)}
+                                disabled={recalculatingUser === user.userId}
+                                className="px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 mx-auto"
+                                title="Recalculate storage from actual R2 files"
+                              >
+                                {recalculatingUser === user.userId ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <RefreshCw className="w-3 h-3" />
+                                )}
+                                Recalc
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Activity Log */}
+            <div className="bg-slate-900 rounded-2xl shadow-2xl border border-slate-700 overflow-hidden">
+              <div className="bg-gradient-to-r from-slate-800 to-slate-900 p-4 border-b border-slate-700">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-slate-300" />
+                    <h3 className="text-lg font-bold text-white">R2 Activity Log</h3>
+                  </div>
+                  <button
+                    onClick={() => setCleanupLog([])}
+                    className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm rounded-lg transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div className="p-4">
+                <div ref={logContainerRef} className="bg-slate-800 rounded-xl p-4 font-mono text-sm max-h-48 overflow-y-auto border border-slate-600">
+                  {cleanupLog.length === 0 ? (
+                    <p className="text-slate-500 text-center py-4">No R2 activity yet. Click "Refresh Analytics" to get started.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {cleanupLog.slice(-20).map((log, idx) => (
+                        <div key={idx} className="text-slate-300 text-xs">{log}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         )}

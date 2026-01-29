@@ -10,6 +10,7 @@ import com.phoneintegration.app.auth.AuthManager
 import com.phoneintegration.app.deals.notify.DealNotificationScheduler
 import com.phoneintegration.app.network.FirebaseSecurityConfig
 import com.phoneintegration.app.security.SecurityMonitor
+import com.phoneintegration.app.spam.SpamFilterWorker
 import com.phoneintegration.app.utils.ErrorHandler
 import com.phoneintegration.app.utils.InputValidation
 import net.sqlcipher.database.SQLiteDatabase
@@ -104,6 +105,34 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
             } catch (e: Exception) {
                 android.util.Log.e("SyncFlowApp", "Failed to initialize DataCleanupService", e)
                 // Continue without cleanup service if it fails
+            }
+
+            // Initialize automatic spam filter protection
+            try {
+                val spamPrefs = getSharedPreferences("spam_filter", MODE_PRIVATE)
+                val isFirstActivation = !spamPrefs.getBoolean("protection_shown", false)
+
+                // Schedule daily filter updates (WiFi only, battery-efficient)
+                SpamFilterWorker.scheduleDailyUpdates(this)
+
+                // Schedule first-run scan (will scan existing messages once)
+                // This runs in background with WorkManager - doesn't affect app UI
+                SpamFilterWorker.scheduleFirstRunScan(this)
+
+                // Show welcome notification on first activation
+                if (isFirstActivation) {
+                    spamPrefs.edit().putBoolean("protection_shown", true).apply()
+                    try {
+                        NotificationHelper(this).showSpamProtectionActivatedNotification()
+                    } catch (e: Exception) {
+                        android.util.Log.w("SyncFlowApp", "Could not show welcome notification", e)
+                    }
+                }
+
+                android.util.Log.i("SyncFlowApp", "Spam filter protection initialized successfully")
+            } catch (e: Exception) {
+                android.util.Log.e("SyncFlowApp", "Failed to initialize spam filter protection", e)
+                // Continue without spam filter if it fails
             }
 
         } catch (e: Exception) {

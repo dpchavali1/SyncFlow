@@ -50,7 +50,8 @@ data class SmsMessage(
     val mmsAttachments: List<MmsAttachment> = emptyList(),
     val mmsSubject: String? = null,
     val subId: Int? = null,  // Subscription ID (SIM card identifier)
-    var isE2ee: Boolean = false
+    var isE2ee: Boolean = false,
+    val isRead: Boolean = true  // Whether message has been read (unread from unknown = suspicious)
 ) {
     fun getFormattedTime(): String {
         val sdf = java.text.SimpleDateFormat("MMM dd, hh:mm a", java.util.Locale.getDefault())

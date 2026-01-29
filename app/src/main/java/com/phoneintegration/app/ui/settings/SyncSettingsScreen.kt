@@ -92,7 +92,7 @@ fun SyncSettingsScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                "Load older messages to your Mac/PC",
+                                "Load older messages to Mac and Web",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
@@ -103,7 +103,7 @@ fun SyncSettingsScreen(
             // Description
             Text(
                 "By default, SyncFlow syncs the last 30 days of messages. " +
-                "Use this option to sync older messages to your connected Mac or PC.",
+                "Use this option to sync older messages to your Mac app or access them via sfweb.app in any browser.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

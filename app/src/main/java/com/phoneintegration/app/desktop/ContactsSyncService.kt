@@ -45,11 +45,65 @@ class ContactsSyncService(private val context: Context) {
     )
 
     /**
+     * Get the user's own phone numbers from SIM cards and profile to exclude from contact sync
+     */
+    private fun getUserOwnPhoneNumbers(): Set<String> {
+        val userNumbers = mutableSetOf<String>()
+
+        // Get numbers from SIM cards
+        try {
+            val simManager = com.phoneintegration.app.SimManager(context)
+            simManager.getActiveSims().forEach { sim ->
+                sim.phoneNumber?.let { phone ->
+                    val normalized = phone.replace(Regex("[^0-9]"), "")
+                    if (normalized.length >= 10) {
+                        userNumbers.add(normalized.takeLast(10))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not get SIM phone numbers: ${e.message}")
+        }
+
+        // Also get numbers from the user's profile contact (the "Me" contact)
+        try {
+            val profileUri = ContactsContract.Profile.CONTENT_URI
+            context.contentResolver.query(
+                Uri.withAppendedPath(profileUri, ContactsContract.Contacts.Data.CONTENT_DIRECTORY),
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                "${ContactsContract.Data.MIMETYPE} = ?",
+                arrayOf(ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE),
+                null
+            )?.use { cursor ->
+                val numberIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                while (cursor.moveToNext()) {
+                    val number = cursor.getString(numberIndex)
+                    if (!number.isNullOrEmpty()) {
+                        val normalized = number.replace(Regex("[^0-9]"), "")
+                        if (normalized.length >= 10) {
+                            userNumbers.add(normalized.takeLast(10))
+                            Log.d(TAG, "Found user profile number: $number")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not get profile phone numbers: ${e.message}")
+        }
+
+        Log.d(TAG, "User's own phone numbers (for filtering): $userNumbers")
+        return userNumbers
+    }
+
+    /**
      * Get all contacts with phone numbers
      */
     suspend fun getAllContacts(): List<Contact> = withContext(Dispatchers.IO) {
         val contacts = mutableListOf<Contact>()
         val seenNumbers = mutableSetOf<String>()
+
+        // Get user's own phone numbers to exclude
+        val userOwnNumbers = getUserOwnPhoneNumbers()
 
         // Permission guard
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
@@ -95,6 +149,14 @@ class ContactsSyncService(private val context: Context) {
                     val uniqueKey = "$contactId:$normalized"
                     if (seenNumbers.contains(uniqueKey)) continue
                     seenNumbers.add(uniqueKey)
+
+                    // Skip contacts that have the user's own phone number
+                    // This prevents the user's name from being associated with their own numbers
+                    val normalizedDigits = normalized.replace(Regex("[^0-9]"), "")
+                    if (normalizedDigits.length >= 10 && userOwnNumbers.contains(normalizedDigits.takeLast(10))) {
+                        Log.d(TAG, "Skipping user's own number in contacts: $number (contact: $name)")
+                        continue
+                    }
 
                     val phoneType = getPhoneTypeLabel(type)
 

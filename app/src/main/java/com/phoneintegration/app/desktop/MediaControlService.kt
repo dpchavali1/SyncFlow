@@ -26,7 +26,7 @@ class MediaControlService(context: Context) {
 
     private var commandListener: ValueEventListener? = null
     private var sessionListener: MediaSessionManager.OnActiveSessionsChangedListener? = null
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var lastSyncedState: MediaState? = null
     private var syncJob: Job? = null
@@ -59,14 +59,20 @@ class MediaControlService(context: Context) {
      * Start media control service
      */
     fun startListening() {
-        Log.d(TAG, "Starting media control service")
-        Log.d(TAG, "Notification listener permission: ${hasNotificationListenerPermission()}")
+        // Recreate scope if it was cancelled (from a previous stopListening call)
+        if (!scope.isActive) {
+            scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        }
+
+        // Force Firebase online connection
+        database.goOnline()
+
         registerSessionListener()
         startListeningForCommands()
         startListeningForDevices()
         // Force an initial sync to update status immediately
         scope.launch {
-            delay(2000) // Give time for device detection
+            delay(2000)
             syncMediaStatusOnce(forceSync = true)
         }
     }
@@ -75,7 +81,6 @@ class MediaControlService(context: Context) {
      * Stop media control service
      */
     fun stopListening() {
-        Log.d(TAG, "Stopping media control service")
         unregisterSessionListener()
         stopListeningForCommands()
         stopStatusPolling()
@@ -93,13 +98,7 @@ class MediaControlService(context: Context) {
             context.contentResolver,
             "enabled_notification_listeners"
         ) ?: ""
-
-        val hasPermission = enabledListeners.contains(flattenedName)
-        Log.d(TAG, "Notification listener permission check: component=$flattenedName, enabled=$hasPermission")
-        if (!hasPermission && enabledListeners.isNotEmpty()) {
-            Log.d(TAG, "Enabled listeners: $enabledListeners")
-        }
-        return hasPermission
+        return enabledListeners.contains(flattenedName)
     }
 
     /**
@@ -107,21 +106,16 @@ class MediaControlService(context: Context) {
      */
     private fun registerSessionListener() {
         try {
-            if (!hasNotificationListenerPermission()) {
-                Log.w(TAG, "No notification listener permission")
-                return
-            }
+            if (!hasNotificationListenerPermission()) return
 
             val mediaSessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
             val componentName = ComponentName(context, NotificationMirrorService::class.java)
 
-            sessionListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-                Log.d(TAG, "Active sessions changed: ${controllers?.size ?: 0}")
+            sessionListener = MediaSessionManager.OnActiveSessionsChangedListener { _ ->
                 debouncedSync()
             }
 
             mediaSessionManager.addOnActiveSessionsChangedListener(sessionListener!!, componentName)
-            Log.d(TAG, "Session listener registered")
         } catch (e: Exception) {
             Log.e(TAG, "Error registering session listener", e)
         }
@@ -161,8 +155,6 @@ class MediaControlService(context: Context) {
                         // Only process recent commands
                         if (System.currentTimeMillis() - timestamp > 10000) return
 
-                        Log.d(TAG, "Received media command: $action")
-
                         when (action) {
                             "play" -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PLAY)
                             "pause" -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PAUSE)
@@ -181,10 +173,7 @@ class MediaControlService(context: Context) {
                             }
                         }
 
-                        // Clear the command
                         snapshot.ref.removeValue()
-
-                        // Sync status after command
                         debouncedSync()
                     }
 
@@ -195,7 +184,6 @@ class MediaControlService(context: Context) {
 
                 commandListener = listener
                 commandRef.addValueEventListener(listener)
-                Log.d(TAG, "Media command listener registered")
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting command listener", e)
             }
@@ -225,7 +213,6 @@ class MediaControlService(context: Context) {
      */
     private fun sendMediaKeyEvent(keyCode: Int) {
         try {
-            // Try using active media controller first
             val controller = getActiveMediaController()
             if (controller != null) {
                 val controls = controller.transportControls
@@ -240,39 +227,25 @@ class MediaControlService(context: Context) {
                     KeyEvent.KEYCODE_MEDIA_PREVIOUS -> controls.skipToPrevious()
                     KeyEvent.KEYCODE_MEDIA_STOP -> controls.stop()
                 }
-                Log.d(TAG, "Media command sent via MediaController")
             } else {
-                // Fallback to AudioManager dispatch
                 val downEvent = KeyEvent(KeyEvent.ACTION_DOWN, keyCode)
                 val upEvent = KeyEvent(KeyEvent.ACTION_UP, keyCode)
                 audioManager.dispatchMediaKeyEvent(downEvent)
                 audioManager.dispatchMediaKeyEvent(upEvent)
-                Log.d(TAG, "Media command sent via AudioManager")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error sending media key event", e)
         }
     }
 
-    /**
-     * Adjust volume
-     */
     private fun adjustVolume(direction: Int) {
         try {
-            audioManager.adjustStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                direction,
-                AudioManager.FLAG_SHOW_UI
-            )
-            Log.d(TAG, "Volume adjusted: $direction")
+            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
         } catch (e: Exception) {
             Log.e(TAG, "Error adjusting volume", e)
         }
     }
 
-    /**
-     * Set specific volume level
-     */
     private fun setVolume(volume: Int) {
         try {
             audioManager.setStreamVolume(
@@ -280,7 +253,6 @@ class MediaControlService(context: Context) {
                 volume.coerceIn(0, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)),
                 AudioManager.FLAG_SHOW_UI
             )
-            Log.d(TAG, "Volume set to: $volume")
         } catch (e: Exception) {
             Log.e(TAG, "Error setting volume", e)
         }
@@ -329,27 +301,14 @@ class MediaControlService(context: Context) {
 
     private suspend fun syncMediaStatusOnce(forceSync: Boolean = false) {
         try {
-            // Only check hasActiveDesktop if not forcing sync
-            if (!forceSync && !shouldSyncNow()) {
-                Log.d(TAG, "Skipping sync: hasActiveDesktop=$hasActiveDesktop")
-                return
-            }
+            if (!forceSync && !shouldSyncNow()) return
 
-            val currentUser = auth.currentUser
-            if (currentUser == null) {
-                Log.w(TAG, "No authenticated user, skipping media sync")
-                return
-            }
+            val currentUser = auth.currentUser ?: return
             val userId = currentUser.uid
-
             val currentState = getCurrentMediaState()
-            Log.d(TAG, "Current media state: playing=${currentState.isPlaying}, title=${currentState.title}, app=${currentState.appName}, package=${currentState.packageName}")
 
             // Skip if no change (unless forcing)
-            if (!forceSync && currentState == lastSyncedState) {
-                Log.d(TAG, "State unchanged, skipping sync")
-                return
-            }
+            if (!forceSync && currentState == lastSyncedState) return
             lastSyncedState = currentState
 
             val statusRef = database.reference
@@ -370,11 +329,7 @@ class MediaControlService(context: Context) {
                 "timestamp" to ServerValue.TIMESTAMP
             )
 
-            statusRef.setValue(statusData).await()
-            Log.d(TAG, "Media status synced to Firebase: playing=${currentState.isPlaying}, title=${currentState.title}, app=${currentState.appName}")
-            if (currentState.isPlaying && currentState.title.isNullOrBlank() && currentState.appName.isNullOrBlank()) {
-                Log.w(TAG, "Media is playing but missing metadata. Ensure Notification Listener permission is granted.")
-            }
+            statusRef.setValue(statusData)
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing media status", e)
         }
@@ -406,26 +361,17 @@ class MediaControlService(context: Context) {
                     .child(userId)
                     .child("devices")
 
-                Log.d(TAG, "Starting device listener for user: $userId")
-
                 val listener = object : ValueEventListener {
                     override fun onDataChange(snapshot: DataSnapshot) {
                         val now = System.currentTimeMillis()
                         var active = false
-                        var deviceCount = 0
 
                         snapshot.children.forEach { child ->
-                            deviceCount++
-                            val deviceId = child.key
                             val platformRaw = child.child("platform").getValue(String::class.java)
                                 ?: child.child("type").getValue(String::class.java)
                             val platform = platformRaw?.lowercase()?.trim()
 
-                            Log.d(TAG, "Found device: id=$deviceId, platform=$platform")
-
-                            if (platform != "macos") {
-                                return@forEach
-                            }
+                            if (platform != "macos") return@forEach
 
                             val online = (child.child("online").value as? Boolean) ?: false
                             val lastSeenValue = child.child("lastSeen").value
@@ -438,25 +384,18 @@ class MediaControlService(context: Context) {
                             }
                             val recent = lastSeen > 0 && now - lastSeen <= DESKTOP_ACTIVE_WINDOW_MS
 
-                            Log.d(TAG, "macOS device: id=$deviceId, online=$online, lastSeen=$lastSeen, recent=$recent (now=$now)")
-
                             if (online || recent) {
                                 active = true
-                                Log.d(TAG, "Active macOS desktop detected: $deviceId")
                                 return@forEach
                             }
                         }
 
-                        Log.d(TAG, "Device check complete: $deviceCount devices found, hasActiveDesktop was $hasActiveDesktop, now $active")
-
                         if (active != hasActiveDesktop) {
                             hasActiveDesktop = active
                             if (active) {
-                                Log.d(TAG, "Starting media status polling")
                                 startStatusPolling()
                                 syncMediaStatus()
                             } else {
-                                Log.d(TAG, "Stopping media status polling - no active desktop")
                                 stopStatusPolling()
                             }
                         }
@@ -469,7 +408,6 @@ class MediaControlService(context: Context) {
 
                 devicesListener = listener
                 devicesRef.addValueEventListener(listener)
-                Log.d(TAG, "Device listener registered")
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting device listener", e)
             }
@@ -495,13 +433,8 @@ class MediaControlService(context: Context) {
     }
 
     private fun shouldSyncNow(): Boolean {
-        // Check if user has enabled notification/media sync
         val prefs = context.getSharedPreferences("syncflow_prefs", Context.MODE_PRIVATE)
-        val featureEnabled = prefs.getBoolean("notification_mirror_enabled", false)
-        if (!featureEnabled) {
-            return false
-        }
-        return hasActiveDesktop
+        return prefs.getBoolean("notification_mirror_enabled", false)
     }
 
     /**
@@ -514,8 +447,6 @@ class MediaControlService(context: Context) {
 
         val sessionPlaying = playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
         val isPlaying = sessionPlaying || audioManager.isMusicActive
-
-        Log.d(TAG, "Getting media state: controller=${controller != null}, metadata=${metadata != null}, sessionPlaying=$sessionPlaying, isMusicActive=${audioManager.isMusicActive}")
 
         val description = metadata?.description
         val sessionTitle = firstNonBlank(
@@ -537,13 +468,8 @@ class MediaControlService(context: Context) {
         val sessionPackage = controller?.packageName
         val sessionAppName = getAppName(sessionPackage)
 
-        Log.d(TAG, "Session info: title=$sessionTitle, artist=$sessionArtist, package=$sessionPackage, appName=$sessionAppName")
-
         // Get fallback from notification mirror service
         val fallback = NotificationMirrorService.getLastMediaInfo()
-        if (fallback != null) {
-            Log.d(TAG, "Fallback info: title=${fallback.title}, artist=${fallback.artist}, app=${fallback.appName}")
-        }
 
         // Try to get app name from any active session if we don't have one
         var finalPackageName = firstNonBlank(sessionPackage, fallback?.packageName)
@@ -555,7 +481,6 @@ class MediaControlService(context: Context) {
             if (anyController != null) {
                 finalPackageName = anyController.packageName
                 finalAppName = getAppName(finalPackageName)
-                Log.d(TAG, "Got app from any active controller: package=$finalPackageName, app=$finalAppName")
             }
         }
 
@@ -578,25 +503,13 @@ class MediaControlService(context: Context) {
         )
     }
 
-    /**
-     * Try to get any active media controller (even without metadata)
-     */
     private fun tryGetAnyActiveController(): MediaController? {
         return try {
             if (!hasNotificationListenerPermission()) return null
-
             val mediaSessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
             val componentName = ComponentName(context, NotificationMirrorService::class.java)
-            val controllers = mediaSessionManager.getActiveSessions(componentName)
-
-            Log.d(TAG, "Active sessions count: ${controllers?.size ?: 0}")
-            controllers?.forEach { ctrl ->
-                Log.d(TAG, "Active session: package=${ctrl.packageName}, state=${ctrl.playbackState?.state}")
-            }
-
-            controllers?.firstOrNull()
+            mediaSessionManager.getActiveSessions(componentName)?.firstOrNull()
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting any active controller", e)
             null
         }
     }
@@ -613,12 +526,10 @@ class MediaControlService(context: Context) {
     private fun getAppName(packageName: String?): String? {
         if (packageName.isNullOrBlank()) return null
         return try {
-            val label = context.packageManager.getApplicationLabel(
+            context.packageManager.getApplicationLabel(
                 context.packageManager.getApplicationInfo(packageName, 0)
-            )
-            label?.toString()
+            )?.toString()
         } catch (e: Exception) {
-            Log.w(TAG, "Unable to resolve app name for $packageName", e)
             null
         }
     }

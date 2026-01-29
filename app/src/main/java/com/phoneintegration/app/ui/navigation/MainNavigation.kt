@@ -24,6 +24,9 @@ import com.phoneintegration.app.ui.archive.ArchivedConversationsScreen
 import com.phoneintegration.app.ui.downloads.SyncFlowDownloadsScreen
 import com.phoneintegration.app.ui.conversations.SpamFolderScreen
 import com.phoneintegration.app.ui.conversations.BlockedContactsScreen
+import com.phoneintegration.app.spam.SpamFilterSettingsScreen
+import com.phoneintegration.app.ui.support.SupportChatScreen
+import com.phoneintegration.app.ui.filetransfer.FileTransferScreen
 import com.phoneintegration.app.share.SharePayload
 import com.phoneintegration.app.data.GroupRepository
 import com.phoneintegration.app.SmsMessage
@@ -245,7 +248,11 @@ fun MainNavigation(
                     onNavigateToBackup = { navController.navigate("settings/backup") },
                     onNavigateToDesktop = { navController.navigate("settings/desktop") },
                     onNavigateToUsage = { navController.navigate("settings/usage") },
-                    onNavigateToSync = { navController.navigate("settings/sync") }
+                    onNavigateToSync = { navController.navigate("settings/sync") },
+                    onNavigateToSpamFilter = { navController.navigate("settings/spam-filter") },
+                    onNavigateToSupport = { navController.navigate("support") },
+                    onNavigateToFileTransfer = { navController.navigate("filetransfer") },
+                    onNavigateToDeleteAccount = { navController.navigate("settings/delete-account") }
                 )
             }
             
@@ -311,6 +318,32 @@ fun MainNavigation(
 
             composable("settings/sync") {
                 SyncSettingsScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable("settings/spam-filter") {
+                SpamFilterSettingsScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable("settings/delete-account") {
+                DeleteAccountScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // Support Chat Screen
+            composable("support") {
+                SupportChatScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // File Transfer Screen (Android → Mac)
+            composable("filetransfer") {
+                FileTransferScreen(
                     onBack = { navController.popBackStack() }
                 )
             }

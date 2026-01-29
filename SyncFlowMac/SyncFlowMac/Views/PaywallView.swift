@@ -125,7 +125,7 @@ struct PaywallView: View {
             FeatureRow(icon: "bell.fill", text: "Notification mirroring")
             FeatureRow(icon: "lock.shield.fill", text: "End-to-end encryption")
             FeatureRow(icon: "clock.fill", text: "Scheduled messages")
-            FeatureRow(icon: "icloud.fill", text: "3GB uploads/month, 15GB storage")
+            FeatureRow(icon: "icloud.fill", text: "3GB uploads/month, 500MB storage")
             FeatureRow(icon: "star.fill", text: "Priority support")
         }
         .padding(16)
@@ -270,8 +270,8 @@ struct PricingOptionCard: View {
     let isBestValue: Bool
     let onSelect: () -> Void
 
-    private var isLifetime: Bool {
-        product.id == SubscriptionProduct.lifetime.rawValue
+    private var isThreeYear: Bool {
+        product.id == SubscriptionProduct.threeYear.rawValue
     }
 
     private var isYearly: Bool {
@@ -279,8 +279,8 @@ struct PricingOptionCard: View {
     }
 
     private var periodText: String {
-        if isLifetime {
-            return "One-time purchase"
+        if isThreeYear {
+            return "3-year plan"
         } else if isYearly {
             return "per year"
         } else {
@@ -290,8 +290,8 @@ struct PricingOptionCard: View {
 
     private var savingsText: String? {
         if isYearly {
-            return "Save 44%"
-        } else if isLifetime {
+            return "Save 33%"
+        } else if isThreeYear {
             return "Best Value"
         }
         return nil

@@ -171,6 +171,16 @@ class PreferencesService {
         return colors[address] ?? generateRandomColor()
     }
 
+    /// Bulk read all preferences for efficient batch processing
+    /// Returns (pinnedSet, archivedSet, blockedSet, avatarColors)
+    func getAllPreferenceSets() -> (pinned: Set<String>, archived: Set<String>, blocked: Set<String>, avatarColors: [String: String]) {
+        let pinned = Set(readStringArray(for: pinnedKey))
+        let archived = Set(readStringArray(for: archivedKey))
+        let blocked = Set(readStringArray(for: blockedKey))
+        let colors = defaults.dictionary(forKey: avatarColorsKey) as? [String: String] ?? [:]
+        return (pinned, archived, blocked, colors)
+    }
+
     private func generateRandomColor() -> String {
         let colors = [
             "#4CAF50", "#2196F3", "#9C27B0", "#FF9800",
@@ -459,7 +469,7 @@ class PreferencesService {
 
     func isPaidUser() -> Bool {
         let plan = userPlan.lowercased()
-        let isPaid = ["monthly", "yearly", "lifetime"].contains(plan)
+        let isPaid = ["monthly", "yearly", "lifetime", "3year"].contains(plan)
         let now = Int64(Date().timeIntervalSince1970 * 1000)
 
         // Check expiration

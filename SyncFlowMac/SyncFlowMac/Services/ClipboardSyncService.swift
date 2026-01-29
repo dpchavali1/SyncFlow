@@ -145,6 +145,8 @@ class ClipboardSyncService: ObservableObject {
     private func syncToFirebase(text: String) {
         guard let userId = currentUserId else { return }
 
+        database.goOnline()
+
         let clipboardRef = database.reference()
             .child("users")
             .child(userId)

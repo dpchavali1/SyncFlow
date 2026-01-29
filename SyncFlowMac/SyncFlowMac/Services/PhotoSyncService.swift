@@ -9,7 +9,7 @@ import Foundation
 import AppKit
 import Combine
 import FirebaseDatabase
-import FirebaseStorage
+import FirebaseFunctions
 
 class PhotoSyncService: ObservableObject {
     static let shared = PhotoSyncService()
@@ -20,7 +20,7 @@ class PhotoSyncService: ObservableObject {
     @Published var isPremiumFeature: Bool = true // Photo sync is now a premium feature
 
     private let database = Database.database()
-    private let storage = Storage.storage()
+    private let functions = Functions.functions(region: "us-central1")
     private var photosHandle: DatabaseHandle?
     private var currentUserId: String?
 
@@ -39,7 +39,7 @@ class PhotoSyncService: ObservableObject {
     var hasPremiumAccess: Bool {
         let status = SubscriptionService.shared.subscriptionStatus
         switch status {
-        case .subscribed, .lifetime:
+        case .subscribed, .threeYear:
             return true
         case .trial, .notSubscribed, .expired:
             return false
@@ -114,8 +114,8 @@ class PhotoSyncService: ObservableObject {
     /// Parse photo data from Firebase
     private func parsePhoto(id: String, data: [String: Any]) -> SyncedPhoto? {
         guard let fileName = data["fileName"] as? String,
-              let thumbnailUrl = data["thumbnailUrl"] as? String,
-              let dateTaken = data["dateTaken"] as? Double else {
+              let dateTaken = data["dateTaken"] as? Double,
+              let r2Key = data["r2Key"] as? String else {
             return nil
         }
 
@@ -129,7 +129,7 @@ class PhotoSyncService: ObservableObject {
             id: id,
             fileName: fileName,
             dateTaken: Date(timeIntervalSince1970: dateTaken / 1000),
-            thumbnailUrl: thumbnailUrl,
+            thumbnailUrl: r2Key,
             width: width,
             height: height,
             size: size,
@@ -139,7 +139,7 @@ class PhotoSyncService: ObservableObject {
         )
     }
 
-    /// Download photo thumbnail
+    /// Download photo thumbnail from R2 storage
     private func downloadThumbnail(photo: SyncedPhoto) {
         // Check if already cached
         if FileManager.default.fileExists(atPath: photo.localPath.path) {
@@ -152,18 +152,21 @@ class PhotoSyncService: ObservableObject {
             return
         }
 
-        // Download from URL
-        guard let url = URL(string: photo.thumbnailUrl) else { return }
-
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] tempUrl, response, error in
-            guard let self = self,
-                  let tempUrl = tempUrl,
-                  error == nil else {
-                print("PhotoSyncService: Error downloading thumbnail: \(error?.localizedDescription ?? "unknown")")
-                return
-            }
-
+        // Get presigned download URL from R2 via Cloud Function
+        let r2Key = photo.thumbnailUrl
+        Task {
             do {
+                let result = try await functions.httpsCallable("getR2DownloadUrl").call(["r2Key": r2Key])
+                guard let response = result.data as? [String: Any],
+                      let downloadUrl = response["downloadUrl"] as? String,
+                      let url = URL(string: downloadUrl) else {
+                    print("PhotoSyncService: Failed to get R2 download URL for \(r2Key)")
+                    return
+                }
+
+                // Download from presigned URL
+                let (tempUrl, _) = try await URLSession.shared.download(from: url)
+
                 // Move to cache
                 if FileManager.default.fileExists(atPath: photo.localPath.path) {
                     try FileManager.default.removeItem(at: photo.localPath)
@@ -171,19 +174,16 @@ class PhotoSyncService: ObservableObject {
                 try FileManager.default.moveItem(at: tempUrl, to: photo.localPath)
 
                 // Update UI
-                DispatchQueue.main.async {
+                await MainActor.run {
                     if let index = self.recentPhotos.firstIndex(where: { $0.id == photo.id }) {
                         self.recentPhotos[index].isDownloaded = true
                         self.recentPhotos[index].thumbnail = NSImage(contentsOf: photo.localPath)
                     }
                 }
-
             } catch {
-                print("PhotoSyncService: Error saving thumbnail: \(error)")
+                print("PhotoSyncService: Error downloading thumbnail: \(error)")
             }
         }
-
-        task.resume()
     }
 
     /// Open photo in Preview

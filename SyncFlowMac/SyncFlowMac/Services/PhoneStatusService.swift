@@ -174,6 +174,8 @@ class PhoneStatusService: ObservableObject {
         guard let userId = currentUserId else { return }
 
         // Write a refresh request that the phone will pick up
+        database.goOnline()
+
         let requestRef = database.reference()
             .child("users")
             .child(userId)

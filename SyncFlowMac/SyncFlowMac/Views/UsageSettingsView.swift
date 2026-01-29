@@ -7,16 +7,21 @@
 
 import SwiftUI
 import FirebaseDatabase
+import FirebaseFunctions
 
 private let trialDays: Int64 = 7 // 7 day trial
 
-// Trial/Free tier: 500MB upload/month, 1GB storage
+// Trial/Free tier: 500MB upload/month, 100MB storage
 private let trialMonthlyBytes: Int64 = 500 * 1024 * 1024
-private let trialStorageBytes: Int64 = 1 * 1024 * 1024 * 1024
+private let trialStorageBytes: Int64 = 100 * 1024 * 1024
 
-// Paid tier: 3GB upload/month, 15GB storage
-private let paidMonthlyBytes: Int64 = 3 * 1024 * 1024 * 1024
-private let paidStorageBytes: Int64 = 15 * 1024 * 1024 * 1024
+// Paid tier: 10GB upload/month, 2GB storage
+private let paidMonthlyBytes: Int64 = 10 * 1024 * 1024 * 1024
+private let paidStorageBytes: Int64 = 2 * 1024 * 1024 * 1024
+
+// File size limits (no daily transfer limits - egress is free with R2)
+private let maxFileSizeFree: Int64 = 50 * 1024 * 1024      // 50MB per file
+private let maxFileSizePro: Int64 = 1024 * 1024 * 1024     // 1GB per file
 
 struct UsageSettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -24,14 +29,39 @@ struct UsageSettingsView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var summary: UsageSummary?
+    @State private var userIdCopied = false
+    @State private var isClearing = false
+    @State private var showClearConfirmation = false
+    @State private var clearResult: String?
 
     var body: some View {
         Form {
             Section {
                 if let userId = appState.userId, !userId.isEmpty {
-                    Text(userId)
-                        .font(.caption)
-                        .textSelection(.enabled)
+                    HStack {
+                        Text(userId)
+                            .font(.caption)
+                            .textSelection(.enabled)
+
+                        Spacer()
+
+                        Button(action: {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(userId, forType: .string)
+                            userIdCopied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                userIdCopied = false
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: userIdCopied ? "checkmark" : "doc.on.doc")
+                                Text(userIdCopied ? "Copied!" : "Copy")
+                            }
+                            .font(.caption)
+                            .foregroundColor(userIdCopied ? .green : .blue)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 } else {
                     Text("Not paired")
                         .foregroundColor(.secondary)
@@ -85,6 +115,25 @@ struct UsageSettingsView: View {
                     Text("Storage")
                 }
 
+                // File Transfer section
+                let maxFileSize = summary.isPaid ? maxFileSizePro : maxFileSizeFree
+
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Max file size") {
+                            Text(formatBytes(maxFileSize))
+                                .foregroundColor(.secondary)
+                        }
+                        if !summary.isPaid {
+                            Text("Upgrade to Pro for 1GB file transfers")
+                                .font(.caption)
+                                .foregroundColor(.blue)
+                        }
+                    }
+                } header: {
+                    Text("File Transfer")
+                }
+
                 if let updatedAt = summary.lastUpdatedAt {
                     Section {
                         Text("Last updated \(formatDateTime(updatedAt))")
@@ -107,11 +156,84 @@ struct UsageSettingsView: View {
                 }
                 .disabled(isLoading || appState.userId == nil)
             }
+
+            // Clear MMS Data section
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(action: { showClearConfirmation = true }) {
+                        HStack {
+                            if isClearing {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                    .frame(width: 16, height: 16)
+                            } else {
+                                Image(systemName: "trash")
+                            }
+                            Text(isClearing ? "Clearing..." : "Clear MMS & File Data")
+                        }
+                    }
+                    .disabled(isClearing || appState.userId == nil)
+
+                    Text("Deletes synced MMS attachments and file transfers from cloud storage. This frees up your storage quota. Message text is not affected.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let result = clearResult {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                }
+            } header: {
+                Text("Storage Management")
+            }
         }
         .formStyle(.grouped)
         .task {
             await loadUsage()
         }
+        .alert("Clear MMS & File Data?", isPresented: $showClearConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear", role: .destructive) {
+                Task { await clearMmsData() }
+            }
+        } message: {
+            Text("This will delete all synced MMS images, videos, and file transfers from cloud storage. Your storage quota will be reset to 0. Message text is not affected.\n\nThis action cannot be undone.")
+        }
+    }
+
+    private func clearMmsData() async {
+        guard let userId = appState.userId else { return }
+
+        isClearing = true
+        clearResult = nil
+
+        do {
+            let functions = Functions.functions()
+            let callable = functions.httpsCallable("clearMmsData")
+
+            let result = try await callable.call(["syncGroupUserId": userId])
+
+            if let data = result.data as? [String: Any],
+               let success = data["success"] as? Bool,
+               success {
+                let deletedFiles = data["deletedFiles"] as? Int ?? 0
+                let freedBytes = data["freedBytes"] as? Int64 ?? 0
+                let freedMB = Double(freedBytes) / (1024 * 1024)
+
+                clearResult = "Cleared \(deletedFiles) files (\(String(format: "%.1f", freedMB)) MB freed)"
+
+                // Refresh usage stats
+                await loadUsage()
+            } else {
+                clearResult = "Cleared successfully"
+                await loadUsage()
+            }
+        } catch {
+            clearResult = "Error: \(error.localizedDescription)"
+        }
+
+        isClearing = false
     }
 
     private func loadUsage() async {
@@ -211,8 +333,8 @@ private struct UsageBarRow: View {
 private func planLabel(plan: String?, isPaid: Bool) -> String {
     if !isPaid { return "Trial" }
     switch plan?.lowercased() {
-    case "lifetime":
-        return "Lifetime"
+    case "lifetime", "3year":
+        return "3-Year"
     case "yearly":
         return "Yearly"
     case "monthly":
@@ -268,7 +390,7 @@ private func currentPeriodKey() -> String {
 
 private func isPaidPlan(plan: String?, planExpiresAt: Int64?, nowMs: Int64) -> Bool {
     guard let normalized = plan?.lowercased() else { return false }
-    if normalized == "lifetime" { return true }
+    if normalized == "lifetime" || normalized == "3year" { return true }
     if normalized == "monthly" || normalized == "yearly" || normalized == "paid" {
         return planExpiresAt.map { $0 > nowMs } ?? true
     }

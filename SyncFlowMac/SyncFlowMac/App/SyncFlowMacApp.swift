@@ -43,7 +43,22 @@ struct SyncFlowMacApp: App {
     private func initializeFirebaseAuth() {
         let auth = Auth.auth()
 
-        // If no current user, sign in anonymously
+        // Check if we're already paired - if so, don't sign in anonymously
+        // The paired auth session uses a custom token, not anonymous auth
+        let isPaired = UserDefaults.standard.string(forKey: "syncflow_user_id") != nil
+
+        if isPaired {
+            // Already paired - don't create a new anonymous user
+            // The existing auth session or re-pairing will handle authentication
+            if let currentUser = auth.currentUser {
+                print("[App] Firebase auth active for paired device: \(currentUser.uid)")
+            } else {
+                print("[App] Paired device but no Firebase auth - will need to re-authenticate")
+            }
+            return
+        }
+
+        // Only sign in anonymously if NOT paired (for initial pairing flow)
         if auth.currentUser == nil {
             Task {
                 do {
@@ -352,6 +367,7 @@ enum AppTab: String, CaseIterable {
     case messages = "Messages"
     case contacts = "Contacts"
     case callHistory = "Calls"
+    case deals = "Deals"
 
     var icon: String {
         switch self {
@@ -361,6 +377,8 @@ enum AppTab: String, CaseIterable {
             return "person.2.fill"
         case .callHistory:
             return "phone.fill"
+        case .deals:
+            return "tag.fill"
         }
     }
 }

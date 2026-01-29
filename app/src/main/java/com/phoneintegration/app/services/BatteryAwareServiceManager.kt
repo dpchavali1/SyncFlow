@@ -210,6 +210,31 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
         if (authManager.isAuthenticated()) {
             startIntelligentSync()
             startEssentialServices()
+
+            // Start services only when paired with macOS
+            if (DesktopSyncService.hasPairedDevices(context)) {
+                if (userEnabledServices.contains("media") && shouldStartService("media")) {
+                    startMediaControlService()
+                }
+                if (userEnabledServices.contains("find_phone")) {
+                    startFindMyPhoneService()
+                }
+                if (userEnabledServices.contains("hotspot") && shouldStartService("hotspot")) {
+                    startHotspotControlService()
+                }
+                if (userEnabledServices.contains("dnd") && shouldStartService("dnd")) {
+                    startDNDSyncService()
+                }
+                if (userEnabledServices.contains("links") && shouldStartService("links")) {
+                    startLinkSharingService()
+                }
+                if (userEnabledServices.contains("files") && shouldStartService("files")) {
+                    startFileTransferService()
+                }
+                if (userEnabledServices.contains("photos") && shouldStartService("photos")) {
+                    startPhotoSyncService()
+                }
+            }
         }
     }
 
@@ -267,24 +292,15 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
      * Keep only essential services running in background
      */
     private fun keepEssentialServicesOnly() {
-        // Stop services that are not essential for background operation
-        stopService("find_phone")
-        stopService("links")
-        stopService("files")
-        stopService("photos")
-        stopService("hotspot")
-        stopService("media")
-
-        // Keep essential ones: intelligent_sync, contacts, phone_status, clipboard
-        // The intelligent sync manager will handle adaptive frequency internally
+        // Keep all services running for full functionality
+        // Pro users need photos and files too
     }
 
     /**
      * Stop non-essential services
      */
     private fun stopNonEssentialServices() {
-        val nonEssential = listOf("photos", "hotspot", "media", "find_phone", "files")
-        nonEssential.forEach { stopService(it) }
+        // Keep all services running - pro users need full functionality
     }
 
     /**
@@ -305,6 +321,9 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
         val batteryLevel = _batteryLevel.value
         val isCharging = _isCharging.value
         val isOnWifi = _isOnWifi.value
+
+        // find_phone must always be allowed - it's critical for the feature
+        if (serviceName == "find_phone") return true
 
         return when {
             // Critical battery - only intelligent sync and contacts
@@ -354,6 +373,86 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
         }
         clipboardSyncService?.startSync()
         updateServiceState("clipboard", ServiceState.RUNNING)
+    }
+
+    private fun startMediaControlService() {
+        // Only start if paired with macOS desktop
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            Log.d(TAG, "MediaControlService not started - no paired desktop devices")
+            return
+        }
+        if (mediaControlService == null) {
+            mediaControlService = MediaControlService(context)
+        }
+        mediaControlService?.startListening()
+        updateServiceState("media", ServiceState.RUNNING)
+        Log.d(TAG, "MediaControlService started")
+    }
+
+    private fun startFindMyPhoneService() {
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            return
+        }
+        if (findMyPhoneService == null) {
+            findMyPhoneService = FindMyPhoneService(context)
+        }
+        findMyPhoneService?.startListening()
+        updateServiceState("find_phone", ServiceState.RUNNING)
+    }
+
+    private fun startHotspotControlService() {
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            return
+        }
+        if (hotspotControlService == null) {
+            hotspotControlService = HotspotControlService(context)
+        }
+        hotspotControlService?.startListening()
+        updateServiceState("hotspot", ServiceState.RUNNING)
+    }
+
+    private fun startDNDSyncService() {
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            return
+        }
+        if (dndSyncService == null) {
+            dndSyncService = DNDSyncService(context)
+        }
+        dndSyncService?.startSync()
+        updateServiceState("dnd", ServiceState.RUNNING)
+    }
+
+    private fun startLinkSharingService() {
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            return
+        }
+        if (linkSharingService == null) {
+            linkSharingService = LinkSharingService(context)
+        }
+        linkSharingService?.startListening()
+        updateServiceState("links", ServiceState.RUNNING)
+    }
+
+    private fun startFileTransferService() {
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            return
+        }
+        if (fileTransferService == null) {
+            fileTransferService = FileTransferService(context)
+        }
+        fileTransferService?.startListening()
+        updateServiceState("files", ServiceState.RUNNING)
+    }
+
+    private fun startPhotoSyncService() {
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            return
+        }
+        if (photoSyncService == null) {
+            photoSyncService = PhotoSyncService(context)
+        }
+        photoSyncService?.startSync()
+        updateServiceState("photos", ServiceState.RUNNING)
     }
 
     private fun stopService(serviceName: String) {

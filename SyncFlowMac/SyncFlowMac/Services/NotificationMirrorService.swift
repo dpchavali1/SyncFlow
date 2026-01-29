@@ -185,6 +185,8 @@ class NotificationMirrorService: ObservableObject {
     func clearNotifications() {
         guard let userId = currentUserId else { return }
 
+        database.goOnline()
+
         let notificationsRef = database.reference()
             .child("users")
             .child(userId)
@@ -205,6 +207,8 @@ class NotificationMirrorService: ObservableObject {
     /// Dismiss a single notification
     func dismissNotification(_ notification: MirroredNotification) {
         guard let userId = currentUserId else { return }
+
+        database.goOnline()
 
         let notificationRef = database.reference()
             .child("users")

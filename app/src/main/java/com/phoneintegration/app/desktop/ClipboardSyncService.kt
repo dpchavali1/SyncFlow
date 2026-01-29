@@ -52,6 +52,7 @@ class ClipboardSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting clipboard sync")
+        database.goOnline()
         stopListeningForLocalClipboard()
         stopListeningForRemoteClipboard()
         startListeningForLocalClipboard()

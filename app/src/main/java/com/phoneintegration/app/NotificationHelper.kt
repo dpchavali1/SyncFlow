@@ -241,4 +241,133 @@ class NotificationHelper(private val context: Context) {
         }
     }
 
+    /**
+     * Show notification when spam scan completes
+     */
+    fun showSpamScanNotification(spamCount: Int, totalScanned: Int = 0) {
+        // Intent to open spam folder or main app
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            if (spamCount > 0) {
+                putExtra("open_spam", true)
+            }
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            2,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val (title, message) = if (spamCount > 0) {
+            val t = if (spamCount == 1) "1 spam message found" else "$spamCount spam messages found"
+            val m = "Moved to Spam folder for your review"
+            t to m
+        } else {
+            "Scan complete - No spam found" to "Your messages are clean"
+        }
+
+        val notification = NotificationCompat.Builder(context, SPAM_CHANNEL_ID)
+            .setSmallIcon(if (spamCount > 0) android.R.drawable.ic_dialog_alert else android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText(if (spamCount > 0)
+                        "$message\n\nTap to view your Spam folder."
+                    else
+                        "Scanned ${if (totalScanned > 0) totalScanned else "your"} messages. No threats detected.")
+            )
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID + 100, notification)
+        } catch (e: SecurityException) {
+            Log.e("NotificationHelper", "Permission denied for spam scan notification: ${e.message}")
+        }
+    }
+
+    /**
+     * Show notification when spam scan starts (so user knows what's happening)
+     */
+    fun showSpamScanStartedNotification() {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            3,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(context, SPAM_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_popup_sync)
+            .setContentTitle("Scanning messages for spam...")
+            .setContentText("This runs in the background")
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setAutoCancel(false)
+            .setOngoing(true) // Ongoing notification while scanning
+            .setContentIntent(pendingIntent)
+            .setProgress(0, 0, true) // Indeterminate progress
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID + 101, notification)
+        } catch (e: SecurityException) {
+            Log.e("NotificationHelper", "Permission denied: ${e.message}")
+        }
+    }
+
+    /**
+     * Dismiss the scanning notification
+     */
+    fun dismissSpamScanningNotification() {
+        try {
+            NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID + 101)
+        } catch (e: Exception) {
+            Log.e("NotificationHelper", "Error dismissing notification: ${e.message}")
+        }
+    }
+
+    /**
+     * Show welcome notification when spam protection is first activated
+     */
+    fun showSpamProtectionActivatedNotification() {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            4,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(context, SPAM_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Spam Protection Activated")
+            .setContentText("Your messages are now protected automatically")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText("SyncFlow will now:\n• Scan incoming messages for spam\n• Update filters daily on WiFi\n• Move spam to your Spam folder\n\nNo action needed from you!")
+            )
+            .build()
+
+        try {
+            NotificationManagerCompat.from(context).notify(NOTIFICATION_ID + 102, notification)
+        } catch (e: SecurityException) {
+            Log.e("NotificationHelper", "Permission denied: ${e.message}")
+        }
+    }
+
 }

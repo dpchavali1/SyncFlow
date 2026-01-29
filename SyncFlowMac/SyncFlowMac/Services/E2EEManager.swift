@@ -144,7 +144,8 @@ class E2EEManager {
 
     /// Publish public key to Firebase for key exchange
     private func publishPublicKeyToFirebase() async throws {
-        guard let uid = auth.currentUser?.uid,
+        // Use stored user ID to ensure keys go to correct user account
+        guard let uid = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? auth.currentUser?.uid,
               let publicKey = publicKey else {
             throw E2EEError.notAuthenticated
         }
@@ -170,7 +171,8 @@ class E2EEManager {
     }
 
     func publishDevicePublicKey() async throws {
-        guard let uid = auth.currentUser?.uid,
+        // Use stored user ID to ensure keys go to correct user account
+        guard let uid = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? auth.currentUser?.uid,
               let publicKey = publicKey else {
             throw E2EEError.notAuthenticated
         }
@@ -606,8 +608,8 @@ class E2EEManager {
         privateKey = nil
         publicKey = nil
 
-        // Remove from Firebase
-        if let uid = auth.currentUser?.uid {
+        // Remove from Firebase - use stored user ID for consistency
+        if let uid = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? auth.currentUser?.uid {
             database.reference().child("e2ee_keys").child(uid).removeValue()
         }
 

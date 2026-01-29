@@ -11,6 +11,100 @@ import kotlinx.coroutines.withContext
  */
 object SpamFilter {
 
+    // ==========================================
+    // TRUSTED SENDERS - Never mark as spam
+    // ==========================================
+    private val TRUSTED_BANK_SENDERS = setOf(
+        // Indian Banks - Transaction alerts
+        "HDFCBK", "HDFC", "HDFCBANK",
+        "ICICIB", "ICICI", "ICICIBANK",
+        "SBIINB", "SBIOTP", "SBIBNK", "SBI",
+        "AXISBK", "AXIS", "AXISBANK",
+        "KOTAKB", "KOTAK", "KOTAKBANK",
+        "PNBSMS", "PNB",
+        "BOIIND", "BOI",
+        "ABORIG", "ABFL",
+        "IABORIG", "IDBI", "IDBIBK",
+        "CANBNK", "CANARA",
+        "UNIONB", "UNION",
+        "INDBNK", "INDIAN",
+        "BOBTXN", "BOB", "BOBSMS",
+        "YESBK", "YESBANK",
+        "RBLBNK", "RBL",
+        "FEDERL", "FEDERAL",
+        "SCBANK", "SCBIND", // Standard Chartered
+        "CITIBK", "CITI",
+        "HSBCBK", "HSBC",
+        "DLOAMT", // Loan EMI alerts
+
+        // Payment Services
+        "PYTMPR", "PAYTM", "PYTM",
+        "GPAY", "GOOGLEPAY",
+        "PHONPE", "PHONEPE",
+        "AMAZNP", "AMAZON", "AMZN",
+        "FLIPKT", "FLIPKART",
+        "BHARPE", "BHRTPE",
+
+        // Credit Cards
+        "AMEXIN", "AMEX",
+        "HDFCCC", "ICICCC", "SBICC",
+
+        // Insurance & Investments
+        "LICIND", "LIC",
+        "SBIMF", "HDFCMF", "ICICMF",
+
+        // Government
+        "UIDAI", "AADHAR", "EPFIND", "EPFO",
+        "INCOME", "ITREFUND"
+    )
+
+    // Trusted sender patterns (regex)
+    private val TRUSTED_SENDER_PATTERNS = listOf(
+        Regex("""^[A-Z]{2}-[A-Z]*HDFC[A-Z]*$""", RegexOption.IGNORE_CASE),
+        Regex("""^[A-Z]{2}-[A-Z]*ICICI[A-Z]*$""", RegexOption.IGNORE_CASE),
+        Regex("""^[A-Z]{2}-[A-Z]*SBI[A-Z]*$""", RegexOption.IGNORE_CASE),
+        Regex("""^[A-Z]{2}-[A-Z]*AXIS[A-Z]*$""", RegexOption.IGNORE_CASE),
+        Regex("""^[A-Z]{2}-[A-Z]*KOTAK[A-Z]*$""", RegexOption.IGNORE_CASE),
+        Regex("""^[A-Z]{2}-[A-Z]*PAYTM[A-Z]*$""", RegexOption.IGNORE_CASE)
+    )
+
+    // ==========================================
+    // DATING/ROMANCE SPAM PATTERNS
+    // ==========================================
+    private val DATING_SPAM_PHRASES = listOf(
+        "hey babe",
+        "hey handsome",
+        "hey sexy",
+        "hey cutie",
+        "hi babe",
+        "hi handsome",
+        "hi sexy",
+        "miss you babe",
+        "i miss you",
+        "are you there",
+        "why no reply",
+        "did you get my",
+        "check my profile",
+        "my profile pic",
+        "see my photos",
+        "want to meet",
+        "let's meet",
+        "come meet me",
+        "i'm lonely",
+        "i'm single",
+        "looking for fun",
+        "no strings",
+        "casual fun",
+        "just for fun",
+        "adult fun"
+    )
+
+    private val DATING_SPAM_DOMAINS = listOf(
+        "intimate", "dating", "hookup", "singles", "meet", "love",
+        "affair", "flirt", "chat", "sexy", "hot", "naughty", "adult",
+        "match", "date", "romance", "lonely", "finder"
+    )
+
     // Common spam keywords and patterns
     private val SPAM_KEYWORDS = listOf(
         // Lottery/Prize scams
@@ -164,7 +258,10 @@ object SpamFilter {
         "get tickets",
         "book tickets",
 
-        // Political campaigns
+        // Political campaigns - USA
+        "election",  // Standalone keyword for any election-related spam
+        "elections",
+        "electoral",
         "vote for",
         "vote yes",
         "vote no",
@@ -188,6 +285,14 @@ object SpamFilter {
         "liberal",
         "trump",
         "biden",
+        "desantis",
+        "harris",
+        "pence",
+        "pelosi",
+        "mcconnell",
+        "aoc",
+        "bernie",
+        "sanders",
         "congress",
         "senate",
         "governor",
@@ -201,6 +306,37 @@ object SpamFilter {
         "early voting",
         "mail-in ballot",
         "absentee ballot",
+        "gop",
+        "dnc",
+        "rnc",
+        "maga",
+        "super pac",
+        "political committee",
+        "swing state",
+        "battleground",
+        "midterm",
+        "electoral college",
+        "fundraising deadline",
+        "match your donation",
+        "triple match",
+        "double your impact",
+
+        // Political campaigns - India
+        "bjp",
+        "congress party",
+        "aap",
+        "tmc",
+        "dmk",
+        "shiv sena",
+        "ncp",
+        "modi ji",
+        "rahul gandhi",
+        "kejriwal",
+        "yogi",
+        "mamata",
+        "election rally",
+        "chunav",
+        "vikas",
 
         // Emergency/Roadside scams
         "aaa membership",
@@ -368,12 +504,20 @@ object SpamFilter {
         Regex("""tiny\.cc/\w+""", RegexOption.IGNORE_CASE),
         Regex("""v\.gd/\w+""", RegexOption.IGNORE_CASE),
 
-        // Suspicious TLDs
-        Regex("""\w+\.xyz/""", RegexOption.IGNORE_CASE),
-        Regex("""\w+\.top/""", RegexOption.IGNORE_CASE),
-        Regex("""\w+\.click/""", RegexOption.IGNORE_CASE),
-        Regex("""\w+\.link/""", RegexOption.IGNORE_CASE),
-        Regex("""\w+\.buzz/""", RegexOption.IGNORE_CASE),
+        // Suspicious TLDs (no trailing slash required, supports hyphens in domain)
+        Regex("""[-\w]+\.xyz($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.top($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.click($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.link($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.buzz($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.site($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.online($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.fun($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.icu($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.vip($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.club($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.store($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
+        Regex("""[-\w]+\.shop($|/|\s|[^a-z])""", RegexOption.IGNORE_CASE),
         Regex("""\w+\.work/""", RegexOption.IGNORE_CASE),
         Regex("""\w+\.rest/""", RegexOption.IGNORE_CASE),
         Regex("""\w+\.fit/""", RegexOption.IGNORE_CASE),
@@ -429,14 +573,21 @@ object SpamFilter {
         val reasons = mutableListOf<String>()
         var score = 0f
 
+        val lowerBody = body.lowercase()
+        val upperSender = senderAddress.uppercase()
+
+        // ==========================================
+        // WHITELIST CHECK - Trusted senders are NEVER spam
+        // ==========================================
+        if (isTrustedSender(senderAddress)) {
+            return SpamCheckResult(isSpam = false, confidence = 0f, reasons = listOf("Trusted sender"))
+        }
+
         // Messages from saved contacts are less likely to be spam
         // But reduce the bonus - ads can come from "saved" business contacts
         if (isFromContact) {
             score -= 0.15f
         }
-
-        val lowerBody = body.lowercase()
-        val upperSender = senderAddress.uppercase()
 
         // HIGH PRIORITY: Check for high confidence spam phrases (scams)
         val matchedHighConfidence = HIGH_CONFIDENCE_PHRASES.filter { phrase ->
@@ -538,15 +689,20 @@ object SpamFilter {
         }
 
         // Persistently unread messages from non-contacts are suspicious
-        // Spam/bulk SMS often can't be marked as read properly
+        // Spam/bulk SMS often remain unread because users recognize them as spam
         if (!isRead && !isFromContact) {
-            // Old unread messages are more suspicious (normal messages get read)
-            if (messageAgeHours > 24) {
-                score += 0.25f
-                reasons.add("Old unread message from unknown sender")
-            } else if (messageAgeHours > 1) {
-                score += 0.15f
-                reasons.add("Unread message from unknown sender")
+            if (messageAgeHours > 72) {
+                // Very old unread messages (>3 days) are highly suspicious
+                score += 0.55f
+                reasons.add("Very old unread message from unknown sender (${messageAgeHours}h)")
+            } else if (messageAgeHours > 24) {
+                // Old unread messages (>24 hours) are more suspicious
+                score += 0.45f
+                reasons.add("Old unread message from unknown sender (${messageAgeHours}h)")
+            } else if (messageAgeHours > 6) {
+                // Messages unread for 6+ hours from unknown senders
+                score += 0.3f
+                reasons.add("Unread message from unknown sender (${messageAgeHours}h)")
             }
         }
 
@@ -571,6 +727,34 @@ object SpamFilter {
             }
         }
 
+        // ==========================================
+        // DATING/ROMANCE SPAM DETECTION
+        // ==========================================
+        val hasDatingPhrase = DATING_SPAM_PHRASES.any { lowerBody.contains(it) }
+        if (hasDatingPhrase) {
+            score += 0.5f
+            reasons.add("Dating/romance spam phrase detected")
+        }
+
+        // Check for dating spam domains in URLs
+        val urlPattern = Regex("""https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9][-a-zA-Z0-9]*\.(com|net|org|xyz|top|site|online|link|click)[^\s]*""", RegexOption.IGNORE_CASE)
+        val urlsInMessage = urlPattern.findAll(body).map { it.value.lowercase() }.toList()
+        for (url in urlsInMessage) {
+            if (DATING_SPAM_DOMAINS.any { url.contains(it) }) {
+                score += 0.6f  // High score for dating spam domains
+                reasons.add("Suspicious dating/adult domain: $url")
+                break
+            }
+        }
+
+        // Combination: casual greeting + URL from unknown sender = high spam likelihood
+        val casualGreetings = listOf("hey", "hi there", "hello there", "hii", "heyy", "yo ")
+        val hasCasualGreeting = casualGreetings.any { lowerBody.startsWith(it) }
+        if (hasCasualGreeting && urlsInMessage.isNotEmpty() && !isFromContact) {
+            score += 0.4f
+            reasons.add("Casual greeting + link from unknown sender")
+        }
+
         // Normalize score to 0-1 range
         val confidence = score.coerceIn(0f, 1f)
         val isSpam = confidence >= threshold
@@ -580,6 +764,37 @@ object SpamFilter {
             confidence = confidence,
             reasons = reasons
         )
+    }
+
+    /**
+     * Check if sender is a trusted/whitelisted sender (banks, payments, government)
+     * These senders should NEVER be marked as spam
+     */
+    private fun isTrustedSender(senderAddress: String): Boolean {
+        val upperSender = senderAddress.uppercase().trim()
+
+        // Direct match in trusted list
+        if (TRUSTED_BANK_SENDERS.any { upperSender.contains(it) }) {
+            return true
+        }
+
+        // Check sender patterns (like XX-HDFCBANK)
+        if (TRUSTED_SENDER_PATTERNS.any { it.matches(upperSender) }) {
+            return true
+        }
+
+        // Check for format: XX-BANKNAME (common Indian bank SMS format)
+        val bankPrefixPattern = Regex("""^[A-Z]{2}-([A-Z]+)$""")
+        val match = bankPrefixPattern.find(upperSender)
+        if (match != null) {
+            val bankCode = match.groupValues[1]
+            // Check if the extracted code matches any trusted sender
+            if (TRUSTED_BANK_SENDERS.any { bankCode.contains(it) || it.contains(bankCode) }) {
+                return true
+            }
+        }
+
+        return false
     }
 
     /**

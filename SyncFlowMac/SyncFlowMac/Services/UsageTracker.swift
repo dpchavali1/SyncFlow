@@ -83,13 +83,13 @@ class UsageTracker: ObservableObject {
     private let trialDuration: TimeInterval = 7 * 24 * 60 * 60 // 7 days trial
     private let trialDays = 7
 
-    // Trial/Free tier: 500MB upload/month, 1GB storage
+    // Trial/Free tier: 500MB upload/month, 100MB storage
     private let trialMonthlyBytes: Int64 = 500 * 1024 * 1024
-    private let trialStorageBytes: Int64 = 1 * 1024 * 1024 * 1024
+    private let trialStorageBytes: Int64 = 100 * 1024 * 1024
 
-    // Paid tier: 3GB upload/month, 15GB storage (better value for higher price)
-    private let paidMonthlyBytes: Int64 = 3 * 1024 * 1024 * 1024
-    private let paidStorageBytes: Int64 = 15 * 1024 * 1024 * 1024
+    // Paid tier: 10GB upload/month, 2GB storage
+    private let paidMonthlyBytes: Int64 = 10 * 1024 * 1024 * 1024
+    private let paidStorageBytes: Int64 = 2 * 1024 * 1024 * 1024
 
     @Published var usageStats: UsageStats?
     @Published var showLimitWarning: Bool = false
@@ -194,7 +194,7 @@ class UsageTracker: ObservableObject {
 
     private func isPaidPlan(plan: String?, planExpiresAt: Int64?, nowMs: Int64) -> Bool {
         guard let normalized = plan else { return false }
-        if normalized == "lifetime" {
+        if normalized == "lifetime" || normalized == "3year" {
             return true
         }
         if normalized == "monthly" || normalized == "yearly" || normalized == "paid" {
@@ -252,7 +252,8 @@ class UsageTracker: ObservableObject {
 
     /// Refresh usage stats - call this after sync operations
     func refreshUsageStats() {
-        guard let userId = Auth.auth().currentUser?.uid else { return }
+        // Use stored paired user ID, fall back to auth.currentUser
+        guard let userId = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? Auth.auth().currentUser?.uid else { return }
         Task {
             await fetchUsageStats(userId: userId)
         }

@@ -44,6 +44,7 @@ class HotspotControlService(context: Context) {
      * Start listening for hotspot commands from macOS
      */
     fun startListening() {
+        database.goOnline()
         scope.launch {
             try {
                 val currentUser = auth.currentUser ?: return@launch

@@ -9,6 +9,7 @@ import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.phoneintegration.app.data.database.SyncFlowDatabase
 import com.phoneintegration.app.data.database.SpamMessage
+import com.phoneintegration.app.spam.SpamFilterService
 import com.phoneintegration.app.utils.SecureLogger
 import com.phoneintegration.app.utils.SpamFilter
 import kotlinx.coroutines.CoroutineScope
@@ -134,8 +135,31 @@ class SmsReceiver : BroadcastReceiver() {
                     val spamThreshold = preferencesManager.getSpamThreshold()
 
                     val isFromContact = contactName != null && contactName != sender
+
+                    // Use both basic and advanced spam checking
                     val spamResult = if (isSpamFilterEnabled) {
-                        SpamFilter.checkMessage(fullMessage, sender, isFromContact, spamThreshold)
+                        // Basic pattern matching
+                        val basicResult = SpamFilter.checkMessage(fullMessage, sender, isFromContact, spamThreshold)
+
+                        // Advanced checking (URL blocklist, ML) - non-blocking
+                        val advancedResult = try {
+                            val advancedService = SpamFilterService.getInstance(context)
+                            advancedService.checkMessage(sender, fullMessage)
+                        } catch (e: Exception) {
+                            SecureLogger.w("SMS_RECEIVER", "Advanced spam check failed, using basic only")
+                            null
+                        }
+
+                        // Combine results - use higher confidence
+                        if (advancedResult != null && advancedResult.confidence > basicResult.confidence) {
+                            SpamFilter.SpamCheckResult(
+                                isSpam = advancedResult.isSpam || basicResult.isSpam,
+                                confidence = advancedResult.confidence,
+                                reasons = advancedResult.reasons.map { it.description } + basicResult.reasons
+                            )
+                        } else {
+                            basicResult
+                        }
                     } else {
                         SpamFilter.SpamCheckResult(isSpam = false, confidence = 0f, reasons = emptyList())
                     }

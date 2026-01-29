@@ -1402,37 +1402,18 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Reconcile deletions from Firebase when app resumes.
-     * Deletes local messages that were removed remotely.
+     *
+     * DISABLED: This function was incorrectly deleting messages that were never
+     * synced to Firebase in the first place (like bank messages). The logic
+     * assumed all local messages exist in Firebase, which is not true.
+     *
+     * To properly implement this, we would need to track which messages have
+     * been successfully synced before we can safely delete based on cloud state.
      */
     fun reconcileDeletedMessages() {
-        viewModelScope.launch(Dispatchers.IO) {
-            // Skip if no devices are paired (no point reconciling with empty cloud)
-            if (!DesktopSyncService.hasPairedDevices(getApplication())) {
-                return@launch
-            }
-
-            try {
-                val syncService = com.phoneintegration.app.desktop.DesktopSyncService(getApplication())
-                val firebaseKeys = syncService.fetchRecentMessageKeys(1000)
-                if (firebaseKeys.isEmpty()) return@launch
-
-                val cutoff = System.currentTimeMillis() - (10 * 60 * 1000) // 10 min grace
-                val recentMessages = repo.getAllRecentMessages(500)
-
-                recentMessages.forEach { message ->
-                    if (message.date >= cutoff) return@forEach
-                    val key = syncService.getFirebaseMessageKey(message)
-                    if (!firebaseKeys.contains(key)) {
-                        repo.deleteMessage(message.id)
-                    }
-                }
-
-                // Refresh conversations if anything changed
-                loadConversations()
-            } catch (e: Exception) {
-                Log.e("SmsViewModel", "Failed to reconcile deletions", e)
-            }
-        }
+        // DISABLED - This was causing data loss by deleting unsynced messages
+        // See: https://github.com/issues/xxx - ICICI messages being deleted
+        Log.d("SmsViewModel", "reconcileDeletedMessages: DISABLED to prevent data loss")
     }
 
     // ---------------------------------------------------------

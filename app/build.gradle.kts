@@ -167,6 +167,12 @@ dependencies {
     // ──────────────────────────────────────────────
     // No external dependencies needed - using local pattern matching
 
+    // ──────────────────────────────────────────────
+    // TENSORFLOW LITE - for on-device spam detection
+    // ──────────────────────────────────────────────
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
     implementation("io.coil-kt:coil-compose:2.4.0")
     implementation("io.coil-kt:coil-gif:2.4.0")  // GIF support for Coil

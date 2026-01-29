@@ -36,6 +36,22 @@ class MessageStore: ObservableObject {
     private var readReceiptsLoaded = false  // Track if read receipts have been loaded at least once
     private var cancellables = Set<AnyCancellable>()
 
+    // Thread-safe atomic access for background processing
+    private let stateQueue = DispatchQueue(label: "MessageStore.stateQueue", attributes: .concurrent)
+    private var _atomicLastHash: Int = 0
+    private var _atomicLastIds: Set<String> = []
+
+    private func getAtomicState() -> (hash: Int, ids: Set<String>) {
+        return stateQueue.sync { (_atomicLastHash, _atomicLastIds) }
+    }
+
+    private func setAtomicState(hash: Int, ids: Set<String>) {
+        stateQueue.async(flags: .barrier) {
+            self._atomicLastHash = hash
+            self._atomicLastIds = ids
+        }
+    }
+
     // Pagination state
     private var loadedTimeRangeStart: TimeInterval?  // Oldest message timestamp loaded
     private var initialLoadDays: Int = 180  // Load last 180 days (6 months) to show more history on initial pairing
@@ -214,17 +230,23 @@ class MessageStore: ObservableObject {
                 guard let self = self else { return }
 
                 // Calculate hash of message data to detect actual changes
-                let messageHash = messages.reduce(0) { hash, msg in
-                    hash ^ msg.id.hashValue ^ msg.body.hashValue ^ msg.date.hashValue
+                // Use sampling for large message sets to reduce computation
+                let messageCount = messages.count
+                let messageHash: Int
+                if messageCount > 1000 {
+                    // For large sets, sample every 10th message for hash
+                    messageHash = stride(from: 0, to: messageCount, by: 10).reduce(0) { hash, idx in
+                        let msg = messages[idx]
+                        return hash ^ msg.id.hashValue ^ msg.body.hashValue
+                    } ^ messageCount.hashValue
+                } else {
+                    messageHash = messages.reduce(0) { hash, msg in
+                        hash ^ msg.id.hashValue ^ msg.body.hashValue ^ msg.date.hashValue
+                    }
                 }
 
-                // Read current state safely
-                var lastHash: Int = 0
-                var lastIds: Set<String> = []
-                DispatchQueue.main.sync {
-                    lastHash = self.lastMessageHash
-                    lastIds = self.lastMessageIds
-                }
+                // Read current state safely using concurrent queue (no main thread blocking)
+                let (lastHash, lastIds) = self.getAtomicState()
 
                 // Skip processing if data hasn't actually changed
                 if messageHash == lastHash && !lastIds.isEmpty {
@@ -241,6 +263,9 @@ class MessageStore: ObservableObject {
                 // Merge pending outgoing messages and build conversations on background thread
                 let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
                 let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
+
+                // Update atomic state immediately (thread-safe)
+                self.setAtomicState(hash: messageHash, ids: newMessageIds)
 
                 // Update UI on main thread
                 DispatchQueue.main.async { [weak self] in
@@ -464,40 +489,19 @@ class MessageStore: ObservableObject {
 
     /// Build conversations from messages (thread-safe, can be called from background)
     private func buildConversations(from messages: [Message]) -> [Conversation] {
-        // First, collect all unique addresses AND their normalized forms
-        var allAddresses = Set<String>()
-        var normalizedToOriginal: [String: String] = [:] // normalized -> first seen original address
-        for message in messages {
-            allAddresses.insert(message.address)
-            let normalized = normalizePhoneNumber(message.address)
-            if normalizedToOriginal[normalized] == nil {
-                normalizedToOriginal[normalized] = message.address
-            }
-        }
+        // Batch read ALL preferences in ONE call (thread-safe, no main thread blocking)
+        let (pinnedSet, archivedSet, blockedSet, avatarColors) = preferences.getAllPreferenceSets()
 
-        // Batch read ALL preferences in ONE main thread call (avoids repeated sync calls)
-        var prefCache: [String: (isPinned: Bool, isArchived: Bool, isBlocked: Bool, avatarColor: String?)] = [:]
-        DispatchQueue.main.sync {
-            for address in allAddresses {
-                prefCache[address] = (
-                    isPinned: self.preferences.isPinned(address),
-                    isArchived: self.preferences.isArchived(address),
-                    isBlocked: self.preferences.isBlocked(address),
-                    avatarColor: self.preferences.getAvatarColor(for: address)
-                )
-            }
-        }
-
-        // Now process messages entirely on background thread using cached prefs
         // Group by NORMALIZED address to merge duplicate contacts with different formats
         var conversationDict: [String: (primaryAddress: String, lastMessage: Message, messages: [Message], allAddresses: Set<String>)] = [:]
+        conversationDict.reserveCapacity(min(messages.count / 5, 500)) // Estimate ~5 msgs per conversation
 
         for message in messages {
             let address = message.address
             let normalizedAddress = normalizePhoneNumber(address)
 
-            // Skip blocked numbers (using cached value)
-            if prefCache[address]?.isBlocked == true {
+            // Skip blocked numbers (O(1) set lookup)
+            if blockedSet.contains(address) {
                 continue
             }
 
@@ -521,12 +525,14 @@ class MessageStore: ObservableObject {
 
         // Convert to Conversation objects (no main thread calls needed)
         var newConversations: [Conversation] = []
+        newConversations.reserveCapacity(conversationDict.count)
 
         for (normalizedAddress, data) in conversationDict {
-            // Get prefs from any of the addresses (prefer primary)
-            let prefs = prefCache[data.primaryAddress]
-                ?? data.allAddresses.compactMap({ prefCache[$0] }).first
-                ?? (isPinned: false, isArchived: false, isBlocked: false, avatarColor: nil)
+            // Get prefs using O(1) set lookups
+            let isPinned = pinnedSet.contains(data.primaryAddress) || data.allAddresses.contains(where: { pinnedSet.contains($0) })
+            let isArchived = archivedSet.contains(data.primaryAddress) || data.allAddresses.contains(where: { archivedSet.contains($0) })
+            let isBlocked = blockedSet.contains(data.primaryAddress) || data.allAddresses.contains(where: { blockedSet.contains($0) })
+            let avatarColor = avatarColors[data.primaryAddress] ?? data.allAddresses.compactMap({ avatarColors[$0] }).first
 
             let unreadCount = data.messages.filter { $0.isReceived && !$0.isRead }.count
 
@@ -547,10 +553,10 @@ class MessageStore: ObservableObject {
                 timestamp: data.lastMessage.timestamp,
                 unreadCount: unreadCount,
                 allAddresses: Array(data.allAddresses),
-                isPinned: prefs.isPinned,
-                isArchived: prefs.isArchived,
-                isBlocked: prefs.isBlocked,
-                avatarColor: prefs.avatarColor
+                isPinned: isPinned,
+                isArchived: isArchived,
+                isBlocked: isBlocked,
+                avatarColor: avatarColor
             )
 
             newConversations.append(conversation)

@@ -32,7 +32,7 @@
           ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid || auth.token.admin === true)",
           ".write": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
           "plan": {
-            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime'))"
+            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == '3-yearly' || newData.val() == '3yearly'))"
           },
           "deviceLimit": {
             ".validate": "!newData.exists() || newData.isNumber()"
@@ -226,7 +226,7 @@
           ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           "$fileId": {
-            ".validate": "(!data.exists() && newData.hasChildren(['fileName','fileSize','contentType','downloadUrl','source','status','timestamp'])) || data.exists()",
+            ".validate": "(!data.exists() && newData.hasChildren(['fileName','fileSize','contentType','source','status','timestamp']) && (newData.hasChild('r2Key') || newData.hasChild('downloadUrl'))) || data.exists()",
             "fileName": {
               ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 255)"
             },
@@ -237,6 +237,9 @@
               ".validate": "!newData.exists() || newData.isString()"
             },
             "downloadUrl": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "r2Key": {
               ".validate": "!newData.exists() || newData.isString()"
             },
             "source": {
@@ -1276,7 +1279,7 @@
         "plan": {
           ".read": "auth != null",
           ".write": "auth != null && auth.token.admin === true",
-          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime'))"
+          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'free' || newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == '3-yearly' || newData.val() == '3yearly'))"
         },
         "deviceLimit": {
           ".read": "auth != null",
@@ -1357,7 +1360,7 @@
           ".validate": "newData.isString()"
         },
         "currentPlan": {
-          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime' || newData.val() == 'free'))"
+          ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == '3-yearly' || newData.val() == '3yearly' || newData.val() == 'free'))"
         },
         "wasPremium": {
           ".validate": "!newData.exists() || newData.isBoolean()"
@@ -1390,6 +1393,40 @@
         }
       }
     },
+    "scheduled_deletions": {
+      ".read": "auth != null && auth.token.admin === true",
+      ".write": "auth != null && auth.token.admin === true",
+      "$userId": {
+        "requestedAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "scheduledDeletionAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "reason": {
+          ".validate": "!newData.exists() || newData.isString()"
+        }
+      }
+    },
+    "deleted_accounts": {
+      ".read": "auth != null && auth.token.admin === true",
+      ".write": "auth != null && auth.token.admin === true",
+      "$userId": {
+        "deletedAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "requestedAt": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "reason": {
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+        "status": {
+          ".validate": "!newData.exists() || newData.isString()"
+        }
+      },
+      ".indexOn": ["deletedAt", "status"]
+    },
     "subscription_records": {
       ".read": "auth != null && auth.token.admin === true",
       "$uid": {
@@ -1399,7 +1436,7 @@
           ".read": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
           ".write": "auth != null && (auth.uid == $uid || auth.token.admin === true)",
           "plan": {
-            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == 'lifetime' || newData.val() == 'free'))"
+            ".validate": "!newData.exists() || (newData.isString() && (newData.val() == 'monthly' || newData.val() == 'yearly' || newData.val() == '3-yearly' || newData.val() == '3yearly' || newData.val() == 'free'))"
           },
           "planExpiresAt": {
             ".validate": "!newData.exists() || newData.isNumber()"

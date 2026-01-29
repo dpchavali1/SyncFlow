@@ -26,6 +26,20 @@ struct CallHistoryEntry: Identifiable, Hashable {
         case blocked = "Blocked"
         case voicemail = "Voicemail"
 
+        /// Parse callType from string, case-insensitive
+        static func fromString(_ value: String) -> CallType? {
+            let lower = value.lowercased()
+            switch lower {
+            case "incoming", "1": return .incoming
+            case "outgoing", "2": return .outgoing
+            case "missed", "3": return .missed
+            case "rejected", "5": return .rejected
+            case "blocked", "6": return .blocked
+            case "voicemail", "4": return .voicemail
+            default: return CallType(rawValue: value)
+            }
+        }
+
         var icon: String {
             switch self {
             case .incoming:
@@ -68,11 +82,12 @@ struct CallHistoryEntry: Identifiable, Hashable {
     static func from(_ data: [String: Any], id: String) -> CallHistoryEntry? {
         guard let phoneNumber = data["phoneNumber"] as? String,
               let callTypeString = data["callType"] as? String,
-              let callType = CallType(rawValue: callTypeString) else {
+              let callType = CallType.fromString(callTypeString) else {
             return nil
         }
 
         // Handle callDate - Firebase stores Long as Double
+        // Also check for "date" and "timestamp" as alternative field names
         let callDate: Double
         if let dateDouble = data["callDate"] as? Double {
             callDate = dateDouble
@@ -80,6 +95,18 @@ struct CallHistoryEntry: Identifiable, Hashable {
             callDate = Double(dateInt)
         } else if let dateInt64 = data["callDate"] as? Int64 {
             callDate = Double(dateInt64)
+        } else if let dateDouble = data["date"] as? Double {
+            callDate = dateDouble
+        } else if let dateInt = data["date"] as? Int {
+            callDate = Double(dateInt)
+        } else if let dateInt64 = data["date"] as? Int64 {
+            callDate = Double(dateInt64)
+        } else if let timestampDouble = data["timestamp"] as? Double {
+            callDate = timestampDouble
+        } else if let timestampInt = data["timestamp"] as? Int {
+            callDate = Double(timestampInt)
+        } else if let timestampInt64 = data["timestamp"] as? Int64 {
+            callDate = Double(timestampInt64)
         } else {
             return nil
         }

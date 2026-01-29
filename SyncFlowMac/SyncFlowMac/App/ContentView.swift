@@ -97,6 +97,10 @@ struct ContentView: View {
             NotificationListView(notificationService: appState.notificationMirrorService)
                 .frame(minWidth: 400, minHeight: 350)
         }
+        .sheet(isPresented: $appState.showScheduledMessages) {
+            ScheduledMessagesView()
+                .environmentObject(appState)
+        }
     }
 }
 
@@ -110,12 +114,16 @@ struct MainView: View {
     @ObservedObject private var mediaControlService = MediaControlService.shared
     @State private var searchText = ""
     @State private var showKeyboardShortcuts = false
+    @State private var showAIAssistant = false
+    @State private var showSupportChat = false
 
     var body: some View {
         HStack(spacing: 0) {
             SideRail(
                 selectedTab: $appState.selectedTab,
-                onNewMessage: { appState.showNewMessage = true }
+                onNewMessage: { appState.showNewMessage = true },
+                onAIAssistant: { showAIAssistant = true },
+                onSupportChat: { showSupportChat = true }
             )
 
             Divider()
@@ -154,6 +162,8 @@ struct MainView: View {
                         ContactsView()
                     case .callHistory:
                         CallHistoryView()
+                    case .deals:
+                        DealsView()
                     }
                 }
 
@@ -223,6 +233,25 @@ struct MainView: View {
             .keyboardShortcut("/", modifiers: [.command, .shift])
             .hidden()
         )
+        // Keyboard shortcut: Cmd+Shift+A for AI Assistant
+        .background(
+            Button("") {
+                showAIAssistant = true
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .hidden()
+        )
+        // AI Assistant sheet
+        .sheet(isPresented: $showAIAssistant) {
+            AIAssistantView()
+                .environmentObject(messageStore)
+                .frame(minWidth: 500, minHeight: 600)
+        }
+        // Support Chat sheet
+        .sheet(isPresented: $showSupportChat) {
+            SupportChatView()
+                .environmentObject(appState)
+        }
     }
 }
 
@@ -231,6 +260,9 @@ struct MainView: View {
 struct SideRail: View {
     @Binding var selectedTab: AppTab
     let onNewMessage: () -> Void
+    var onAIAssistant: (() -> Void)? = nil
+    var onSupportChat: (() -> Void)? = nil
+    @State private var dealsIconPulse = false
 
     var body: some View {
         VStack(spacing: 18) {
@@ -246,20 +278,102 @@ struct SideRail: View {
                 .background(SyncFlowColors.divider)
 
             ForEach(AppTab.allCases, id: \.self) { tab in
-                Button(action: { selectedTab = tab }) {
-                    Image(systemName: tab.icon)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(selectedTab == tab ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
-                        .frame(width: 36, height: 36)
-                        .background(
+                if tab == .deals {
+                    // Prominent Deals button with gradient and animation
+                    Button(action: { selectedTab = tab }) {
+                        ZStack {
+                            // Animated glow effect
                             Circle()
-                                .fill(selectedTab == tab ? SyncFlowColors.primary.opacity(0.18) : Color.clear)
-                        )
+                                .fill(
+                                    RadialGradient(
+                                        colors: [Color.orange.opacity(0.4), Color.clear],
+                                        center: .center,
+                                        startRadius: 0,
+                                        endRadius: 25
+                                    )
+                                )
+                                .frame(width: 44, height: 44)
+                                .scaleEffect(dealsIconPulse ? 1.2 : 1.0)
+                                .opacity(dealsIconPulse ? 0.6 : 0.3)
+
+                            // Icon with gradient
+                            Image(systemName: selectedTab == tab ? "tag.fill" : "tag.fill")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(
+                                    LinearGradient(
+                                        colors: [Color.orange, Color.pink],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: 36, height: 36)
+                                .background(
+                                    Circle()
+                                        .fill(
+                                            selectedTab == tab
+                                                ? LinearGradient(colors: [Color.orange.opacity(0.25), Color.pink.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                                                : LinearGradient(colors: [Color.orange.opacity(0.12), Color.pink.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                                        )
+                                )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Discover Deals")
+                    .onAppear {
+                        // Subtle pulse animation
+                        withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                            dealsIconPulse = true
+                        }
+                    }
+                } else {
+                    Button(action: { selectedTab = tab }) {
+                        Image(systemName: tab.icon)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(selectedTab == tab ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                            .frame(width: 36, height: 36)
+                            .background(
+                                Circle()
+                                    .fill(selectedTab == tab ? SyncFlowColors.primary.opacity(0.18) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
 
             Spacer()
+
+            // AI Assistant button
+            if let onAIAssistant = onAIAssistant {
+                Button(action: onAIAssistant) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 16))
+                        .foregroundColor(SyncFlowColors.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("AI Assistant (Cmd+Shift+A)")
+            }
+
+            // Support Chat button
+            if let onSupportChat = onSupportChat {
+                Button(action: onSupportChat) {
+                    Image(systemName: "questionmark.bubble")
+                        .font(.system(size: 16))
+                        .foregroundColor(SyncFlowColors.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("AI Support Chat")
+                .padding(.bottom, 8)
+            }
 
             SettingsLink {
                 Image(systemName: "gearshape")
@@ -424,7 +538,7 @@ struct UsageLimitWarningBanner: View {
                     Text(stats.isMonthlyLimitExceeded ? "Monthly Upload Limit Reached" : "Storage Limit Reached")
                         .font(.headline)
 
-                    Text("MMS and attachments won't sync until you free up space.")
+                    Text("MMS and attachments won't sync. Clear data in Settings → Usage or upgrade.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -487,7 +601,7 @@ struct UsageLimitWarningBanner: View {
                         .tint(stats.isStorageLimitExceeded ? .red : .blue)
 
                     HStack {
-                        Text("After clearing data on Android, tap refresh above.")
+                        Text("Go to Settings → Usage to clear MMS data and free up storage.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                         Spacer()
@@ -517,14 +631,14 @@ struct UpgradeBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Upgrade to SyncFlow Pro")
                     .font(.headline)
-                Text("Unlock photo sync, 15GB storage, and remove this banner")
+                Text("Unlock photo sync, 500MB storage, and remove this banner")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             Spacer()
 
-            Text("$3.99/mo")
+            Text("$4.99/mo")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
 

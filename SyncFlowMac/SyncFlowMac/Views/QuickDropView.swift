@@ -120,8 +120,12 @@ struct QuickDropView: View {
         switch status.state {
         case .uploading:
             return "Sending to phone..."
+        case .downloading:
+            return "Receiving from phone..."
         case .sent:
             return "Sent to phone"
+        case .received:
+            return "Received from phone"
         case .failed:
             return status.error ?? "Failed to send"
         }
@@ -131,7 +135,11 @@ struct QuickDropView: View {
         switch status.state {
         case .uploading:
             return "arrow.up.circle.fill"
+        case .downloading:
+            return "arrow.down.circle.fill"
         case .sent:
+            return "checkmark.circle.fill"
+        case .received:
             return "checkmark.circle.fill"
         case .failed:
             return "exclamationmark.triangle.fill"
@@ -142,7 +150,11 @@ struct QuickDropView: View {
         switch status.state {
         case .uploading:
             return .accentColor
+        case .downloading:
+            return .accentColor
         case .sent:
+            return .green
+        case .received:
             return .green
         case .failed:
             return .red

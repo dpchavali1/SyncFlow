@@ -579,24 +579,10 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     private fun processIncomingMessage(messageData: Map<String, Any>) { /* Implementation */ }
     private fun processMessageUpdate(messageData: Map<String, Any>) { /* Implementation */ }
     private fun processMessageDeletion(messageId: String) {
-        scope.launch {
-            try {
-                val localId = when {
-                    messageId.startsWith("mms_") -> messageId.removePrefix("mms_").toLongOrNull()
-                    else -> messageId.toLongOrNull()
-                }
-                if (localId == null) {
-                    Log.w(TAG, "Cannot delete message with non-numeric id: $messageId")
-                    return@launch
-                }
-
-                val repo = SmsRepository(context)
-                val deleted = repo.deleteMessage(localId)
-                Log.i(TAG, "Deleted message from device: $messageId (success=$deleted)")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to delete message from device: $messageId", e)
-            }
-        }
+        // DISABLED: Do not delete local SMS messages without explicit user consent
+        // Remote deletion requests from Firebase should NOT automatically delete from device
+        // Users must manually delete messages if they want them removed
+        Log.d(TAG, "processMessageDeletion: DISABLED - will not delete local message $messageId without user consent")
     }
     private fun processIncomingCall(callData: Map<String, Any>) { /* Implementation */ }
     private fun processCallUpdate(callData: Map<String, Any>) { /* Implementation */ }

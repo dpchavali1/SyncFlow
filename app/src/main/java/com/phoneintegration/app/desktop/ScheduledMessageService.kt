@@ -49,6 +49,7 @@ class ScheduledMessageService(context: Context) {
      */
     fun startListening() {
         Log.d(TAG, "Starting scheduled message service")
+        database.goOnline()
         listenForScheduledMessages()
     }
 

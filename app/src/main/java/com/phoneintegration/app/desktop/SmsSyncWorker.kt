@@ -5,13 +5,15 @@ import android.util.Base64
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.work.*
-import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.MmsHelper
 import com.phoneintegration.app.SmsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.TimeUnit
 
 /**
@@ -280,13 +282,48 @@ class OutgoingMessageWorker(
         }
     }
 
-    private suspend fun downloadAttachment(url: String): ByteArray? {
+    /**
+     * Download attachment from R2 storage
+     */
+    private suspend fun downloadAttachment(r2Key: String): ByteArray? {
         return try {
-            val storageRef = FirebaseStorage.getInstance().getReferenceFromUrl(url)
-            val maxSize = 25L * 1024 * 1024
-            storageRef.getBytes(maxSize).await()
+            // Get presigned download URL from R2 via Cloud Function
+            val downloadUrlData = hashMapOf("r2Key" to r2Key)
+            val result = FirebaseFunctions.getInstance()
+                .getHttpsCallable("getR2DownloadUrl")
+                .call(downloadUrlData)
+                .await()
+
+            @Suppress("UNCHECKED_CAST")
+            val response = result.data as? Map<String, Any>
+            val downloadUrl = response?.get("downloadUrl") as? String
+                ?: throw Exception("Failed to get R2 download URL")
+
+            // Download from presigned URL
+            withContext(Dispatchers.IO) {
+                var connection: HttpURLConnection? = null
+                try {
+                    val urlObj = URL(downloadUrl)
+                    connection = urlObj.openConnection() as HttpURLConnection
+                    connection.requestMethod = "GET"
+                    connection.connectTimeout = 30000
+                    connection.readTimeout = 60000
+
+                    if (connection.responseCode in 200..299) {
+                        connection.inputStream.use { it.readBytes() }
+                    } else {
+                        Log.e(TAG, "Download failed with response code: ${connection.responseCode}")
+                        null
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error downloading from URL", e)
+                    null
+                } finally {
+                    connection?.disconnect()
+                }
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error downloading attachment", e)
+            Log.e(TAG, "Error downloading attachment from R2", e)
             null
         }
     }

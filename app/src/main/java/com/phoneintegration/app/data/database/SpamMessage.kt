@@ -86,4 +86,8 @@ interface SpamMessageDao {
     // Get most recent spam for a conversation
     @Query("SELECT * FROM spam_messages WHERE address = :address ORDER BY date DESC LIMIT 1")
     suspend fun getLatestSpamForAddress(address: String): SpamMessage?
+
+    // Get spam message by ID
+    @Query("SELECT * FROM spam_messages WHERE messageId = :messageId")
+    suspend fun getByMessageId(messageId: Long): SpamMessage?
 }

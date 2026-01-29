@@ -31,6 +31,10 @@ class MediaControlService: ObservableObject {
 
     /// Start listening for media status from phone
     func startListening(userId: String) {
+        if statusHandle != nil {
+            stopListening()
+        }
+
         currentUserId = userId
 
         let statusRef = database.reference()
@@ -39,8 +43,19 @@ class MediaControlService: ObservableObject {
             .child("media_status")
 
         statusHandle = statusRef.observe(.value) { [weak self] snapshot in
-            guard let self = self,
-                  let data = snapshot.value as? [String: Any] else { return }
+            guard let self = self else { return }
+
+            guard let data = snapshot.value as? [String: Any] else {
+                DispatchQueue.main.async {
+                    self.isPlaying = false
+                    self.trackTitle = nil
+                    self.trackArtist = nil
+                    self.trackAlbum = nil
+                    self.trackAppName = nil
+                    self.trackPackageName = nil
+                }
+                return
+            }
 
             DispatchQueue.main.async {
                 self.isPlaying = data["isPlaying"] as? Bool ?? false
@@ -58,7 +73,6 @@ class MediaControlService: ObservableObject {
                 }
             }
         }
-
     }
 
     /// Stop listening
@@ -160,6 +174,9 @@ class MediaControlService: ObservableObject {
         guard let userId = currentUserId else {
             return
         }
+
+        // Ensure Firebase is online before writing
+        database.goOnline()
 
         let commandRef = database.reference()
             .child("users")

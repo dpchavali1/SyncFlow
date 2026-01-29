@@ -108,6 +108,8 @@ class DNDSyncService: ObservableObject {
             return
         }
 
+        database.goOnline()
+
         let commandRef = database.reference()
             .child("users")
             .child(userId)

@@ -83,6 +83,7 @@ class PhoneStatusService(context: Context) {
      */
     fun startMonitoring() {
         Log.d(TAG, "Starting phone status monitoring")
+        database.goOnline()
         registerBatteryReceiver()
         registerSignalStrengthListener()
         registerNetworkCallback()

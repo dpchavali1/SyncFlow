@@ -59,6 +59,7 @@ class DNDSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting DND sync")
+        database.goOnline()
         registerDndReceiver()
         startListeningForCommands()
         syncDndStatus()

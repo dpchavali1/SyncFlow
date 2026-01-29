@@ -12,12 +12,14 @@ import android.provider.MediaStore
 import android.util.Log
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
-import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.auth.UnifiedIdentityManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.text.SimpleDateFormat
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.*
 
 /**
@@ -30,7 +32,7 @@ import java.util.*
 class PhotoSyncService(context: Context) {
     private val context: Context = context.applicationContext
     private val database = FirebaseDatabase.getInstance()
-    private val storage = FirebaseStorage.getInstance()
+    private val functions = FirebaseFunctions.getInstance()
     private val unifiedIdentityManager = UnifiedIdentityManager.getInstance(context)
 
     private var contentObserver: ContentObserver? = null
@@ -70,7 +72,7 @@ class PhotoSyncService(context: Context) {
             val now = System.currentTimeMillis()
 
             when (planRaw) {
-                "lifetime" -> true
+                "lifetime", "3year" -> true
                 "monthly", "yearly", "paid" -> planExpiresAt?.let { it > now } ?: true
                 else -> false // Trial users and free users don't have access
             }
@@ -102,6 +104,7 @@ class PhotoSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting photo sync")
+        database.goOnline()
 
         // Sync recent photos on startup (with premium check)
         scope.launch {
@@ -314,7 +317,7 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Upload a photo to Firebase Storage
+     * Upload a photo to R2 storage via Cloud Functions
      */
     private suspend fun uploadPhoto(userId: String, photo: LocalPhoto) {
         try {
@@ -324,43 +327,100 @@ class PhotoSyncService(context: Context) {
             val thumbnail = createThumbnail(photo.contentUri) ?: return
             val thumbnailBytes = compressThumbnail(thumbnail)
 
-            // Upload to Firebase Storage
             val photoId = UUID.randomUUID().toString()
-            val storageRef = storage.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(PHOTOS_PATH)
-                .child("$photoId.jpg")
+            val fileName = "$photoId.jpg"
 
-            storageRef.putBytes(thumbnailBytes).await()
-            val downloadUrl = storageRef.downloadUrl.await().toString()
-
-            // Save metadata to Realtime Database
-            val metadataRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(PHOTOS_PATH)
-                .child(photoId)
-
-            val metadata = mapOf(
-                "id" to photoId,
-                "originalId" to photo.id,
-                "fileName" to photo.name,
-                "dateTaken" to photo.dateTaken,
-                "thumbnailUrl" to downloadUrl,
-                "width" to photo.width,
-                "height" to photo.height,
-                "size" to photo.size,
-                "mimeType" to photo.mimeType,
-                "syncedAt" to ServerValue.TIMESTAMP
+            // Step 1: Get presigned upload URL from R2
+            val uploadUrlData = hashMapOf(
+                "fileName" to fileName,
+                "contentType" to "image/jpeg",
+                "fileSize" to thumbnailBytes.size,
+                "transferType" to "photo"
             )
 
-            metadataRef.setValue(metadata).await()
+            val uploadUrlResult = functions
+                .getHttpsCallable("getR2UploadUrl")
+                .call(uploadUrlData)
+                .await()
 
-            Log.d(TAG, "Photo uploaded successfully: ${photo.name}")
+            @Suppress("UNCHECKED_CAST")
+            val uploadResponse = uploadUrlResult.data as? Map<String, Any>
+            val uploadUrl = uploadResponse?.get("uploadUrl") as? String
+            val r2Key = uploadResponse?.get("r2Key") as? String
+            val fileId = uploadResponse?.get("fileId") as? String
+
+            if (uploadUrl == null || r2Key == null || fileId == null) {
+                Log.e(TAG, "Failed to get R2 upload URL for photo: ${photo.name}")
+                return
+            }
+
+            // Step 2: Upload directly to R2 via presigned URL
+            val uploaded = withContext(Dispatchers.IO) {
+                uploadToR2(uploadUrl, thumbnailBytes, "image/jpeg")
+            }
+
+            if (!uploaded) {
+                Log.e(TAG, "Failed to upload photo to R2: ${photo.name}")
+                return
+            }
+
+            // Step 3: Confirm upload with Cloud Function (this also stores metadata)
+            val confirmData = hashMapOf(
+                "fileId" to fileId,
+                "r2Key" to r2Key,
+                "fileName" to fileName,
+                "fileSize" to thumbnailBytes.size,
+                "contentType" to "image/jpeg",
+                "transferType" to "photo",
+                "photoMetadata" to hashMapOf(
+                    "originalId" to photo.id,
+                    "dateTaken" to photo.dateTaken,
+                    "width" to photo.width,
+                    "height" to photo.height,
+                    "size" to photo.size,
+                    "mimeType" to photo.mimeType
+                )
+            )
+
+            functions
+                .getHttpsCallable("confirmR2Upload")
+                .call(confirmData)
+                .await()
+
+            Log.d(TAG, "Photo uploaded successfully to R2: ${photo.name} (key: $r2Key)")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error uploading photo: ${photo.name}", e)
+        }
+    }
+
+    /**
+     * Upload bytes directly to R2 via presigned URL
+     */
+    private fun uploadToR2(uploadUrl: String, data: ByteArray, contentType: String): Boolean {
+        var connection: HttpURLConnection? = null
+        try {
+            val url = URL(uploadUrl)
+            connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", contentType)
+            connection.setRequestProperty("Content-Length", data.size.toString())
+            connection.connectTimeout = 30000
+            connection.readTimeout = 60000
+
+            connection.outputStream.use { outputStream ->
+                outputStream.write(data)
+                outputStream.flush()
+            }
+
+            val responseCode = connection.responseCode
+            return responseCode in 200..299
+        } catch (e: Exception) {
+            Log.e(TAG, "Error uploading to R2", e)
+            return false
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -416,7 +476,7 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Clean up old photos from Firebase (keep only recent ones)
+     * Clean up old photos from R2 and database (keep only recent ones)
      */
     private suspend fun cleanupOldPhotos(userId: String) {
         try {
@@ -436,18 +496,19 @@ class PhotoSyncService(context: Context) {
                     if (deleted >= photosToDelete) break
 
                     val photoId = child.key ?: continue
+                    val r2Key = child.child("r2Key").getValue(String::class.java)
 
-                    // Delete from Storage
-                    try {
-                        storage.reference
-                            .child(USERS_PATH)
-                            .child(userId)
-                            .child(PHOTOS_PATH)
-                            .child("$photoId.jpg")
-                            .delete()
-                            .await()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error deleting photo from storage: $photoId", e)
+                    // Delete from R2 if r2Key exists
+                    if (r2Key != null) {
+                        try {
+                            val deleteData = hashMapOf("r2Key" to r2Key)
+                            functions
+                                .getHttpsCallable("deleteR2File")
+                                .call(deleteData)
+                                .await()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error deleting photo from R2: $r2Key", e)
+                        }
                     }
 
                     // Delete from Database
@@ -472,7 +533,7 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Clean up duplicate photos in Firebase (keeps only the most recent upload for each originalId)
+     * Clean up duplicate photos in R2 and database (keeps only the most recent upload for each originalId)
      */
     suspend fun cleanupDuplicates() {
         try {
@@ -487,16 +548,18 @@ class PhotoSyncService(context: Context) {
 
             val snapshot = photosRef.get().await()
 
-            // Group photos by originalId
-            val photosByOriginalId = mutableMapOf<Long, MutableList<Pair<String, Long>>>()
+            // Group photos by originalId, including r2Key for deletion
+            data class PhotoInfo(val photoId: String, val syncedAt: Long, val r2Key: String?)
+            val photosByOriginalId = mutableMapOf<Long, MutableList<PhotoInfo>>()
 
             for (child in snapshot.children) {
                 val photoId = child.key ?: continue
                 val originalId = child.child("originalId").getValue(Long::class.java) ?: continue
                 val syncedAt = child.child("syncedAt").getValue(Long::class.java) ?: 0L
+                val r2Key = child.child("r2Key").getValue(String::class.java)
 
                 photosByOriginalId.getOrPut(originalId) { mutableListOf() }
-                    .add(Pair(photoId, syncedAt))
+                    .add(PhotoInfo(photoId, syncedAt, r2Key))
             }
 
             var deletedCount = 0
@@ -505,30 +568,30 @@ class PhotoSyncService(context: Context) {
             for ((originalId, photos) in photosByOriginalId) {
                 if (photos.size > 1) {
                     // Sort by syncedAt descending (most recent first)
-                    val sorted = photos.sortedByDescending { it.second }
+                    val sorted = photos.sortedByDescending { it.syncedAt }
 
                     // Delete all but the first (most recent)
                     for (i in 1 until sorted.size) {
-                        val (photoIdToDelete, _) = sorted[i]
+                        val photoToDelete = sorted[i]
 
-                        try {
-                            // Delete from Storage
-                            storage.reference
-                                .child(USERS_PATH)
-                                .child(userId)
-                                .child(PHOTOS_PATH)
-                                .child("$photoIdToDelete.jpg")
-                                .delete()
-                                .await()
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error deleting duplicate photo from storage: $photoIdToDelete", e)
+                        // Delete from R2 if r2Key exists
+                        if (photoToDelete.r2Key != null) {
+                            try {
+                                val deleteData = hashMapOf("r2Key" to photoToDelete.r2Key)
+                                functions
+                                    .getHttpsCallable("deleteR2File")
+                                    .call(deleteData)
+                                    .await()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error deleting duplicate photo from R2: ${photoToDelete.r2Key}", e)
+                            }
                         }
 
                         // Delete from Database
-                        photosRef.child(photoIdToDelete).removeValue().await()
+                        photosRef.child(photoToDelete.photoId).removeValue().await()
                         deletedCount++
 
-                        Log.d(TAG, "Deleted duplicate photo: $photoIdToDelete (originalId: $originalId)")
+                        Log.d(TAG, "Deleted duplicate photo: ${photoToDelete.photoId} (originalId: $originalId)")
                     }
                 }
             }

@@ -105,6 +105,8 @@ class ScheduledMessageService: ObservableObject {
             throw ScheduledMessageError.notAuthenticated
         }
 
+        database.goOnline()
+
         let messageId = UUID().uuidString
         let messagesRef = database.reference()
             .child("users")
@@ -145,6 +147,8 @@ class ScheduledMessageService: ObservableObject {
             throw ScheduledMessageError.notAuthenticated
         }
 
+        database.goOnline()
+
         let messageRef = database.reference()
             .child("users")
             .child(userId)
@@ -173,6 +177,8 @@ class ScheduledMessageService: ObservableObject {
             throw ScheduledMessageError.notAuthenticated
         }
 
+        database.goOnline()
+
         let messageRef = database.reference()
             .child("users")
             .child(userId)
@@ -199,6 +205,8 @@ class ScheduledMessageService: ObservableObject {
         guard let userId = currentUserId else {
             throw ScheduledMessageError.notAuthenticated
         }
+
+        database.goOnline()
 
         let messageRef = database.reference()
             .child("users")

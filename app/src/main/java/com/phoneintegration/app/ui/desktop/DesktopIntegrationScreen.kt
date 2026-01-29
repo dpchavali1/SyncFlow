@@ -27,6 +27,8 @@ import com.phoneintegration.app.desktop.NotificationMirrorService
 import com.phoneintegration.app.desktop.PhotoSyncService
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.CallMonitorService
+import com.phoneintegration.app.ui.components.getRegisteredPhoneNumber
+import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -554,10 +556,69 @@ fun DesktopIntegrationScreen(
                 )
             }
 
-            // Device limit info card with User ID
+            // Device limit info card with User ID and Phone Number
             item {
-                val currentUserId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: "Not signed in"
+                val currentUser = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
+                val currentUserId = currentUser?.uid ?: "Not signed in"
+                var registeredPhone by remember { mutableStateOf("Loading...") }
                 val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                var showPhoneRegistrationDialog by remember { mutableStateOf(false) }
+
+                // Phone registration dialog
+                if (showPhoneRegistrationDialog) {
+                    PhoneNumberRegistrationDialog(
+                        onDismiss = { showPhoneRegistrationDialog = false },
+                        onRegistered = {
+                            showPhoneRegistrationDialog = false
+                            // Refresh the displayed phone number
+                            val newPhone = getRegisteredPhoneNumber(context)
+                            if (!newPhone.isNullOrEmpty()) {
+                                registeredPhone = newPhone
+                            }
+                        }
+                    )
+                }
+
+                // Fetch phone number - check local storage first, then Firebase
+                LaunchedEffect(currentUserId) {
+                    if (currentUserId != "Not signed in") {
+                        // First, try local SharedPreferences (most reliable)
+                        val localPhone = getRegisteredPhoneNumber(context)
+                        android.util.Log.d("DesktopIntegrationScreen", "Local registered phone: $localPhone")
+
+                        if (!localPhone.isNullOrEmpty()) {
+                            registeredPhone = localPhone
+                            android.util.Log.d("DesktopIntegrationScreen", "Using local phone: $localPhone")
+                        } else {
+                            // Fall back to Firebase at correct path: users/{userId}/phoneNumber
+                            try {
+                                val database = com.google.firebase.database.FirebaseDatabase.getInstance()
+                                database.goOnline()
+
+                                android.util.Log.d("DesktopIntegrationScreen", "Fetching phone from Firebase for user: $currentUserId")
+
+                                // Correct path: users/{userId}/phoneNumber (NOT devices/phoneNumber)
+                                val phoneSnapshot = database.reference
+                                    .child("users")
+                                    .child(currentUserId)
+                                    .child("phoneNumber")
+                                    .get()
+                                    .await()
+
+                                val phone = phoneSnapshot.getValue(String::class.java)
+                                android.util.Log.d("DesktopIntegrationScreen", "Phone from users/{uid}/phoneNumber: $phone")
+
+                                registeredPhone = phone ?: "Not registered"
+                                android.util.Log.d("DesktopIntegrationScreen", "Final registeredPhone: $registeredPhone")
+                            } catch (e: Exception) {
+                                android.util.Log.e("DesktopIntegrationScreen", "Error fetching phone: ${e.message}", e)
+                                registeredPhone = "Not registered"
+                            }
+                        }
+                    } else {
+                        registeredPhone = "Not signed in"
+                    }
+                }
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -601,6 +662,66 @@ fun DesktopIntegrationScreen(
                                     contentDescription = "Copy User ID",
                                     modifier = Modifier.size(18.dp)
                                 )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        // Registered Phone Number for Video Calls
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Video Call Number",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.VideoCall,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = if (registeredPhone != "Not registered")
+                                            MaterialTheme.colorScheme.primary
+                                        else
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = registeredPhone,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (registeredPhone != "Not registered")
+                                            MaterialTheme.colorScheme.onSurface
+                                        else
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            if (registeredPhone != "Not registered" && registeredPhone != "Loading...") {
+                                // Copy button only - no edit to maintain call history integrity
+                                IconButton(
+                                    onClick = {
+                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(registeredPhone))
+                                    }
+                                ) {
+                                    Icon(
+                                        Icons.Filled.ContentCopy,
+                                        contentDescription = "Copy Phone Number",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            } else if (registeredPhone == "Not registered") {
+                                // Register button for users who skipped initial registration
+                                TextButton(
+                                    onClick = { showPhoneRegistrationDialog = true }
+                                ) {
+                                    Text("Register")
+                                }
                             }
                         }
 

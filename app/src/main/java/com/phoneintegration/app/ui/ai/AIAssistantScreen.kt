@@ -12,8 +12,17 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.outlined.AccountBalance
+import androidx.compose.material.icons.outlined.LocalShipping
+import androidx.compose.material.icons.outlined.Receipt
+import androidx.compose.material.icons.outlined.ShoppingCart
+import androidx.compose.material.icons.outlined.TrendingUp
+import androidx.compose.material.icons.outlined.VpnKey
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,6 +42,22 @@ import kotlin.math.min
 import com.phoneintegration.app.MessageCategory
 
 data class ChatMessage(val role: String, val content: String)
+data class QuickAction(
+    val icon: ImageVector,
+    val title: String,
+    val query: String,
+    val color: Long
+)
+
+val QUICK_ACTIONS = listOf(
+    QuickAction(Icons.Outlined.TrendingUp, "Spending", "How much did I spend this month?", 0xFF2196F3),
+    QuickAction(Icons.Outlined.Receipt, "Bills", "Show my upcoming bills", 0xFFFF9800),
+    QuickAction(Icons.Outlined.LocalShipping, "Packages", "Track my packages", 0xFF4CAF50),
+    QuickAction(Icons.Outlined.AccountBalance, "Balance", "What is my account balance?", 0xFF9C27B0),
+    QuickAction(Icons.Outlined.VpnKey, "OTPs", "Show my OTP codes", 0xFFF44336),
+    QuickAction(Icons.Outlined.ShoppingCart, "Transactions", "List my transactions", 0xFF009688),
+)
+
 data class Transaction(
     val amount: Double,
     val date: Long,
@@ -610,6 +635,22 @@ Try asking:
                         )
                     }
 
+                    // New Chat button - show when conversation exists
+                    if (conversation.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                conversation = emptyList()
+                                query = ""
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = "New Chat",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
                     IconButton(onClick = onDismiss) {
                         Icon(
                             Icons.Default.Close,
@@ -631,29 +672,67 @@ Try asking:
 
                 if (conversation.isEmpty()) {
 
-                    Column(
+                    LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
+                            .padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text(
-                            "🧠",
-                            style = MaterialTheme.typography.displayLarge,
-                            modifier = Modifier.alpha(0.25f)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            "Ask anything about your messages!",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            "Example: \"Amazon transactions\"",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        item { Spacer(modifier = Modifier.height(8.dp)) }
+
+                        // Smart Digest Card - show if transactions available
+                        if (transactions.isNotEmpty()) {
+                            item {
+                                SmartDigestCard(
+                                    transactions = transactions,
+                                    formatCurrency = ::formatCurrency
+                                )
+                            }
+                        }
+
+                        // Welcome header
+                        item {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    "How can I help you?",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "Ask about spending, bills, packages, and more",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Quick Action Cards Grid
+                        item {
+                            QuickActionGrid(
+                                actions = QUICK_ACTIONS,
+                                onActionClick = { action ->
+                                    query = action.query
+                                    conversation += ChatMessage("user", action.query)
+                                    isLoading = true
+                                    scope.launch {
+                                        val response = try {
+                                            aiService.chatWithAI(action.query, messages, emptyList())
+                                        } catch (e: Exception) {
+                                            "⚠️ Error: ${e.message ?: "Unknown error occurred"}"
+                                        }
+                                        conversation += ChatMessage("assistant", response)
+                                        isLoading = false
+                                        query = ""
+                                    }
+                                }
+                            )
+                        }
+
+                        item { Spacer(modifier = Modifier.height(16.dp)) }
                     }
 
                 } else {
@@ -716,6 +795,186 @@ Try asking:
         }
     }
 }
+// -------------------------------------------------------
+// SMART DIGEST CARD
+// -------------------------------------------------------
+
+@Composable
+fun SmartDigestCard(
+    transactions: List<Transaction>,
+    formatCurrency: (Double, String) -> String
+) {
+    val calendar = Calendar.getInstance()
+    calendar.set(Calendar.DAY_OF_MONTH, 1)
+    calendar.set(Calendar.HOUR_OF_DAY, 0)
+    calendar.set(Calendar.MINUTE, 0)
+    calendar.set(Calendar.SECOND, 0)
+    val monthStart = calendar.timeInMillis
+
+    calendar.add(Calendar.MONTH, -1)
+    val lastMonthStart = calendar.timeInMillis
+    calendar.add(Calendar.MONTH, 1)
+    val lastMonthEnd = monthStart
+
+    val thisMonthTxns = transactions.filter { it.date >= monthStart }
+    val lastMonthTxns = transactions.filter { it.date >= lastMonthStart && it.date < lastMonthEnd }
+
+    val totalThisMonth = thisMonthTxns.sumOf { it.amount }
+    val totalLastMonth = lastMonthTxns.sumOf { it.amount }
+    val currency = thisMonthTxns.firstOrNull()?.currency ?: transactions.firstOrNull()?.currency ?: "USD"
+
+    val spendingChange = if (totalLastMonth > 0) {
+        ((totalThisMonth - totalLastMonth) / totalLastMonth * 100).toInt()
+    } else 0
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+        tonalElevation = 2.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "📊 This Month",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        formatCurrency(totalThisMonth, currency),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (totalLastMonth > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (spendingChange >= 0) "↑ $spendingChange%" else "↓ ${-spendingChange}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (spendingChange > 0)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                " vs last month",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        "${thisMonthTxns.size}",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "transactions",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------
+// QUICK ACTION GRID
+// -------------------------------------------------------
+
+@Composable
+fun QuickActionGrid(
+    actions: List<QuickAction>,
+    onActionClick: (QuickAction) -> Unit
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Display in 2 columns
+        actions.chunked(2).forEach { rowActions ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowActions.forEach { action ->
+                    QuickActionCard(
+                        action = action,
+                        onClick = { onActionClick(action) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                // Fill empty space if odd number
+                if (rowActions.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun QuickActionCard(
+    action: QuickAction,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.clickable { onClick() },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        shadowElevation = 1.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(
+                        color = androidx.compose.ui.graphics.Color(action.color).copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(8.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = action.icon,
+                    contentDescription = action.title,
+                    tint = androidx.compose.ui.graphics.Color(action.color),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = action.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
 // -------------------------------------------------------
 // CHAT BUBBLE
 // -------------------------------------------------------

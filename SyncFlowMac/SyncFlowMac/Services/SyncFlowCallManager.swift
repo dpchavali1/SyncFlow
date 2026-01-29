@@ -104,12 +104,22 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     private let database = Database.database()
 
+    /// Ensure Firebase is online before write operations
+    private func ensureOnline() {
+        database.goOnline()
+    }
+
     // Firebase listeners
     private var callListenerHandle: DatabaseHandle?
     private var answerListenerHandle: DatabaseHandle?
     private var iceListenerHandle: DatabaseHandle?
     private var statusListenerHandle: DatabaseHandle?
     private var currentCallRef: DatabaseReference?
+
+    /// Get the correct user ID - prefer stored paired user ID over auth.currentUser
+    private var currentUserId: String? {
+        UserDefaults.standard.string(forKey: "syncflow_user_id") ?? Auth.auth().currentUser?.uid
+    }
 
     // User-to-user call tracking
     private var isUserCall: Bool = false
@@ -157,6 +167,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         calleeName: String,
         isVideo: Bool
     ) async throws -> String {
+        ensureOnline()
         await MainActor.run {
             callState = .initializing
         }
@@ -216,6 +227,8 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     /// Answer an incoming call
     func answerCall(userId: String, callId: String, withVideo: Bool) async throws {
+        ensureOnline()
+
         await MainActor.run {
             callState = .connecting
         }
@@ -270,6 +283,8 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     /// Reject an incoming call
     func rejectCall(userId: String, callId: String) async throws {
+        ensureOnline()
+
         let callRef = database.reference()
             .child("users")
             .child(userId)
@@ -289,6 +304,8 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     /// End the current call
     func endCall() async throws {
+        ensureOnline()
+
         // For user-to-user calls, delegate to endUserCall
         if isUserCall {
             print("SyncFlowCallManager: endCall() - delegating to endUserCall() for user call")
@@ -299,7 +316,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         defer { cleanup() }
 
         guard let call = currentCall,
-              let userId = Auth.auth().currentUser?.uid else {
+              let userId = currentUserId else {
             print("SyncFlowCallManager: endCall() - no current call or not authenticated")
             return
         }
@@ -513,7 +530,9 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         recipientName: String,
         isVideo: Bool
     ) async throws -> String {
-        guard let myUid = Auth.auth().currentUser?.uid else {
+        ensureOnline()
+
+        guard let myUid = currentUserId else {
             throw SyncFlowCallError.notAuthenticated
         }
 
@@ -902,21 +921,25 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         let deviceId = getDeviceId()
         let deviceName = Host.current().localizedName ?? "Mac"
 
-        let device = SyncFlowDevice(
-            id: deviceId,
-            name: deviceName,
-            platform: "macos",
-            online: online,
-            lastSeen: Date()
-        )
-
         let deviceRef = database.reference()
             .child("users")
             .child(userId)
             .child("devices")
             .child(deviceId)
 
-        try await deviceRef.setValue(device.toDict())
+        // Use ServerValue.timestamp() for proper time sync with Android
+        let deviceData: [String: Any] = [
+            "id": deviceId,
+            "name": deviceName,
+            "platform": "macos",
+            "online": online,
+            "lastSeen": ServerValue.timestamp()
+        ]
+
+        ensureOnline()
+        print("[SyncFlowCallManager] Updating device status: id=\(deviceId), platform=macos, online=\(online)")
+        try await deviceRef.setValue(deviceData)
+        print("[SyncFlowCallManager] Device status updated successfully")
 
         // Set disconnect handler
         if online {
@@ -1026,12 +1049,12 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     /// Answer an incoming user-to-user call
     func answerUserCall(callId: String, withVideo: Bool, userId: String? = nil) async throws {
-        // Use provided userId or fall back to Auth
+        // Use provided userId or fall back to stored user ID
         let myUid: String
         if let providedUserId = userId {
             myUid = providedUserId
-        } else if let authUid = Auth.auth().currentUser?.uid {
-            myUid = authUid
+        } else if let storedUid = currentUserId {
+            myUid = storedUid
         } else {
             print("SyncFlowCallManager: answerUserCall - not authenticated")
             throw SyncFlowCallError.notAuthenticated
@@ -1155,12 +1178,12 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     /// Reject an incoming user-to-user call
     func rejectUserCall(callId: String, userId: String? = nil) async throws {
-        // Use provided userId or fall back to Auth
+        // Use provided userId or fall back to stored user ID
         let myUid: String
         if let providedUserId = userId {
             myUid = providedUserId
-        } else if let authUid = Auth.auth().currentUser?.uid {
-            myUid = authUid
+        } else if let storedUid = currentUserId {
+            myUid = storedUid
         } else {
             print("SyncFlowCallManager: rejectUserCall - not authenticated")
             throw SyncFlowCallError.notAuthenticated
@@ -1192,7 +1215,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         Thread.callStackSymbols.prefix(10).forEach { print("  \($0)") }
 
         guard let call = currentCall,
-              let myUid = Auth.auth().currentUser?.uid else {
+              let myUid = currentUserId else {
             print("SyncFlowCallManager: endUserCall() - no current call or not authenticated")
             return
         }
@@ -1873,7 +1896,7 @@ extension SyncFlowCallManager: RTCPeerConnectionDelegate {
         print("SyncFlowCallManager: ICE candidate generated")
 
         guard let call = currentCall,
-              let userId = Auth.auth().currentUser?.uid else {
+              let userId = currentUserId else {
             return
         }
 

@@ -105,6 +105,8 @@ class VoicemailSyncService: ObservableObject {
     func markAsRead(_ voicemailId: String) async throws {
         guard let userId = currentUserId else { return }
 
+        database.goOnline()
+
         let voicemailRef = database.reference()
             .child("users")
             .child(userId)
@@ -126,6 +128,8 @@ class VoicemailSyncService: ObservableObject {
     /// Delete a voicemail
     func deleteVoicemail(_ voicemailId: String) async throws {
         guard let userId = currentUserId else { return }
+
+        database.goOnline()
 
         let voicemailRef = database.reference()
             .child("users")

@@ -51,6 +51,7 @@ class VoicemailSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting voicemail sync")
+        database.goOnline()
         registerVoicemailObserver()
         syncVoicemails()
     }

@@ -1,24 +1,24 @@
 {
   "identifier" : "DBFC4D62-A7D2-4B4E-9A12-3F8C5E6A1B2D",
   "nonRenewingSubscriptions" : [
-
-  ],
-  "products" : [
     {
-      "displayPrice" : "99.99",
+      "displayPrice" : "79.99",
       "familyShareable" : false,
       "internalID" : "F1E2D3C4-B5A6-7890-1234-567890ABCDEF",
       "localizations" : [
         {
-          "description" : "One-time purchase for unlimited lifetime access to all features",
-          "displayName" : "Lifetime",
+          "description" : "3 years of SyncFlow Pro access - Best Value",
+          "displayName" : "3-Year Plan",
           "locale" : "en_US"
         }
       ],
-      "productID" : "com.syncflow.lifetime",
-      "referenceName" : "Lifetime Access",
-      "type" : "NonConsumable"
+      "productID" : "com.syncflow.3year",
+      "referenceName" : "3-Year Plan",
+      "type" : "NonRenewingSubscription"
     }
+  ],
+  "products" : [
+
   ],
   "settings" : {
     "_applicationInternalID" : "1234567890",
@@ -79,7 +79,11 @@
     {
       "id" : "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
       "localizations" : [
-
+        {
+          "description" : "SyncFlow Pro subscription plans",
+          "displayName" : "SyncFlow Pro",
+          "locale" : "en_US"
+        }
       ],
       "name" : "SyncFlow Pro",
       "subscriptions" : [
@@ -90,7 +94,7 @@
           "codeOffers" : [
 
           ],
-          "displayPrice" : "3.99",
+          "displayPrice" : "4.99",
           "familyShareable" : false,
           "groupNumber" : 1,
           "internalID" : "B2C3D4E5-F6A7-8901-2345-678901BCDEFG",
@@ -115,14 +119,14 @@
           "codeOffers" : [
 
           ],
-          "displayPrice" : "29.99",
+          "displayPrice" : "39.99",
           "familyShareable" : false,
           "groupNumber" : 2,
           "internalID" : "C3D4E5F6-A7B8-9012-3456-789012CDEFGH",
           "introductoryOffer" : null,
           "localizations" : [
             {
-              "description" : "Full access to all SyncFlow Pro features - Save 37%",
+              "description" : "Full access to all SyncFlow Pro features - Save 33%",
               "displayName" : "Yearly",
               "locale" : "en_US"
             }

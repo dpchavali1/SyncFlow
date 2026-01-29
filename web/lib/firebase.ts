@@ -1799,7 +1799,7 @@ export const cleanupExpiredSessions = async (userId: string, olderThanHours: num
   return deletedCount
 }
 
-// Clean up old file transfers (older than specified days)
+// Clean up old file transfers (older than specified days) - includes R2 file cleanup
 export const cleanupOldFileTransfers = async (userId: string, olderThanDays: number = 7): Promise<number> => {
   const cutoff = Date.now() - (olderThanDays * 24 * 60 * 60 * 1000)
   let deletedCount = 0
@@ -1810,10 +1810,20 @@ export const cleanupOldFileTransfers = async (userId: string, olderThanDays: num
 
     if (snapshot.exists()) {
       const deletePromises: Promise<void>[] = []
+      const deleteR2FileFn = httpsCallable(functions, 'deleteR2File')
+
       snapshot.forEach((child) => {
         const data = child.val()
         const timestamp = data.timestamp || data.startedAt || 0
         if (timestamp < cutoff) {
+          // Delete R2 file if r2Key exists
+          if (data.r2Key) {
+            deletePromises.push(
+              deleteR2FileFn({ r2Key: data.r2Key })
+                .catch((err: any) => console.warn(`Failed to delete R2 file ${data.r2Key}:`, err.message))
+            )
+          }
+          // Delete database record
           deletePromises.push(remove(child.ref))
           deletedCount++
         }
@@ -1856,7 +1866,7 @@ export const cleanupAbandonedPairings = async (userId: string, olderThanHours: n
   return deletedCount
 }
 
-// Clean up orphaned media (older than specified days)
+// Clean up orphaned media (older than specified days) - includes R2 file cleanup
 export const cleanupOrphanedMedia = async (userId: string, olderThanDays: number = 30): Promise<number> => {
   const cutoff = Date.now() - (olderThanDays * 24 * 60 * 60 * 1000)
   let deletedCount = 0
@@ -1867,10 +1877,20 @@ export const cleanupOrphanedMedia = async (userId: string, olderThanDays: number
 
     if (snapshot.exists()) {
       const deletePromises: Promise<void>[] = []
+      const deleteR2FileFn = httpsCallable(functions, 'deleteR2File')
+
       snapshot.forEach((child) => {
         const data = child.val()
         const uploadedAt = data.uploadedAt || data.timestamp || 0
         if (uploadedAt < cutoff) {
+          // Delete R2 file if r2Key exists
+          if (data.r2Key) {
+            deletePromises.push(
+              deleteR2FileFn({ r2Key: data.r2Key })
+                .catch((err: any) => console.warn(`Failed to delete R2 media file ${data.r2Key}:`, err.message))
+            )
+          }
+          // Delete database record
           deletePromises.push(remove(child.ref))
           deletedCount++
         }
@@ -2224,14 +2244,16 @@ export const cleanupUserDataByPlan = async (userId: string): Promise<{
   }
 }
 
-// Delete users with no devices (orphaned accounts that can't access messages)
+// Delete users with no devices (orphaned accounts that can't access messages) - uses deleteUserAccount for R2 cleanup
 export const deleteUsersWithoutDevices = async (): Promise<{
   success: boolean
   deletedCount: number
+  r2FilesDeleted: number
   details: string[]
 }> => {
   const details: string[] = []
   let deletedCount = 0
+  let r2FilesDeleted = 0
 
   try {
     console.log('Starting deletion of users without devices...')
@@ -2246,11 +2268,16 @@ export const deleteUsersWithoutDevices = async (): Promise<{
         // Check if user has no devices
         if (!user.devices || Object.keys(user.devices).length === 0) {
           try {
-            const userRef = ref(database, `${USERS_PATH}/${userId}`)
-            await remove(userRef)
-            deletedCount++
-            details.push(`✓ Deleted user ${userId.substring(0, 20)}... (no devices)`)
-            console.log(`Deleted user without devices: ${userId}`)
+            // Use deleteUserAccount which handles R2 cleanup
+            const result = await deleteUserAccount(userId)
+            if (result.success) {
+              deletedCount++
+              r2FilesDeleted += result.deletedData.r2Files
+              details.push(`✓ Deleted user ${userId.substring(0, 20)}... (no devices, ${result.deletedData.r2Files} R2 files)`)
+              console.log(`Deleted user without devices: ${userId}`)
+            } else {
+              details.push(`✗ Failed to delete ${userId.substring(0, 20)}...: ${result.errors.join(', ')}`)
+            }
           } catch (deleteError) {
             details.push(`✗ Failed to delete ${userId.substring(0, 20)}...: ${deleteError}`)
             console.error(`Failed to delete user ${userId}:`, deleteError)
@@ -2259,13 +2286,13 @@ export const deleteUsersWithoutDevices = async (): Promise<{
       }
     }
 
-    console.log(`Deleted ${deletedCount} users without devices`)
-    addAdminAuditLog('delete_users_no_devices', 'system', `Deleted ${deletedCount} users without devices`)
+    console.log(`Deleted ${deletedCount} users without devices, ${r2FilesDeleted} R2 files`)
+    addAdminAuditLog('delete_users_no_devices', 'system', `Deleted ${deletedCount} users without devices, ${r2FilesDeleted} R2 files`)
 
-    return { success: true, deletedCount, details }
+    return { success: true, deletedCount, r2FilesDeleted, details }
   } catch (error) {
     console.error('Error deleting users without devices:', error)
-    return { success: false, deletedCount: 0, details: [`Error: ${error}`] }
+    return { success: false, deletedCount: 0, r2FilesDeleted: 0, details: [`Error: ${error}`] }
   }
 }
 
@@ -2330,15 +2357,17 @@ export const deleteOldMessages = async (plan: string | null = null): Promise<{
   }
 }
 
-// Aggressively delete MMS messages to save storage (MMS is expensive - ~2MB per message)
+// Aggressively delete MMS messages to save storage (MMS is expensive - ~2MB per message) - includes R2 cleanup
 export const deleteOldMmsMessages = async (plan: string | null = null): Promise<{
   success: boolean
   mmsDeleted: number
+  r2FilesDeleted: number
   storageSavedMB: number
   detailsByUser: { [userId: string]: number }
 }> => {
   const detailsByUser: { [userId: string]: number } = {}
   let totalDeleted = 0
+  let r2FilesDeleted = 0
   let estimatedSavedMB = 0
 
   try {
@@ -2346,6 +2375,7 @@ export const deleteOldMmsMessages = async (plan: string | null = null): Promise<
     const config = getCleanupConfig(plan)
     const mmsRetentionMs = config.mmsRetentionDays * 24 * 60 * 60 * 1000
     const mmssCutoffTime = Date.now() - mmsRetentionMs
+    const deleteR2FileFn = httpsCallable(functions, 'deleteR2File')
 
     const usersRef = ref(database, USERS_PATH)
     const snapshot = await get(usersRef)
@@ -2366,6 +2396,29 @@ export const deleteOldMmsMessages = async (plan: string | null = null): Promise<
               const msg = messageData as any
               // Delete MMS messages (type='mms') older than retention period
               if (msg.type === 'mms' && msg.timestamp && msg.timestamp < mmssCutoffTime) {
+                // Delete R2 files for MMS attachments
+                if (msg.attachments && Array.isArray(msg.attachments)) {
+                  for (const attachment of msg.attachments) {
+                    if (attachment.r2Key) {
+                      try {
+                        await deleteR2FileFn({ r2Key: attachment.r2Key })
+                        r2FilesDeleted++
+                      } catch (err: any) {
+                        console.warn(`Failed to delete R2 file ${attachment.r2Key}:`, err.message)
+                      }
+                    }
+                  }
+                }
+                // Also check for r2Key directly on the message
+                if (msg.r2Key) {
+                  try {
+                    await deleteR2FileFn({ r2Key: msg.r2Key })
+                    r2FilesDeleted++
+                  } catch (err: any) {
+                    console.warn(`Failed to delete R2 file ${msg.r2Key}:`, err.message)
+                  }
+                }
+
                 const msgRef = ref(database, `${USERS_PATH}/${userId}/messages/${messageId}`)
                 await remove(msgRef)
                 userDeleted++
@@ -2385,13 +2438,13 @@ export const deleteOldMmsMessages = async (plan: string | null = null): Promise<
       }
     }
 
-    console.log(`Total MMS deleted: ${totalDeleted}, Estimated storage saved: ${estimatedSavedMB}MB`)
-    addAdminAuditLog('delete_old_mms', 'system', `Deleted ${totalDeleted} MMS messages, saved ~${estimatedSavedMB}MB`)
+    console.log(`Total MMS deleted: ${totalDeleted}, R2 files: ${r2FilesDeleted}, Estimated storage saved: ${estimatedSavedMB}MB`)
+    addAdminAuditLog('delete_old_mms', 'system', `Deleted ${totalDeleted} MMS messages, ${r2FilesDeleted} R2 files, saved ~${estimatedSavedMB}MB`)
 
-    return { success: true, mmsDeleted: totalDeleted, storageSavedMB: estimatedSavedMB, detailsByUser }
+    return { success: true, mmsDeleted: totalDeleted, r2FilesDeleted, storageSavedMB: estimatedSavedMB, detailsByUser }
   } catch (error) {
     console.error('Error deleting old MMS:', error)
-    return { success: false, mmsDeleted: 0, storageSavedMB: 0, detailsByUser: {} }
+    return { success: false, mmsDeleted: 0, r2FilesDeleted: 0, storageSavedMB: 0, detailsByUser: {} }
   }
 }
 
@@ -3164,13 +3217,14 @@ export const getAdminAuditLog = async (): Promise<Array<{
   }
 }
 
-// Individual User Deletion
+// Individual User Deletion - includes R2 file cleanup
 export const deleteUserAccount = async (userId: string): Promise<{
   success: boolean
   deletedData: {
     messages: number
     devices: number
     storageMB: number
+    r2Files: number
   }
   errors: string[]
 }> => {
@@ -3179,6 +3233,7 @@ export const deleteUserAccount = async (userId: string): Promise<{
     let messagesDeleted = 0
     let devicesDeleted = 0
     let storageFreed = 0
+    let r2FilesDeleted = 0
 
     // Get actual message count before deletion
     console.log(`Starting deletion of user: ${userId}`)
@@ -3202,6 +3257,43 @@ export const deleteUserAccount = async (userId: string): Promise<{
         if (userData.devices) {
           devicesDeleted = Object.keys(userData.devices).length
           console.log(`Found ${devicesDeleted} devices for user ${userId}`)
+        }
+
+        // Clean up R2 files (file_transfers and media) before deleting user
+        const deleteR2FileFn = httpsCallable(functions, 'deleteR2File')
+        const r2DeletePromises: Promise<any>[] = []
+
+        // Delete R2 files from file_transfers
+        if (userData.file_transfers) {
+          Object.values(userData.file_transfers).forEach((transfer: any) => {
+            if (transfer.r2Key) {
+              r2DeletePromises.push(
+                deleteR2FileFn({ r2Key: transfer.r2Key })
+                  .then(() => { r2FilesDeleted++ })
+                  .catch((err: any) => console.warn(`Failed to delete R2 file ${transfer.r2Key}:`, err.message))
+              )
+            }
+          })
+        }
+
+        // Delete R2 files from media
+        if (userData.media) {
+          Object.values(userData.media).forEach((media: any) => {
+            if (media.r2Key) {
+              r2DeletePromises.push(
+                deleteR2FileFn({ r2Key: media.r2Key })
+                  .then(() => { r2FilesDeleted++ })
+                  .catch((err: any) => console.warn(`Failed to delete R2 media file ${media.r2Key}:`, err.message))
+              )
+            }
+          })
+        }
+
+        // Wait for all R2 deletions to complete
+        if (r2DeletePromises.length > 0) {
+          console.log(`Deleting ${r2DeletePromises.length} R2 files for user ${userId}...`)
+          await Promise.all(r2DeletePromises)
+          console.log(`Deleted ${r2FilesDeleted} R2 files for user ${userId}`)
         }
       } else {
         console.log(`User ${userId} not found in database`)
@@ -3234,14 +3326,15 @@ export const deleteUserAccount = async (userId: string): Promise<{
     await remove(userRef)
 
     // Log the deletion in audit
-    addAdminAuditLog('user_delete', 'admin', `Deleted user account: ${userId} (${messagesDeleted} messages, ${storageFreed.toFixed(2)}MB storage)`)
+    addAdminAuditLog('user_delete', 'admin', `Deleted user account: ${userId} (${messagesDeleted} messages, ${r2FilesDeleted} R2 files, ${storageFreed.toFixed(2)}MB storage)`)
 
     return {
       success: true,
       deletedData: {
         messages: messagesDeleted,
         devices: devicesDeleted,
-        storageMB: Math.round(storageFreed * 100) / 100
+        storageMB: Math.round(storageFreed * 100) / 100,
+        r2Files: r2FilesDeleted
       },
       errors
     }
@@ -3252,17 +3345,19 @@ export const deleteUserAccount = async (userId: string): Promise<{
       deletedData: {
         messages: 0,
         devices: 0,
-        storageMB: 0
+        storageMB: 0,
+        r2Files: 0
       },
       errors: [`Failed to delete user ${userId}: ${error}`]
     }
   }
 }
 
-// Bulk User Operations
+// Bulk User Operations - uses deleteUserAccount which handles R2 cleanup
 export const bulkDeleteInactiveUsers = async (inactiveDays: number = 90): Promise<{
   deletedUsers: number
   freedStorageMB: number
+  r2FilesDeleted: number
   errors: string[]
 }> => {
   try {
@@ -3271,27 +3366,31 @@ export const bulkDeleteInactiveUsers = async (inactiveDays: number = 90): Promis
 
     let deletedUsers = 0
     let freedStorageMB = 0
+    let r2FilesDeleted = 0
     const errors: string[] = []
 
     for (const user of users) {
       if (!user.lastActivity || user.lastActivity < cutoffTime) {
         try {
-          // Delete user data
-          const userRef = ref(database, `${USERS_PATH}/${user.userId}`)
-          await remove(userRef)
-
-          deletedUsers++
-          freedStorageMB += user.storageUsedMB
+          // Use deleteUserAccount which handles R2 cleanup
+          const result = await deleteUserAccount(user.userId)
+          if (result.success) {
+            deletedUsers++
+            freedStorageMB += result.deletedData.storageMB
+            r2FilesDeleted += result.deletedData.r2Files
+          } else {
+            errors.push(...result.errors)
+          }
         } catch (error) {
           errors.push(`Failed to delete user ${user.userId}: ${error}`)
         }
       }
     }
 
-    return { deletedUsers, freedStorageMB, errors }
+    return { deletedUsers, freedStorageMB, r2FilesDeleted, errors }
   } catch (error) {
     console.error('Error in bulk delete:', error)
-    return { deletedUsers: 0, freedStorageMB: 0, errors: ['Bulk delete failed'] }
+    return { deletedUsers: 0, freedStorageMB: 0, r2FilesDeleted: 0, errors: ['Bulk delete failed'] }
   }
 }
 
@@ -3946,6 +4045,154 @@ export const listenToSyncGroup = (syncGroupId: string, callback: (data: any) => 
       callback(snapshot.val())
     }
   })
+}
+
+// ============================================
+// R2 STORAGE ADMIN FUNCTIONS
+// ============================================
+
+export interface R2Analytics {
+  totalFiles: number
+  totalSize: number
+  fileCounts: { files: number; mms: number; photos: number }
+  sizeCounts: { files: number; mms: number; photos: number }
+  largestFiles: R2File[]
+  oldestFiles: R2File[]
+  estimatedCost: number
+  userStorage: UserStorageInfo[]
+  totalUsersWithStorage: number
+}
+
+export interface R2File {
+  key: string
+  size: number
+  uploadedAt: number
+  type: 'files' | 'mms' | 'photos'
+}
+
+export interface UserStorageInfo {
+  userId: string
+  storageBytes: number
+  lastUpdatedAt: number
+}
+
+/**
+ * Get R2 storage analytics
+ */
+export const getR2Analytics = async (): Promise<R2Analytics> => {
+  try {
+    const call = httpsCallable(functions, 'getR2Analytics')
+    const result = await call({})
+    return result.data as R2Analytics
+  } catch (error) {
+    console.error('Error getting R2 analytics:', error)
+    return {
+      totalFiles: 0,
+      totalSize: 0,
+      fileCounts: { files: 0, mms: 0, photos: 0 },
+      sizeCounts: { files: 0, mms: 0, photos: 0 },
+      largestFiles: [],
+      oldestFiles: [],
+      estimatedCost: 0,
+      userStorage: [],
+      totalUsersWithStorage: 0
+    }
+  }
+}
+
+/**
+ * Get R2 file list with pagination
+ */
+export const getR2FileList = async (
+  fileType?: 'files' | 'mms' | 'photos',
+  limit: number = 100
+): Promise<{ files: R2File[]; totalCount: number }> => {
+  try {
+    const call = httpsCallable(functions, 'getR2FileList')
+    const result = await call({ fileType, limit })
+    return result.data as { files: R2File[]; totalCount: number }
+  } catch (error) {
+    console.error('Error getting R2 file list:', error)
+    return { files: [], totalCount: 0 }
+  }
+}
+
+/**
+ * Clean up old R2 files
+ */
+export const cleanupOldR2Files = async (
+  daysThreshold: number,
+  fileType?: 'files' | 'mms' | 'photos'
+): Promise<{
+  success: boolean
+  deletedFiles: number
+  freedBytes: number
+  errors: string[]
+}> => {
+  try {
+    const call = httpsCallable(functions, 'cleanupOldR2Files')
+    const result = await call({ daysThreshold, fileType })
+    return result.data as {
+      success: boolean
+      deletedFiles: number
+      freedBytes: number
+      errors: string[]
+    }
+  } catch (error) {
+    console.error('Error cleaning up R2 files:', error)
+    return {
+      success: false,
+      deletedFiles: 0,
+      freedBytes: 0,
+      errors: [`Cleanup failed: ${error}`]
+    }
+  }
+}
+
+/**
+ * Delete a specific R2 file (admin only)
+ */
+export const deleteR2FileAdmin = async (r2Key: string): Promise<{ success: boolean; error?: string }> => {
+  try {
+    const call = httpsCallable(functions, 'deleteR2FileAdmin')
+    const result = await call({ r2Key })
+    return result.data as { success: boolean; error?: string }
+  } catch (error) {
+    console.error('Error deleting R2 file:', error)
+    return { success: false, error: `Delete failed: ${error}` }
+  }
+}
+
+/**
+ * Recalculate user's storage based on actual R2 files
+ */
+export interface RecalculateStorageResult {
+  success: boolean
+  userId: string
+  fileCount: number
+  actualBytes: number
+  previousBytes: number
+  difference: number
+  error?: string
+}
+
+export const recalculateUserStorage = async (userId: string): Promise<RecalculateStorageResult> => {
+  try {
+    const call = httpsCallable(functions, 'recalculateUserStorage')
+    const result = await call({ userId })
+    return result.data as RecalculateStorageResult
+  } catch (error) {
+    console.error('Error recalculating storage:', error)
+    return {
+      success: false,
+      userId,
+      fileCount: 0,
+      actualBytes: 0,
+      previousBytes: 0,
+      difference: 0,
+      error: `Recalculation failed: ${error}`
+    }
+  }
 }
 
 export { auth, database, storage, signInAnon as signInAnonymously, getAuth }

@@ -19,6 +19,8 @@ struct ConversationListView: View {
     @State private var isSelectionMode = false
     @State private var selectedConversationIds: Set<String> = []
     @State private var showBulkDeleteConfirmation = false
+    @State private var isSearchActive = false
+    @FocusState private var isSearchFieldFocused: Bool
 
     private let preferences = PreferencesService.shared
 
@@ -127,9 +129,20 @@ struct ConversationListView: View {
                         .foregroundColor(.secondary)
                     TextField("Search conversations", text: $searchText)
                         .textFieldStyle(.plain)
+                        .focused($isSearchFieldFocused)
+                        .onChange(of: isSearchFieldFocused) { _, focused in
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isSearchActive = focused
+                            }
+                        }
 
-                    if !searchText.isEmpty {
-                        Button(action: { searchText = "" }) {
+                    if !searchText.isEmpty || isSearchActive {
+                        Button(action: {
+                            searchText = ""
+                            isSearchFieldFocused = false
+                            isSearchActive = false
+                            selectedLabelId = nil
+                        }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.secondary)
                         }
@@ -140,56 +153,61 @@ struct ConversationListView: View {
                 .background(SyncFlowColors.surfaceSecondary)
                 .cornerRadius(8)
 
-                // Filter buttons
-                HStack(spacing: 8) {
-                    ForEach(MessageStore.ConversationFilter.allCases, id: \.self) { filter in
-                        FilterButton(
-                            filter: filter,
-                            isSelected: messageStore.currentFilter == filter,
-                            badgeCount: filter == .unread ? messageStore.totalUnreadCount : (filter == .spam ? messageStore.spamMessages.count : 0)
-                        ) {
-                            messageStore.currentFilter = filter
-                        }
-                    }
-
-                    Spacer()
-                }
-
-                // Label filter chips
-                if !availableLabels.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            // Clear filter button
-                            if selectedLabelId != nil {
-                                Button(action: { selectedLabelId = nil }) {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "xmark")
-                                            .font(.caption2)
-                                        Text("Clear")
-                                            .font(.caption)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.secondary.opacity(0.2))
-                                    .cornerRadius(12)
-                                }
-                                .buttonStyle(.plain)
-                            }
-
-                            ForEach(availableLabels) { label in
-                                LabelFilterChip(
-                                    label: label,
-                                    isSelected: selectedLabelId == label.id
+                // Filter buttons - only show when search is active
+                if isSearchActive || !searchText.isEmpty {
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            ForEach(MessageStore.ConversationFilter.allCases, id: \.self) { filter in
+                                FilterButton(
+                                    filter: filter,
+                                    isSelected: messageStore.currentFilter == filter,
+                                    badgeCount: filter == .unread ? messageStore.totalUnreadCount : (filter == .spam ? messageStore.spamMessages.count : 0)
                                 ) {
-                                    if selectedLabelId == label.id {
-                                        selectedLabelId = nil
-                                    } else {
-                                        selectedLabelId = label.id
+                                    messageStore.currentFilter = filter
+                                }
+                            }
+
+                            Spacer()
+                        }
+
+                        // Label filter chips
+                        if !availableLabels.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    // Clear filter button
+                                    if selectedLabelId != nil {
+                                        Button(action: { selectedLabelId = nil }) {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "xmark")
+                                                    .font(.caption2)
+                                                Text("Clear")
+                                                    .font(.caption)
+                                            }
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.secondary.opacity(0.2))
+                                            .cornerRadius(12)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+
+                                    ForEach(availableLabels) { label in
+                                        LabelFilterChip(
+                                            label: label,
+                                            isSelected: selectedLabelId == label.id
+                                        ) {
+                                            if selectedLabelId == label.id {
+                                                selectedLabelId = nil
+                                            } else {
+                                                selectedLabelId = label.id
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
                 HStack {
@@ -353,7 +371,8 @@ struct ConversationListView: View {
                             SidebarSectionHeader(title: "Pinned")
                                 .padding(.top, searchText.isEmpty ? 6 : 2)
 
-                            ForEach(Array(pinnedConversations.enumerated()), id: \.element.id) { index, conversation in
+                            let pinned = pinnedConversations
+                            ForEach(pinned) { conversation in
                                 ConversationRow(
                                     conversation: conversation,
                                     isSelected: selectedConversation?.id == conversation.id,
@@ -386,7 +405,7 @@ struct ConversationListView: View {
                                     )
                                 }
 
-                                if index < pinnedConversations.count - 1 {
+                                if conversation.id != pinned.last?.id {
                                     ConversationSeparator()
                                 }
                             }
@@ -396,7 +415,8 @@ struct ConversationListView: View {
                             SidebarSectionHeader(title: "Conversations")
                                 .padding(.top, pinnedConversations.isEmpty ? 6 : 4)
 
-                            ForEach(Array(regularConversations.enumerated()), id: \.element.id) { index, conversation in
+                            let regular = regularConversations
+                            ForEach(regular) { conversation in
                                 ConversationRow(
                                     conversation: conversation,
                                     isSelected: selectedConversation?.id == conversation.id,
@@ -429,7 +449,7 @@ struct ConversationListView: View {
                                     )
                                 }
 
-                                if index < regularConversations.count - 1 {
+                                if conversation.id != regular.last?.id {
                                     ConversationSeparator()
                                 }
                             }

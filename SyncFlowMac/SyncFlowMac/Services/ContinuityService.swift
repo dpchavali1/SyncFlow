@@ -120,6 +120,8 @@ class ContinuityService: ObservableObject {
             "timestamp": ServerValue.timestamp()
         ]
 
+        database.goOnline()
+
         database.reference()
             .child("users")
             .child(userId)

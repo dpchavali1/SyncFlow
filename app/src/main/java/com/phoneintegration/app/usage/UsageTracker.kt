@@ -65,16 +65,16 @@ class UsageTracker(private val database: FirebaseDatabase) {
         private const val USERS_PATH = "users"
         private const val USAGE_PATH = "usage"
 
-        private const val TRIAL_DAYS = 7 // Reduced from 30 days
+        private const val TRIAL_DAYS = 7 // 7 day trial
         private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
 
-        // Trial/Free tier: 500MB upload/month, 1GB storage
+        // Trial/Free tier: 500MB upload/month, 100MB storage
         private const val TRIAL_MONTHLY_UPLOAD_BYTES = 500L * 1024L * 1024L
-        private const val TRIAL_STORAGE_BYTES = 1L * 1024L * 1024L * 1024L
+        private const val TRIAL_STORAGE_BYTES = 100L * 1024L * 1024L
 
-        // Paid tier: 3GB upload/month, 15GB storage (better value for higher price)
-        private const val PAID_MONTHLY_UPLOAD_BYTES = 3L * 1024L * 1024L * 1024L
-        private const val PAID_STORAGE_BYTES = 15L * 1024L * 1024L * 1024L
+        // Paid tier: 10GB upload/month, 2GB storage
+        private const val PAID_MONTHLY_UPLOAD_BYTES = 10L * 1024L * 1024L * 1024L
+        private const val PAID_STORAGE_BYTES = 2L * 1024L * 1024L * 1024L
     }
 
     suspend fun isUploadAllowed(
@@ -169,7 +169,7 @@ class UsageTracker(private val database: FirebaseDatabase) {
 
     private fun isPaidPlan(planRaw: String?, planExpiresAt: Long?, now: Long): Boolean {
         val normalized = planRaw?.lowercase(Locale.US) ?: return false
-        if (normalized == "lifetime") {
+        if (normalized == "lifetime" || normalized == "3year") {
             return true
         }
         if (normalized == "monthly" || normalized == "yearly" || normalized == "paid") {

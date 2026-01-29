@@ -33,6 +33,7 @@ class LinkSharingService(context: Context) {
      */
     fun startListening() {
         Log.d(TAG, "Starting link sharing service")
+        database.goOnline()
         listenForSharedLinks()
     }
 

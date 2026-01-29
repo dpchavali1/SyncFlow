@@ -15,21 +15,21 @@ import FirebaseDatabase
 enum SubscriptionProduct: String, CaseIterable {
     case monthly = "com.syncflow.subscription.monthly"
     case yearly = "com.syncflow.subscription.yearly"
-    case lifetime = "com.syncflow.lifetime"
+    case threeYear = "com.syncflow.3year"
 
     var displayName: String {
         switch self {
         case .monthly: return "Monthly"
         case .yearly: return "Yearly"
-        case .lifetime: return "Lifetime"
+        case .threeYear: return "3-Year"
         }
     }
 
     var description: String {
         switch self {
-        case .monthly: return "$3.99/month"
-        case .yearly: return "$29.99/year (Save 37%)"
-        case .lifetime: return "$99.99 one-time"
+        case .monthly: return "$4.99/month"
+        case .yearly: return "$39.99/year (Save 33%)"
+        case .threeYear: return "$79.99 for 3 years"
         }
     }
 }
@@ -40,14 +40,14 @@ enum SubscriptionStatus: Equatable {
     case notSubscribed
     case trial(daysRemaining: Int)
     case subscribed(plan: String, expiresAt: Date?)
-    case lifetime
+    case threeYear(expiresAt: Date?)
     case expired
 
     var isActive: Bool {
         switch self {
         case .notSubscribed, .expired:
             return false
-        case .trial, .subscribed, .lifetime:
+        case .trial, .subscribed, .threeYear:
             return true
         }
     }
@@ -65,8 +65,13 @@ enum SubscriptionStatus: Equatable {
                 return "\(plan) (expires \(formatter.string(from: expires)))"
             }
             return plan
-        case .lifetime:
-            return "Lifetime Access"
+        case .threeYear(let expires):
+            if let expires = expires {
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                return "3-Year Plan (expires \(formatter.string(from: expires)))"
+            }
+            return "3-Year Plan"
         case .expired:
             return "Subscription Expired"
         }
@@ -142,7 +147,7 @@ class SubscriptionService: ObservableObject {
     var isPremium: Bool {
         // First check StoreKit subscription
         switch subscriptionStatus {
-        case .subscribed, .lifetime:
+        case .subscribed, .threeYear:
             return true
         case .trial, .expired, .notSubscribed:
             break // Fall through to check Firebase plan
@@ -162,12 +167,12 @@ class SubscriptionService: ObservableObject {
             let productIDs = SubscriptionProduct.allCases.map { $0.rawValue }
             let storeProducts = try await Product.products(for: productIDs)
 
-            // Sort: monthly, yearly, lifetime
+            // Sort: monthly, yearly, 3-year
             products = storeProducts.sorted { p1, p2 in
                 let order: [String: Int] = [
                     SubscriptionProduct.monthly.rawValue: 0,
                     SubscriptionProduct.yearly.rawValue: 1,
-                    SubscriptionProduct.lifetime.rawValue: 2
+                    SubscriptionProduct.threeYear.rawValue: 2
                 ]
                 return (order[p1.id] ?? 99) < (order[p2.id] ?? 99)
             }
@@ -245,7 +250,7 @@ class SubscriptionService: ObservableObject {
         if case .subscribed = subscriptionStatus {
             return
         }
-        if subscriptionStatus == .lifetime {
+        if case .threeYear = subscriptionStatus {
             return
         }
 
@@ -254,7 +259,8 @@ class SubscriptionService: ObservableObject {
         var hasActiveSubscription = false
         var activePlan: String?
         var expirationDate: Date?
-        var hasLifetime = false
+        var hasThreeYear = false
+        var threeYearExpiration: Date?
 
         // Check for active transactions
         for await result in Transaction.currentEntitlements {
@@ -262,8 +268,9 @@ class SubscriptionService: ObservableObject {
                 let transaction = try checkVerified(result)
                 purchasedProductIDs.insert(transaction.productID)
 
-                if transaction.productID == SubscriptionProduct.lifetime.rawValue {
-                    hasLifetime = true
+                if transaction.productID == SubscriptionProduct.threeYear.rawValue {
+                    hasThreeYear = true
+                    threeYearExpiration = transaction.expirationDate
                 } else if transaction.productID == SubscriptionProduct.yearly.rawValue {
                     hasActiveSubscription = true
                     activePlan = "Yearly"
@@ -280,8 +287,8 @@ class SubscriptionService: ObservableObject {
         }
 
         // Determine status from StoreKit
-        if hasLifetime {
-            subscriptionStatus = .lifetime
+        if hasThreeYear {
+            subscriptionStatus = .threeYear(expiresAt: threeYearExpiration)
         } else if hasActiveSubscription, let plan = activePlan {
             subscriptionStatus = .subscribed(plan: plan, expiresAt: expirationDate)
         } else if isTrialActive {
@@ -374,15 +381,16 @@ class SubscriptionService: ObservableObject {
                 let now = Int64(Date().timeIntervalSince1970 * 1000)
 
                 // If Firebase has a valid paid plan that hasn't expired, use it
-                if ["monthly", "yearly", "lifetime"].contains(plan.lowercased()) {
-                    if plan.lowercased() == "lifetime" ||
+                if ["monthly", "yearly", "lifetime", "3year"].contains(plan.lowercased()) {
+                    if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" ||
                        (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
                         // Valid paid plan from Firebase, use it
                         updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
 
                         // Update subscriptionStatus to reflect the paid plan (immediately, not async)
-                        if plan.lowercased() == "lifetime" {
-                            self.subscriptionStatus = .lifetime
+                        if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" {
+                            let expiryDate = planExpiresAt != nil ? Date(timeIntervalSince1970: TimeInterval(planExpiresAt!.int64Value) / 1000) : nil
+                            self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
                         } else {
                             let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
                             self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
@@ -423,14 +431,15 @@ class SubscriptionService: ObservableObject {
                 let now = Int64(Date().timeIntervalSince1970 * 1000)
 
                 // If subscription record has a valid paid plan that hasn't expired, use it
-                if ["monthly", "yearly", "lifetime"].contains(plan.lowercased()) {
-                    if plan.lowercased() == "lifetime" ||
+                if ["monthly", "yearly", "lifetime", "3year"].contains(plan.lowercased()) {
+                    if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" ||
                        (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
                         // Valid paid plan from subscription record (survives user deletion)
                         updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
 
-                        if plan.lowercased() == "lifetime" {
-                            self.subscriptionStatus = .lifetime
+                        if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" {
+                            let expiryDate = planExpiresAt != nil ? Date(timeIntervalSince1970: TimeInterval(planExpiresAt!.int64Value) / 1000) : nil
+                            self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
                         } else {
                             let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
                             self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
@@ -458,9 +467,13 @@ class SubscriptionService: ObservableObject {
         ]
 
         switch subscriptionStatus {
-        case .lifetime:
-            updates["plan"] = "lifetime"
-            updates["planExpiresAt"] = NSNull()
+        case .threeYear(let expiresAt):
+            updates["plan"] = "3year"
+            if let expiresAt = expiresAt {
+                updates["planExpiresAt"] = Int64(expiresAt.timeIntervalSince1970 * 1000)
+            } else {
+                updates["planExpiresAt"] = NSNull()
+            }
         case .subscribed(let plan, let expiresAt):
             updates["plan"] = plan.lowercased()
             if let expiresAt = expiresAt {

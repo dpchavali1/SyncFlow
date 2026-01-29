@@ -3,6 +3,7 @@ import { Inter } from 'next/font/google'
 import Script from 'next/script'
 import { ServiceWorkerRegistration } from '../components/ServiceWorkerRegistration'
 import { PerformanceProvider, PerformanceMonitor } from '../components/PerformanceComponents'
+import SupportChat from '../components/SupportChat'
 import './globals.css'
 
 const inter = Inter({ subsets: ['latin'] })
@@ -42,6 +43,7 @@ export default function RootLayout({
           {children}
           <PerformanceMonitor />
         </PerformanceProvider>
+        <SupportChat />
         <Script
           async
           src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-4962910048695842"

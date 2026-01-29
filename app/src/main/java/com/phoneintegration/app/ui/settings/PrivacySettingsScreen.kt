@@ -502,14 +502,14 @@ private suspend fun scanInboxForSpam(
                     val messageAgeMs = System.currentTimeMillis() - message.date
                     val messageAgeHours = messageAgeMs / (1000 * 60 * 60)
 
-                    // Run spam check with message age
-                    // Note: isRead defaults to true since we can't easily get read status here
+                    // Run spam check with message age and read status
+                    // Unread messages from unknown senders are more suspicious
                     val spamResult = SpamFilter.checkMessage(
                         body = message.body,
                         senderAddress = message.address,
                         isFromContact = isFromContact,
                         threshold = threshold,
-                        isRead = true,  // TODO: Get actual read status for better detection
+                        isRead = message.isRead,  // Use actual read status for better detection
                         messageAgeHours = messageAgeHours
                     )
 

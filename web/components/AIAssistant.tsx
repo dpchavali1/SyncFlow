@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Brain, X } from 'lucide-react'
+import { Send, Brain, X, TrendingUp, Calendar, Package, CreditCard, Key, ListTodo, Copy, Check, RefreshCw, ArrowUpDown, Repeat, Plus } from 'lucide-react'
 
 interface Message {
   id: string | number
@@ -24,6 +24,57 @@ interface ParsedTransaction {
   date: number
   message: string
 }
+
+interface BillReminder {
+  billType: string
+  dueDate: Date | null
+  amount: number | null
+  currency: string
+  merchant: string
+  message: string
+  date: number
+  isOverdue: boolean
+}
+
+interface BalanceInfo {
+  accountType: string
+  balance: number | null
+  currency: string
+  institution: string | null
+  message: string
+  date: number
+}
+
+interface RecurringExpense {
+  merchant: string
+  amount: number
+  currency: string
+  frequency: 'monthly' | 'weekly' | 'yearly'
+  lastCharge: number
+  occurrences: number
+}
+
+interface SmartDigest {
+  totalSpentThisMonth: number
+  totalSpentLastMonth: number
+  spendingChange: number
+  transactionCount: number
+  upcomingBills: number
+  recentPackages: number
+  subscriptionTotal: number
+  topMerchant: string | null
+  currency: string
+}
+
+// Quick action buttons
+const QUICK_ACTIONS = [
+  { icon: TrendingUp, title: 'Spending', query: 'How much did I spend this month?', color: 'blue' },
+  { icon: Calendar, title: 'Bills', query: 'Show my upcoming bills', color: 'orange' },
+  { icon: Package, title: 'Packages', query: 'Track my packages', color: 'green' },
+  { icon: CreditCard, title: 'Balance', query: 'What is my account balance?', color: 'purple' },
+  { icon: Key, title: 'OTPs', query: 'Show my OTP codes', color: 'red' },
+  { icon: ListTodo, title: 'Transactions', query: 'List my transactions', color: 'teal' },
+]
 
 // Known merchants with aliases
 const MERCHANT_ALIASES: Record<string, string[]> = {
@@ -65,6 +116,8 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
   const [query, setQuery] = useState('')
   const [conversation, setConversation] = useState<Array<{ role: 'user' | 'assistant', content: string }>>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
+  const [showDigest, setShowDigest] = useState(true)
   const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([])
 
   useEffect(() => {
@@ -96,7 +149,43 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
       }
     }
 
-    // Try to extract from patterns
+    // Try to extract bank name from patterns like "HDFC Bank", "SBI Alert"
+    const bankPatterns = [
+      /([A-Z]{2,10})\s+Bank/,           // "HDFC Bank", "ICICI Bank"
+      /([A-Z]{2,10})\s+Alert/,          // "SBI Alert"
+      /([A-Z][A-Za-z]+)\s+Bank/,        // "Axis Bank", "Kotak Bank"
+      /([A-Z][A-Za-z]+)\s+Credit/,      // "Amex Credit"
+      /Dear\s+([A-Z][A-Za-z]+)\s+Card/i, // "Dear HDFC Card"
+      /from\s+([A-Z][A-Za-z]+)\s+A\/c/i, // "from HDFC A/c"
+      /([A-Z]{2,10})Bank/,              // "HDFCBank" (no space)
+    ]
+
+    for (const pattern of bankPatterns) {
+      const match = body.match(pattern)
+      if (match && match[1]) {
+        const extracted = match[1].trim()
+        const skipWords = ['your', 'the', 'dear', 'from', 'with', 'card']
+        if (!skipWords.includes(extracted.toLowerCase()) && extracted.length >= 2) {
+          return extracted
+        }
+      }
+    }
+
+    // Try to extract from sender patterns (VK-HDFCBK, AD-ICICIB, etc.)
+    const senderPattern = /(?:VK|AD|VM|BZ|HP|TD|DM|AX)-([A-Z]{3,8})/
+    const senderMatch = body.match(senderPattern)
+    if (senderMatch && senderMatch[1]) {
+      const code = senderMatch[1]
+      // Map common bank codes
+      const bankCodes: Record<string, string> = {
+        'HDFCBK': 'HDFC', 'ICICIB': 'ICICI', 'SBIINB': 'SBI', 'AXISBK': 'Axis',
+        'KOTAKB': 'Kotak', 'PNBBK': 'PNB', 'BOBBK': 'BOB', 'YESBK': 'Yes Bank',
+        'IABORB': 'IOB', 'CANBNK': 'Canara', 'UNIONB': 'Union', 'INDUSB': 'IndusInd'
+      }
+      return bankCodes[code] || code
+    }
+
+    // Try to extract from general patterns
     const merchantPatterns = [
       /(?:at|to|from)\s+([A-Za-z][A-Za-z0-9\s&'./-]{2,25})(?:\s+(?:on|for|ref|card)|$)/i,
       /(?:txn|transaction|purchase)\s+(?:at|on|to)\s+([A-Za-z][A-Za-z0-9\s&'./-]{2,25})/i,
@@ -178,6 +267,292 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     return transactions.sort((a, b) => b.date - a.date)
   }, [messages])
 
+  // Parse bills from messages
+  const parseBills = useMemo((): BillReminder[] => {
+    const bills: BillReminder[] = []
+    const billKeywords = ['due', 'payment due', 'bill', 'minimum payment', 'pay by', 'statement', 'balance due', 'amount due']
+
+    for (const msg of messages) {
+      const bodyLower = msg.body.toLowerCase()
+
+      // Check if it's a bill-related message
+      if (!billKeywords.some(kw => bodyLower.includes(kw))) {
+        continue
+      }
+
+      // Determine bill type
+      let billType = 'Other'
+      if (bodyLower.includes('credit card') || bodyLower.includes('card payment')) {
+        billType = 'Credit Card'
+      } else if (bodyLower.includes('electricity') || bodyLower.includes('water') || bodyLower.includes('gas') || bodyLower.includes('utility')) {
+        billType = 'Utility'
+      } else if (bodyLower.includes('subscription') || bodyLower.includes('membership')) {
+        billType = 'Subscription'
+      } else if (bodyLower.includes('loan') || bodyLower.includes('emi')) {
+        billType = 'Loan'
+      } else if (bodyLower.includes('insurance')) {
+        billType = 'Insurance'
+      }
+
+      // Extract due date
+      let dueDate: Date | null = null
+      const dueDatePatterns = [
+        /(?:due|pay by)[:\s]*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)/i,
+        /(?:due|pay by)[:\s]*(\d{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*)/i,
+      ]
+      for (const pattern of dueDatePatterns) {
+        const match = msg.body.match(pattern)
+        if (match) {
+          const parsed = new Date(match[1])
+          if (!isNaN(parsed.getTime())) {
+            dueDate = parsed
+            break
+          }
+        }
+      }
+
+      // Extract amount
+      let amount: number | null = null
+      let currency = 'USD'
+      const amountPattern = /(?:minimum|min|amount|balance|due)[:\s]*(?:\$|Rs\.?|₹)?\s*([0-9,]+(?:\.\d{2})?)/i
+      const amountMatch = msg.body.match(amountPattern)
+      if (amountMatch) {
+        amount = parseFloat(amountMatch[1].replace(/,/g, ''))
+        currency = (msg.body.includes('Rs') || msg.body.includes('₹')) ? 'INR' : 'USD'
+      }
+
+      // Extract merchant/institution
+      const merchant = extractMerchantFromMessage(msg.body) || 'Unknown'
+
+      bills.push({
+        billType,
+        dueDate,
+        amount,
+        currency,
+        merchant,
+        message: msg.body,
+        date: msg.date,
+        isOverdue: dueDate ? dueDate < new Date() : false,
+      })
+    }
+
+    // Sort by due date (upcoming first)
+    return bills.sort((a, b) => {
+      if (a.dueDate && b.dueDate) return a.dueDate.getTime() - b.dueDate.getTime()
+      if (a.dueDate) return -1
+      return 1
+    })
+  }, [messages])
+
+  // Parse balance info from messages
+  const parseBalances = useMemo((): BalanceInfo[] => {
+    const balances: BalanceInfo[] = []
+    const balanceKeywords = ['balance', 'avl bal', 'avl', 'available', 'a/c bal', 'current bal']
+
+    for (const msg of messages) {
+      const bodyLower = msg.body.toLowerCase()
+
+      // Check if it's a balance-related message
+      if (!balanceKeywords.some(kw => bodyLower.includes(kw))) {
+        continue
+      }
+
+      // Multiple patterns to extract balance amount
+      let balance: number | null = null
+      let currency = 'USD'
+
+      // Various balance patterns found in bank SMS
+      const balancePatterns = [
+        // "Avl Bal: $1,234.56" or "Available Balance: Rs.1,234.56"
+        /(?:avl\.?\s*bal\.?|available\s*(?:bal\.?|balance)?|current\s*bal\.?|a\/c\s*bal\.?|balance)[:\s]*(?:is\s*)?(?:\$|Rs\.?|₹|INR|USD)?\s*([0-9,]+(?:\.\d{1,2})?)/i,
+        // "$1,234.56 available" or "Rs.1,234.56 balance"
+        /(?:\$|Rs\.?|₹)\s*([0-9,]+(?:\.\d{1,2})?)\s*(?:available|avl|balance)/i,
+        // "Balance $1,234.56"
+        /balance[:\s]+(?:\$|Rs\.?|₹)?\s*([0-9,]+(?:\.\d{1,2})?)/i,
+        // Just find currency + amount near balance keyword
+        /(?:\$|Rs\.?|₹)\s*([0-9,]+(?:\.\d{1,2})?)/i,
+      ]
+
+      for (const pattern of balancePatterns) {
+        const match = msg.body.match(pattern)
+        if (match && match[1]) {
+          const parsed = parseFloat(match[1].replace(/,/g, ''))
+          // Sanity check - balance should be reasonable (not a date or ref number)
+          if (!isNaN(parsed) && parsed > 0 && parsed < 10000000) {
+            balance = parsed
+            break
+          }
+        }
+      }
+
+      // Determine currency
+      if (msg.body.includes('Rs') || msg.body.includes('₹') || msg.body.includes('INR')) {
+        currency = 'INR'
+      } else if (msg.body.includes('$') || msg.body.includes('USD')) {
+        currency = 'USD'
+      }
+
+      // Determine account type
+      let accountType = 'Account'
+      if (bodyLower.includes('credit card') || bodyLower.includes('card ending')) accountType = 'Credit Card'
+      else if (bodyLower.includes('saving')) accountType = 'Savings'
+      else if (bodyLower.includes('checking') || bodyLower.includes('current a/c')) accountType = 'Checking'
+      else if (bodyLower.includes('debit')) accountType = 'Debit Card'
+
+      // Extract institution from sender or message
+      let institution = extractMerchantFromMessage(msg.body)
+
+      // Also check sender address for bank names
+      if (!institution) {
+        const senderLower = msg.address.toLowerCase()
+        const bankNames = ['chase', 'bofa', 'wellsfargo', 'citi', 'amex', 'discover', 'capital', 'usbank', 'pnc', 'td', 'ally', 'paypal']
+        for (const bank of bankNames) {
+          if (senderLower.includes(bank)) {
+            institution = bank.charAt(0).toUpperCase() + bank.slice(1)
+            break
+          }
+        }
+      }
+
+      balances.push({
+        accountType,
+        balance,
+        currency,
+        institution,
+        message: msg.body,
+        date: msg.date,
+      })
+    }
+
+    // Remove duplicates (same institution, keep most recent)
+    const seen = new Map<string, BalanceInfo>()
+    for (const bal of balances.sort((a, b) => b.date - a.date)) {
+      const key = `${bal.institution || 'unknown'}-${bal.accountType}`
+      if (!seen.has(key)) {
+        seen.set(key, bal)
+      }
+    }
+
+    return Array.from(seen.values())
+  }, [messages])
+
+  // Detect recurring expenses (subscriptions)
+  const detectRecurringExpenses = useMemo((): RecurringExpense[] => {
+    const transactions = parseTransactions
+    const merchantGroups: Record<string, ParsedTransaction[]> = {}
+
+    // Group by merchant
+    transactions.forEach(txn => {
+      const merchant = txn.merchant?.toLowerCase() || 'unknown'
+      if (!merchantGroups[merchant]) {
+        merchantGroups[merchant] = []
+      }
+      merchantGroups[merchant].push(txn)
+    })
+
+    const recurring: RecurringExpense[] = []
+
+    // Known subscription services
+    const subscriptionKeywords = ['netflix', 'spotify', 'hulu', 'disney', 'prime', 'apple', 'google', 'youtube', 'hbo', 'paramount', 'peacock', 'audible', 'dropbox', 'icloud', 'adobe', 'microsoft', 'gym', 'fitness', 'membership']
+
+    for (const [merchant, txns] of Object.entries(merchantGroups)) {
+      if (txns.length < 2) continue
+
+      // Check if it's a known subscription
+      const isKnownSubscription = subscriptionKeywords.some(kw => merchant.includes(kw))
+
+      // Sort by date
+      const sorted = txns.sort((a, b) => a.date - b.date)
+
+      // Check if amounts are similar (within 10%)
+      const amounts = sorted.map(t => t.amount)
+      const avgAmount = amounts.reduce((a, b) => a + b, 0) / amounts.length
+      const similarAmounts = amounts.every(a => Math.abs(a - avgAmount) / avgAmount < 0.1)
+
+      if (!similarAmounts && !isKnownSubscription) continue
+
+      // Check intervals between charges
+      const intervals: number[] = []
+      for (let i = 1; i < sorted.length; i++) {
+        const daysDiff = (sorted[i].date - sorted[i-1].date) / (1000 * 60 * 60 * 24)
+        intervals.push(daysDiff)
+      }
+
+      if (intervals.length === 0) continue
+
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length
+
+      // Determine frequency
+      let frequency: 'monthly' | 'weekly' | 'yearly' = 'monthly'
+      if (avgInterval >= 5 && avgInterval <= 10) {
+        frequency = 'weekly'
+      } else if (avgInterval >= 25 && avgInterval <= 35) {
+        frequency = 'monthly'
+      } else if (avgInterval >= 350 && avgInterval <= 380) {
+        frequency = 'yearly'
+      } else if (!isKnownSubscription) {
+        continue // Not a regular interval
+      }
+
+      recurring.push({
+        merchant: merchant.charAt(0).toUpperCase() + merchant.slice(1),
+        amount: avgAmount,
+        currency: sorted[0].currency,
+        frequency,
+        lastCharge: sorted[sorted.length - 1].date,
+        occurrences: sorted.length,
+      })
+    }
+
+    return recurring.sort((a, b) => b.amount - a.amount)
+  }, [parseTransactions])
+
+  // Generate smart digest
+  const generateSmartDigest = useMemo((): SmartDigest => {
+    const transactions = parseTransactions
+    const now = Date.now()
+    const thisMonthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime()
+    const lastMonthStart = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1).getTime()
+
+    const thisMonthTxns = transactions.filter(t => t.date >= thisMonthStart)
+    const lastMonthTxns = transactions.filter(t => t.date >= lastMonthStart && t.date < thisMonthStart)
+
+    const totalThisMonth = thisMonthTxns.reduce((sum, t) => sum + t.amount, 0)
+    const totalLastMonth = lastMonthTxns.reduce((sum, t) => sum + t.amount, 0)
+
+    // Top merchant this month
+    const merchantTotals: Record<string, number> = {}
+    thisMonthTxns.forEach(t => {
+      const m = t.merchant || 'Unknown'
+      merchantTotals[m] = (merchantTotals[m] || 0) + t.amount
+    })
+    const topMerchant = Object.entries(merchantTotals).sort((a, b) => b[1] - a[1])[0]?.[0] || null
+
+    // Subscription total
+    const subscriptionTotal = detectRecurringExpenses.reduce((sum, r) => {
+      if (r.frequency === 'monthly') return sum + r.amount
+      if (r.frequency === 'yearly') return sum + r.amount / 12
+      if (r.frequency === 'weekly') return sum + r.amount * 4
+      return sum
+    }, 0)
+
+    return {
+      totalSpentThisMonth: totalThisMonth,
+      totalSpentLastMonth: totalLastMonth,
+      spendingChange: totalLastMonth > 0 ? ((totalThisMonth - totalLastMonth) / totalLastMonth) * 100 : 0,
+      transactionCount: thisMonthTxns.length,
+      upcomingBills: parseBills.filter(b => !b.isOverdue && b.dueDate && b.dueDate > new Date()).length,
+      recentPackages: messages.filter(m => {
+        const bodyLower = m.body.toLowerCase()
+        return (bodyLower.includes('shipped') || bodyLower.includes('delivery') || bodyLower.includes('arriving')) &&
+               m.date > now - 7 * 24 * 60 * 60 * 1000
+      }).length,
+      subscriptionTotal,
+      topMerchant,
+      currency: transactions[0]?.currency || 'USD',
+    }
+  }, [parseTransactions, parseBills, detectRecurringExpenses, messages])
+
   // Filter transactions by merchant
   const filterByMerchant = (transactions: ParsedTransaction[], merchant: string): ParsedTransaction[] => {
     const lowerMerchant = merchant.toLowerCase()
@@ -218,6 +593,54 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     if (lowerQuery.includes('month') || lowerQuery.includes('30 day')) return 'This Month'
     if (lowerQuery.includes('year')) return 'This Year'
     return ''
+  }
+
+  // Get suggested follow-up queries based on the response content
+  const getSuggestedFollowUps = (responseContent: string): string[] => {
+    const suggestions: string[] = []
+
+    // Based on what topic was discussed, suggest related queries
+    if (responseContent.includes('Spending') || responseContent.includes('spent') || responseContent.includes('transactions')) {
+      if (!responseContent.includes('category')) suggestions.push('Show by category')
+      if (!responseContent.includes('Top Merchants')) suggestions.push('Top merchants')
+      if (!responseContent.includes('vs last month')) suggestions.push('Compare to last month')
+      suggestions.push('Show subscriptions')
+    }
+
+    if (responseContent.includes('bill') || responseContent.includes('due')) {
+      suggestions.push('Show my spending')
+      suggestions.push('Account balances')
+    }
+
+    if (responseContent.includes('balance') || responseContent.includes('Balance')) {
+      suggestions.push('Show spending this month')
+      suggestions.push('Upcoming bills')
+    }
+
+    if (responseContent.includes('subscription') || responseContent.includes('recurring')) {
+      suggestions.push('Total spending')
+      suggestions.push('Show bills')
+    }
+
+    if (responseContent.includes('package') || responseContent.includes('delivery')) {
+      suggestions.push('Show spending')
+      suggestions.push('My orders')
+    }
+
+    if (responseContent.includes('OTP') || responseContent.includes('code')) {
+      suggestions.push('Show spending')
+      suggestions.push('Account balance')
+    }
+
+    // Default suggestions if nothing specific
+    if (suggestions.length === 0) {
+      suggestions.push('Show spending this month')
+      suggestions.push('Upcoming bills')
+      suggestions.push('Track packages')
+    }
+
+    // Limit to 3 suggestions
+    return suggestions.slice(0, 3)
   }
 
   // Legacy function for backward compatibility
@@ -399,8 +822,72 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
       return response
     }
 
-    // Spending trends
-    if (lowerQuery.includes('trend') || lowerQuery.includes('compare') || lowerQuery.includes('last month')) {
+    // Subscriptions / Recurring expenses
+    if (lowerQuery.includes('subscription') || lowerQuery.includes('recurring') || lowerQuery.includes('monthly charge')) {
+      const recurring = detectRecurringExpenses
+
+      if (recurring.length === 0) {
+        return "🔄 No recurring subscriptions detected.\n\nI look for charges that repeat at regular intervals (weekly, monthly, yearly) from the same merchant."
+      }
+
+      const monthlyTotal = recurring.reduce((sum, r) => {
+        if (r.frequency === 'monthly') return sum + r.amount
+        if (r.frequency === 'yearly') return sum + r.amount / 12
+        if (r.frequency === 'weekly') return sum + r.amount * 4
+        return sum
+      }, 0)
+
+      let response = `🔄 Detected ${recurring.length} subscription(s):\n\n`
+      response += `📊 Estimated Monthly Total: ${formatCurrency(monthlyTotal, recurring[0]?.currency || 'USD')}\n\n`
+
+      recurring.forEach((sub, i) => {
+        const freqLabel = sub.frequency === 'monthly' ? '/mo' : sub.frequency === 'yearly' ? '/yr' : '/wk'
+        response += `${i + 1}. ${sub.merchant}\n`
+        response += `   ${formatCurrency(sub.amount, sub.currency)}${freqLabel} • ${sub.occurrences} charges detected\n`
+        response += `   Last charged: ${formatDate(sub.lastCharge)}\n\n`
+      })
+
+      return response.trim()
+    }
+
+    // Smart summary / digest
+    if (lowerQuery.includes('summary') || lowerQuery.includes('digest') || lowerQuery.includes('overview') || lowerQuery.includes('snapshot')) {
+      const digest = generateSmartDigest
+
+      let response = `📊 Your Financial Snapshot\n\n`
+
+      // Spending this month
+      response += `💰 This Month: ${formatCurrency(digest.totalSpentThisMonth, digest.currency)}\n`
+      if (digest.totalSpentLastMonth > 0) {
+        const arrow = digest.spendingChange > 0 ? '📈' : '📉'
+        const sign = digest.spendingChange > 0 ? '+' : ''
+        response += `   ${arrow} ${sign}${digest.spendingChange.toFixed(1)}% vs last month\n`
+      }
+      response += `   ${digest.transactionCount} transactions\n\n`
+
+      // Top merchant
+      if (digest.topMerchant) {
+        response += `🏪 Top Merchant: ${digest.topMerchant}\n\n`
+      }
+
+      // Subscriptions
+      if (digest.subscriptionTotal > 0) {
+        response += `🔄 Subscriptions: ~${formatCurrency(digest.subscriptionTotal, digest.currency)}/month\n\n`
+      }
+
+      // Bills & Packages
+      if (digest.upcomingBills > 0) {
+        response += `📅 Upcoming Bills: ${digest.upcomingBills}\n`
+      }
+      if (digest.recentPackages > 0) {
+        response += `📦 Recent Packages: ${digest.recentPackages}\n`
+      }
+
+      return response.trim()
+    }
+
+    // Spending trends / compare
+    if (lowerQuery.includes('trend') || lowerQuery.includes('compare') || lowerQuery.includes('vs last')) {
       const transactions = parseTransactions
       const now = new Date()
       const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
@@ -443,6 +930,64 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
       return response.trim()
     }
 
+    // Upcoming bills
+    if (lowerQuery.includes('bill') || lowerQuery.includes('due') || lowerQuery.includes('payment due') || lowerQuery.includes('upcoming')) {
+      const bills = parseBills
+
+      if (bills.length === 0) {
+        return "📅 No bill reminders found in your messages.\n\nMake sure you have SMS notifications enabled for your credit cards and utility providers."
+      }
+
+      let response = `📅 Found ${bills.length} bill-related message(s):\n\n`
+      bills.slice(0, 8).forEach((bill, i) => {
+        const status = bill.isOverdue ? '⚠️ OVERDUE' : bill.dueDate ? '📆 Due' : ''
+        const dueDateStr = bill.dueDate ? bill.dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Unknown'
+        const amountStr = bill.amount ? formatCurrency(bill.amount, bill.currency) : 'Amount not found'
+
+        response += `${i + 1}. ${bill.billType} - ${bill.merchant}\n`
+        response += `   ${status} ${dueDateStr} • ${amountStr}\n`
+        response += `   ${bill.message.substring(0, 60).replace(/\n/g, ' ')}...\n\n`
+      })
+
+      return response.trim()
+    }
+
+    // Account balance
+    if (lowerQuery.includes('balance') || lowerQuery.includes('account balance') || lowerQuery.includes('bank balance')) {
+      const balances = parseBalances
+
+      if (balances.length === 0) {
+        return "💳 No account balance information found in your messages.\n\nMake sure you have SMS notifications enabled for your bank accounts."
+      }
+
+      // Filter to only show balances with actual amounts
+      const withAmounts = balances.filter(b => b.balance !== null && b.balance > 0)
+
+      let response = `💳 Found ${balances.length} account balance(s):\n\n`
+
+      if (withAmounts.length > 0) {
+        withAmounts.slice(0, 6).forEach((bal, i) => {
+          const balanceStr = formatCurrency(bal.balance!, bal.currency)
+          const dateStr = formatDate(bal.date)
+          const name = bal.institution || bal.accountType
+
+          response += `${i + 1}. ${name}\n`
+          response += `   💰 ${balanceStr}\n`
+          response += `   ${bal.accountType} • Updated ${dateStr}\n\n`
+        })
+      } else {
+        // Show what we found but couldn't extract amounts
+        balances.slice(0, 5).forEach((bal, i) => {
+          const name = bal.institution || bal.accountType
+          response += `${i + 1}. ${name} - ${bal.accountType}\n`
+          response += `   ${bal.message.substring(0, 80).replace(/\n/g, ' ')}...\n\n`
+        })
+        response += "\n⚠️ Could not extract exact balance amounts from messages."
+      }
+
+      return response.trim()
+    }
+
     // Delivery tracking
     if (lowerQuery.includes('delivery') || lowerQuery.includes('tracking') || lowerQuery.includes('package')) {
       const deliveryMessages = messages.filter(msg => {
@@ -452,17 +997,57 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
           bodyLower.includes('tracking') ||
           bodyLower.includes('package') ||
           bodyLower.includes('out for delivery') ||
-          bodyLower.includes('delivered')
-      }).slice(0, 5)
+          bodyLower.includes('delivered') ||
+          bodyLower.includes('arriving') ||
+          bodyLower.includes('dispatched')
+      }).sort((a, b) => b.date - a.date).slice(0, 8)
 
       if (deliveryMessages.length === 0) {
         return "📦 No delivery or tracking information found in recent messages."
       }
 
-      let response = `📦 Found ${deliveryMessages.length} delivery-related message(s):\n\n`
+      let response = `📦 Found ${deliveryMessages.length} package(s):\n\n`
       deliveryMessages.forEach((msg, i) => {
-        const preview = msg.body.substring(0, 100).replace(/\n/g, ' ')
-        response += `${i + 1}. ${formatDate(msg.date)}\n   ${preview}...\n\n`
+        const bodyLower = msg.body.toLowerCase()
+
+        // Determine status
+        let status = '📦 Ordered'
+        let statusColor = ''
+        if (bodyLower.includes('delivered')) {
+          status = '✅ Delivered'
+        } else if (bodyLower.includes('out for delivery')) {
+          status = '🚚 Out for Delivery'
+        } else if (bodyLower.includes('arriving today') || bodyLower.includes('arrive today')) {
+          status = '🚚 Arriving Today'
+        } else if (bodyLower.includes('shipped') || bodyLower.includes('dispatched')) {
+          status = '📤 Shipped'
+        } else if (bodyLower.includes('in transit') || bodyLower.includes('on the way')) {
+          status = '🚛 In Transit'
+        }
+
+        // Extract carrier
+        const carriers = ['amazon', 'fedex', 'ups', 'usps', 'dhl', 'ontrac', 'lasership']
+        let carrier = ''
+        for (const c of carriers) {
+          if (bodyLower.includes(c) || msg.address.toLowerCase().includes(c)) {
+            carrier = c.toUpperCase()
+            break
+          }
+        }
+
+        // Extract merchant
+        const merchant = extractMerchantFromMessage(msg.body)
+
+        // Extract tracking number (if visible)
+        const trackingMatch = msg.body.match(/(?:tracking|track)[:\s#]*([A-Z0-9]{10,22})/i)
+        const tracking = trackingMatch ? trackingMatch[1] : null
+
+        response += `${i + 1}. ${merchant || carrier || 'Package'}\n`
+        response += `   ${status}${carrier ? ` • ${carrier}` : ''}\n`
+        if (tracking) {
+          response += `   Tracking: ${tracking}\n`
+        }
+        response += `   ${formatDate(msg.date)}\n\n`
       })
       return response.trim()
     }
@@ -528,7 +1113,7 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     }
 
     // Default response with more options
-    return "I can help you analyze your messages! Try asking:\n\n💰 Spending:\n• \"How much did I spend this month?\"\n• \"Amazon spending\" or \"Amazon transactions\"\n• \"Spent at Swiggy this week\"\n• \"List my transactions\"\n• \"Show spending by category\"\n• \"Compare spending trends\"\n• \"Top merchants\"\n\n🔍 Search:\n• \"Find my OTP codes\"\n• \"Search for Amazon\"\n• \"Show delivery updates\"\n\n📊 Statistics:\n• \"How many messages do I have?\"\n• \"Who do I text most?\""
+    return "I can help you analyze your messages! Try asking:\n\n💰 Spending:\n• \"How much did I spend this month?\"\n• \"Amazon spending\" or \"Amazon transactions\"\n• \"Spent at Swiggy this week\"\n• \"List my transactions\"\n• \"Show spending by category\"\n• \"Top merchants\"\n\n📅 Bills & Payments:\n• \"Show my upcoming bills\"\n• \"Any payment due?\"\n• \"Credit card due date\"\n\n💳 Account Info:\n• \"What's my account balance?\"\n• \"Show my bank balance\"\n\n📦 Packages:\n• \"Track my packages\"\n• \"Show delivery updates\"\n\n🔐 OTP Codes:\n• \"Find my OTP codes\"\n• \"Show verification codes\"\n\n📊 Statistics:\n• \"How many messages do I have?\"\n• \"Who do I text most?\""
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -566,25 +1151,150 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
               <p className="text-sm text-gray-500 dark:text-gray-400">Analyze your messages and spending</p>
             </div>
           </div>
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-            >
-              <X className="w-5 h-5 text-gray-600 dark:text-gray-400" />
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {/* New Chat button - show when conversation exists */}
+            {conversation.length > 0 && (
+              <button
+                onClick={() => {
+                  setConversation([])
+                  setQuery('')
+                  setShowDigest(true)
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors text-sm font-medium"
+                title="Start new chat"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New Chat</span>
+              </button>
+            )}
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Conversation */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {conversation.length === 0 && (
-            <div className="text-center py-12">
-              <Brain className="w-16 h-16 mx-auto text-gray-300 dark:text-gray-600 mb-4" />
-              <p className="text-gray-500 dark:text-gray-400 mb-2">Ask me anything about your messages!</p>
-              <p className="text-sm text-gray-400 dark:text-gray-500">
-                Try: "How much did I spend this month?"
-              </p>
+            <div className="py-4">
+              {/* Smart Digest Card */}
+              {showDigest && parseTransactions.length > 0 && (
+                <div className="mb-6 p-4 rounded-xl bg-gradient-to-br from-blue-50 to-purple-50 dark:from-blue-900/20 dark:to-purple-900/20 border border-blue-200 dark:border-blue-800">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                      <span className="font-semibold text-gray-900 dark:text-white">This Month</span>
+                    </div>
+                    <button
+                      onClick={() => setShowDigest(false)}
+                      className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-2xl font-bold text-gray-900 dark:text-white">
+                        {formatCurrency(generateSmartDigest.totalSpentThisMonth, generateSmartDigest.currency)}
+                      </div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1">
+                        {generateSmartDigest.spendingChange !== 0 && (
+                          <>
+                            <span className={generateSmartDigest.spendingChange > 0 ? 'text-red-500' : 'text-green-500'}>
+                              {generateSmartDigest.spendingChange > 0 ? '↑' : '↓'}
+                              {Math.abs(generateSmartDigest.spendingChange).toFixed(0)}%
+                            </span>
+                            <span>vs last month</span>
+                          </>
+                        )}
+                        {generateSmartDigest.spendingChange === 0 && (
+                          <span>{generateSmartDigest.transactionCount} transactions</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1 text-sm">
+                      {detectRecurringExpenses.length > 0 && (
+                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
+                          <Repeat className="w-4 h-4" />
+                          <span>{detectRecurringExpenses.length} subscriptions</span>
+                        </div>
+                      )}
+                      {generateSmartDigest.upcomingBills > 0 && (
+                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
+                          <Calendar className="w-4 h-4" />
+                          <span>{generateSmartDigest.upcomingBills} bills due</span>
+                        </div>
+                      )}
+                      {generateSmartDigest.recentPackages > 0 && (
+                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
+                          <Package className="w-4 h-4" />
+                          <span>{generateSmartDigest.recentPackages} packages</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="text-center mb-6">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">How can I help you?</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  Ask about spending, bills, subscriptions, packages, and more.
+                </p>
+              </div>
+
+              {/* Quick Action Cards */}
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  ...QUICK_ACTIONS,
+                  { icon: Repeat, title: 'Subscriptions', query: 'Show my subscriptions', color: 'indigo' },
+                  { icon: ArrowUpDown, title: 'Compare', query: 'Compare spending vs last month', color: 'cyan' },
+                ].map((action, idx) => {
+                  const Icon = action.icon
+                  const colorClasses: Record<string, string> = {
+                    blue: 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400',
+                    orange: 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400',
+                    green: 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400',
+                    purple: 'bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400',
+                    red: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400',
+                    teal: 'bg-teal-50 dark:bg-teal-900/20 text-teal-600 dark:text-teal-400',
+                    indigo: 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400',
+                    cyan: 'bg-cyan-50 dark:bg-cyan-900/20 text-cyan-600 dark:text-cyan-400',
+                  }
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        setQuery(action.query)
+                        setShowDigest(false)
+                        // Auto-submit the query
+                        setConversation(prev => [...prev, { role: 'user', content: action.query }])
+                        setIsLoading(true)
+                        const timeoutId = setTimeout(() => {
+                          const response = generateResponse(action.query)
+                          setConversation(prev => [...prev, { role: 'assistant', content: response }])
+                          setIsLoading(false)
+                          setQuery('')
+                        }, 500)
+                        timeoutsRef.current.push(timeoutId)
+                      }}
+                      className="flex items-center gap-3 p-3 rounded-xl bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500 transition-all hover:shadow-md text-left"
+                    >
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${colorClasses[action.color]}`}>
+                        <Icon className="w-4 h-4" />
+                      </div>
+                      <div className="font-medium text-sm text-gray-900 dark:text-white">{action.title}</div>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           )}
 
@@ -593,14 +1303,66 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
               key={idx}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                  msg.role === 'user'
-                    ? 'bg-blue-500 text-white'
-                    : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
-                }`}
-              >
-                <p className="whitespace-pre-wrap">{msg.content}</p>
+              <div className={`max-w-[85%] ${msg.role === 'user' ? '' : 'group'}`}>
+                <div
+                  className={`rounded-2xl px-4 py-3 ${
+                    msg.role === 'user'
+                      ? 'bg-blue-500 text-white'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap text-sm">{msg.content}</p>
+                </div>
+
+                {/* Copy button and follow-ups for assistant messages */}
+                {msg.role === 'assistant' && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(msg.content)
+                        setCopiedIndex(idx)
+                        setTimeout(() => setCopiedIndex(null), 2000)
+                      }}
+                      className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors opacity-0 group-hover:opacity-100"
+                    >
+                      {copiedIndex === idx ? (
+                        <>
+                          <Check className="w-3 h-3 text-green-500" />
+                          <span className="text-green-500">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* Suggested follow-ups after assistant response */}
+                {msg.role === 'assistant' && idx === conversation.length - 1 && !isLoading && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {getSuggestedFollowUps(msg.content).map((suggestion, sIdx) => (
+                      <button
+                        key={sIdx}
+                        onClick={() => {
+                          setConversation(prev => [...prev, { role: 'user', content: suggestion }])
+                          setIsLoading(true)
+                          const timeoutId = setTimeout(() => {
+                            const response = generateResponse(suggestion)
+                            setConversation(prev => [...prev, { role: 'assistant', content: response }])
+                            setIsLoading(false)
+                          }, 500)
+                          timeoutsRef.current.push(timeoutId)
+                        }}
+                        className="px-3 py-1.5 text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           ))}

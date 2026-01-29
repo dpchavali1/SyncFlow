@@ -633,6 +633,14 @@ class CallMonitorService : Service() {
         currentCallId = null
         pendingPhoneNumber = null
         clearStoredPhoneNumber()
+
+        // Auto-stop service after call ends to save battery
+        // Delay to allow any final commands to be processed
+        serviceScope.launch {
+            delay(5000) // 5 second grace period
+            Log.d(TAG, "📞 Auto-stopping CallMonitorService after call ended")
+            stopSelf()
+        }
     }
 
     /**

@@ -427,10 +427,16 @@ struct MessageView: View {
                     onAttachmentTap: { showAttachmentPicker = true },
                     onMicrophoneTap: {
                         startVoiceRecording()
-                    }
-                ) {
-                    await sendMessage()
-                }
+                    },
+                    onSend: {
+                        await sendMessage()
+                    },
+                    onSchedule: { scheduledDate in
+                        scheduleMessage(for: scheduledDate)
+                    },
+                    recipientName: conversation.contactName,
+                    recipientNumber: conversation.address
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -757,6 +763,34 @@ struct MessageView: View {
         }
 
         isSending = false
+    }
+
+    // MARK: - Schedule Message
+
+    private func scheduleMessage(for date: Date) {
+        let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasText else { return }
+
+        let replyPrefix = replyToMessage.map { buildReplyPrefix(for: $0) }
+        let body = mergeReplyPrefix(prefix: replyPrefix, body: messageText)
+
+        Task {
+            do {
+                try await appState.scheduledMessageService.scheduleMessage(
+                    recipientNumber: activeSendAddress,
+                    recipientName: conversation.contactName,
+                    message: body,
+                    scheduledTime: date
+                )
+                // Clear after scheduling
+                await MainActor.run {
+                    messageText = ""
+                    replyToMessage = nil
+                }
+            } catch {
+                print("Error scheduling message: \(error)")
+            }
+        }
     }
 
     private func mergeReplyPrefix(prefix: String?, body: String) -> String {
@@ -3010,12 +3044,17 @@ struct ComposeBar: View {
     var onAttachmentTap: (() -> Void)? = nil
     var onMicrophoneTap: (() -> Void)? = nil
     let onSend: () async -> Void
+    var onSchedule: ((Date) -> Void)? = nil
+    var recipientName: String? = nil
+    var recipientNumber: String? = nil
 
     @FocusState private var isTextFieldFocused: Bool
     @StateObject private var audioRecorder = AudioRecorderService.shared
     @State private var isHoveringAttachment = false
     @State private var isHoveringTemplates = false
     @State private var isHoveringEmoji = false
+    @State private var isHoveringSchedule = false
+    @State private var showScheduleSheet = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -3095,6 +3134,29 @@ struct ComposeBar: View {
                     )
             )
 
+            // Schedule button (only show if onSchedule is provided and there's text)
+            if onSchedule != nil && canSend {
+                Button {
+                    showScheduleSheet = true
+                } label: {
+                    Image(systemName: "clock")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(isHoveringSchedule ? .accentColor : .secondary)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle()
+                                .fill(isHoveringSchedule ? Color.accentColor.opacity(0.1) : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Schedule message for later")
+                .onHover { hovering in
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        isHoveringSchedule = hovering
+                    }
+                }
+            }
+
             // Send button
             Button {
                 Task {
@@ -3139,6 +3201,17 @@ struct ComposeBar: View {
             .buttonStyle(.plain)
             .disabled(!canSend || isSending)
             .animation(.easeInOut(duration: 0.15), value: canSend)
+        }
+        .sheet(isPresented: $showScheduleSheet) {
+            ScheduleMessageSheet(
+                recipientNumber: recipientNumber ?? "",
+                recipientName: recipientName,
+                messageText: $messageText,
+                isPresented: $showScheduleSheet,
+                onSchedule: { date in
+                    onSchedule?(date)
+                }
+            )
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

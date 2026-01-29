@@ -43,6 +43,7 @@ class FindMyPhoneService(context: Context) {
      */
     fun startListening() {
         Log.d(TAG, "Starting Find My Phone service")
+        database.goOnline()
         listenForFindRequests()
     }
 

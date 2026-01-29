@@ -392,11 +392,11 @@ class MainActivity : ComponentActivity() {
             requestCorePermissions()
         }
 
-        // Start CallMonitorService for phone call sync to Mac/Web
-        // Start it regardless of cached paired devices status - the service is lightweight
-        // and will properly sync calls when devices are paired
-        android.util.Log.d("MainActivity", "Starting CallMonitorService for phone call sync")
-        CallMonitorService.start(this)
+        // CallMonitorService is now started on-demand to save battery:
+        // - Incoming calls: Started by SyncFlowCallScreeningService
+        // - Outgoing calls from Mac/Web: Started by FCM notification (make_phone_call)
+        // - Auto-stops after call ends
+        android.util.Log.d("MainActivity", "CallMonitorService will start on-demand (battery optimization)")
 
         // Handle incoming/active call intent immediately
         // Only enable lock screen override if this is an incoming call

@@ -108,7 +108,7 @@ class PreferencesManager(context: Context) {
     // Helper to check if user is on paid plan
     fun isPaidUser(): Boolean {
         val plan = userPlan.value.lowercase()
-        val isPaid = plan in listOf("monthly", "yearly", "lifetime")
+        val isPaid = plan in listOf("monthly", "yearly", "lifetime", "3year")
         val now = System.currentTimeMillis()
 
         // Check expiration

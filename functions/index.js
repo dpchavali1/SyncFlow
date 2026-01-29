@@ -8,12 +8,48 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const { Resend } = require("resend");
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 admin.initializeApp();
 const crypto = require("crypto");
 
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const ADMIN_EMAIL = "syncflow.contact@gmail.com";
+
+// ============================================================================
+// CLOUDFLARE R2 CONFIGURATION
+// ============================================================================
+// R2 credentials are stored in Firebase environment config
+// Set them with: firebase functions:config:set r2.account_id="xxx" r2.access_key="xxx" r2.secret_key="xxx" r2.bucket="xxx"
+
+const getR2Client = () => {
+    const config = typeof functions.config === "function" ? functions.config() : {};
+    const r2Config = config?.r2 || {};
+
+    const accountId = r2Config.account_id || process.env.R2_ACCOUNT_ID;
+    const accessKey = r2Config.access_key || process.env.R2_ACCESS_KEY;
+    const secretKey = r2Config.secret_key || process.env.R2_SECRET_KEY;
+
+    if (!accountId || !accessKey || !secretKey) {
+        console.warn("[R2] Missing R2 credentials");
+        return null;
+    }
+
+    return new S3Client({
+        region: "auto",
+        endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+        credentials: {
+            accessKeyId: accessKey,
+            secretAccessKey: secretKey,
+        },
+    });
+};
+
+const getR2Bucket = () => {
+    const config = typeof functions.config === "function" ? functions.config() : {};
+    return config?.r2?.bucket || process.env.R2_BUCKET || "syncflow-files";
+};
 
 // Initialize Resend for email notifications
 const getResend = () => {
@@ -90,6 +126,553 @@ const requireAuth = (context) => {
     return context.auth.uid;
 };
 
+/**
+ * Send notification email for account/data deletion requests
+ */
+const sendDeletionNotificationEmail = async (userId, requestType, requestId = null) => {
+    const resend = getResend();
+    if (!resend) {
+        console.log("Resend API key not configured, skipping deletion notification email");
+        return false;
+    }
+
+    const timestamp = new Date().toLocaleString();
+
+    // Get user info for context
+    let userInfo = "";
+    let tierTag = "[UNKNOWN]";
+    try {
+        const [usageSnap, devicesSnap, subSnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`users/${userId}/devices`).once('value'),
+            admin.database().ref(`subscription_records/${userId}/active`).once('value')
+        ]);
+
+        const usage = usageSnap.val() || {};
+        const devices = devicesSnap.val() || {};
+        const subscription = subSnap.val() || {};
+
+        const deviceCount = Object.keys(devices).length;
+        const plan = usage.plan || subscription.plan || "free";
+        const storageBytes = usage.storageBytes || 0;
+        const storageMB = (storageBytes / (1024 * 1024)).toFixed(2);
+
+        // Set tier tag for subject
+        const tierMap = { "free": "FREE", "monthly": "MONTHLY", "yearly": "YEARLY", "3-yearly": "3-YEARLY", "3yearly": "3-YEARLY" };
+        tierTag = `[${tierMap[plan.toLowerCase()] || plan.toUpperCase()}]`;
+
+        userInfo = `
+User Details:
+• User ID: ${userId}
+• Current Plan: ${plan}
+• Connected Devices: ${deviceCount}
+• Storage Used: ${storageMB} MB
+`;
+    } catch (e) {
+        userInfo = `User ID: ${userId}\n(Could not fetch additional details)`;
+    }
+
+    let subject, body;
+
+    if (requestType === "account_deletion_inquiry") {
+        subject = `${tierTag} [Action Required] Account Deletion Inquiry`;
+        body = `
+SYNCFLOW ACCOUNT DELETION INQUIRY
+==================================
+
+A user has inquired about deleting their account via AI Support Chat.
+
+Request Time: ${timestamp}
+
+${userInfo}
+
+Note: The user has only viewed deletion instructions. They may:
+1. Delete via in-app Settings > Account > Delete Account
+2. Email a formal deletion request
+
+No action needed unless they send a formal request.
+
+---
+SyncFlow Admin System
+Automated Notification
+`;
+    } else if (requestType === "data_export_request") {
+        subject = `${tierTag} [Action Required] Data Export Request (GDPR)`;
+        body = `
+SYNCFLOW DATA EXPORT REQUEST
+=============================
+
+A user has requested a full data export via AI Support Chat.
+
+Request Time: ${timestamp}
+Request ID: ${requestId || "N/A"}
+
+${userInfo}
+
+ACTION REQUIRED:
+1. Prepare data export for this user
+2. Upload to secure location
+3. Send download link to user
+4. Update request status in database: data_export_requests/${requestId}
+
+Data to include:
+• All synced messages
+• Contact information
+• Device settings
+• Account preferences
+• Subscription history
+
+Timeline: Complete within 24-48 hours (GDPR compliance)
+
+---
+SyncFlow Admin System
+Automated Notification
+`;
+    } else {
+        subject = `${tierTag} [Info] User Data/Account Activity`;
+        body = `
+SYNCFLOW USER ACTIVITY NOTIFICATION
+====================================
+
+Activity Type: ${requestType}
+Time: ${timestamp}
+
+${userInfo}
+
+---
+SyncFlow Admin System
+Automated Notification
+`;
+    }
+
+    try {
+        const result = await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: subject,
+            text: body,
+        });
+        console.log("Deletion notification email sent:", result);
+        return true;
+    } catch (error) {
+        console.error("Failed to send deletion notification email:", error);
+        return false;
+    }
+};
+
+/**
+ * Send security alert email (sign out all devices, etc.)
+ */
+const sendSecurityAlertEmail = async (userId, alertType) => {
+    const resend = getResend();
+    if (!resend) {
+        console.log("Resend API key not configured, skipping security alert email");
+        return false;
+    }
+
+    const timestamp = new Date().toLocaleString();
+
+    // Get user info and tier for context
+    const [userInfo, tierTag] = await Promise.all([
+        getUserInfoForEmail(userId),
+        getUserTierForSubject(userId)
+    ]);
+
+    let subject, body;
+
+    if (alertType === "signout_all_devices") {
+        subject = `${tierTag} [Security Alert] User Signed Out All Devices`;
+        body = `
+SYNCFLOW SECURITY ALERT
+========================
+
+A user has signed out of all devices via AI Support Chat.
+
+Alert Time: ${timestamp}
+Alert Type: Sign Out All Devices
+
+${userInfo}
+
+This could indicate:
+• User securing their account after potential compromise
+• Lost or stolen device
+• Routine security hygiene
+
+No action required unless user reports issues.
+
+---
+SyncFlow Admin System
+Security Alert
+`;
+    } else {
+        subject = `${tierTag} [Security Alert] User Security Action`;
+        body = `
+SYNCFLOW SECURITY ALERT
+========================
+
+Alert Time: ${timestamp}
+Alert Type: ${alertType}
+
+${userInfo}
+
+---
+SyncFlow Admin System
+Security Alert
+`;
+    }
+
+    try {
+        const result = await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: subject,
+            text: body,
+        });
+        console.log("Security alert email sent:", result);
+        return true;
+    } catch (error) {
+        console.error("Failed to send security alert email:", error);
+        return false;
+    }
+};
+
+/**
+ * Send churn alert email (cancel subscription inquiry)
+ */
+const sendChurnAlertEmail = async (userId, alertType) => {
+    const resend = getResend();
+    if (!resend) {
+        console.log("Resend API key not configured, skipping churn alert email");
+        return false;
+    }
+
+    const timestamp = new Date().toLocaleString();
+
+    // Get user info for context
+    const userInfo = await getUserInfoForEmail(userId);
+
+    // Get subscription details and tier
+    let subscriptionInfo = "";
+    let tierTag = "[UNKNOWN]";
+    try {
+        const subSnap = await admin.database().ref(`subscription_records/${userId}`).once('value');
+        const subRecord = subSnap.val() || {};
+        const active = subRecord.active || {};
+        const history = subRecord.history || {};
+
+        const plan = active.plan || "free";
+        const planExpiresAt = active.planExpiresAt;
+        const firstPremiumDate = subRecord.firstPremiumDate;
+
+        // Set tier tag for subject
+        const tierMap = { "free": "FREE", "monthly": "MONTHLY", "yearly": "YEARLY", "3-yearly": "3-YEARLY", "3yearly": "3-YEARLY" };
+        tierTag = `[${tierMap[plan.toLowerCase()] || plan.toUpperCase()}]`;
+
+        subscriptionInfo = `
+Subscription Details:
+• Current Plan: ${plan}
+• Plan Expires: ${planExpiresAt ? new Date(planExpiresAt).toLocaleDateString() : "N/A"}
+• Premium Since: ${firstPremiumDate ? new Date(firstPremiumDate).toLocaleDateString() : "N/A"}
+• Plan Changes: ${Object.keys(history).length}
+`;
+    } catch (e) {
+        subscriptionInfo = "(Could not fetch subscription details)";
+    }
+
+    const subject = `${tierTag} [Churn Alert] User Inquired About Cancellation`;
+    const body = `
+SYNCFLOW CHURN ALERT
+=====================
+
+A user has asked about canceling their subscription via AI Support Chat.
+
+Alert Time: ${timestamp}
+
+${userInfo}
+
+${subscriptionInfo}
+
+POTENTIAL SAVE OPPORTUNITY:
+This user is considering cancellation. Consider:
+1. Reaching out to understand their concerns
+2. Offering a discount or extended trial
+3. Addressing any service issues they may have
+
+Note: User has only viewed cancellation instructions.
+They still need to cancel through Google Play/App Store.
+
+---
+SyncFlow Admin System
+Churn Prevention Alert
+`;
+
+    try {
+        const result = await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: subject,
+            text: body,
+        });
+        console.log("Churn alert email sent:", result);
+        return true;
+    } catch (error) {
+        console.error("Failed to send churn alert email:", error);
+        return false;
+    }
+};
+
+/**
+ * Send service health email (sync reset, etc.)
+ */
+const sendServiceHealthEmail = async (userId, alertType) => {
+    const resend = getResend();
+    if (!resend) {
+        console.log("Resend API key not configured, skipping service health email");
+        return false;
+    }
+
+    const timestamp = new Date().toLocaleString();
+
+    // Get user info and tier for context
+    const [userInfo, tierTag] = await Promise.all([
+        getUserInfoForEmail(userId),
+        getUserTierForSubject(userId)
+    ]);
+
+    // Get recent sync errors if any
+    let syncErrorInfo = "";
+    try {
+        const errorsSnap = await admin.database().ref(`users/${userId}/sync_errors`).limitToLast(5).once('value');
+        const errors = errorsSnap.val() || {};
+        const errorList = Object.values(errors);
+
+        if (errorList.length > 0) {
+            syncErrorInfo = `\nRecent Sync Errors (before reset):\n`;
+            errorList.forEach((err) => {
+                const errTime = err.timestamp ? new Date(err.timestamp).toLocaleString() : "Unknown";
+                const errMsg = err.message || err.error || "Unknown error";
+                syncErrorInfo += `• ${errTime}: ${errMsg}\n`;
+            });
+        } else {
+            syncErrorInfo = "\nNo recent sync errors recorded.";
+        }
+    } catch (e) {
+        syncErrorInfo = "\n(Could not fetch sync error history)";
+    }
+
+    let subject, body;
+
+    if (alertType === "sync_reset") {
+        subject = `${tierTag} [Service Health] User Reset Sync`;
+        body = `
+SYNCFLOW SERVICE HEALTH ALERT
+==============================
+
+A user has reset their sync state via AI Support Chat.
+
+Alert Time: ${timestamp}
+Action: Full Sync Reset
+
+${userInfo}
+${syncErrorInfo}
+
+This could indicate:
+• Sync issues or stuck sync
+• Data inconsistency problems
+• User troubleshooting on their own
+
+Consider checking:
+1. Are there widespread sync issues?
+2. Is this user having repeated problems?
+3. Any recent backend changes affecting sync?
+
+---
+SyncFlow Admin System
+Service Health Monitor
+`;
+    } else {
+        subject = `${tierTag} [Service Health] User Service Action`;
+        body = `
+SYNCFLOW SERVICE HEALTH ALERT
+==============================
+
+Alert Time: ${timestamp}
+Action: ${alertType}
+
+${userInfo}
+
+---
+SyncFlow Admin System
+Service Health Monitor
+`;
+    }
+
+    try {
+        const result = await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: subject,
+            text: body,
+        });
+        console.log("Service health email sent:", result);
+        return true;
+    } catch (error) {
+        console.error("Failed to send service health email:", error);
+        return false;
+    }
+};
+
+/**
+ * Helper to get user info for email notifications
+ */
+const getUserInfoForEmail = async (userId) => {
+    if (!userId) return "User ID: Unknown (not authenticated)";
+
+    try {
+        const [usageSnap, devicesSnap, subSnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`users/${userId}/devices`).once('value'),
+            admin.database().ref(`subscription_records/${userId}/active`).once('value')
+        ]);
+
+        const usage = usageSnap.val() || {};
+        const devices = devicesSnap.val() || {};
+        const subscription = subSnap.val() || {};
+
+        const deviceCount = Object.keys(devices).length;
+        const plan = usage.plan || subscription.plan || "free";
+        const storageBytes = usage.storageBytes || 0;
+        const storageMB = (storageBytes / (1024 * 1024)).toFixed(2);
+
+        // Get device names
+        let deviceList = "";
+        Object.values(devices).forEach((d) => {
+            const name = d.deviceName || d.name || "Unknown";
+            const platform = d.platform || "unknown";
+            deviceList += `  - ${name} (${platform})\n`;
+        });
+
+        return `
+User Details:
+• User ID: ${userId}
+• Current Plan: ${plan}
+• Connected Devices: ${deviceCount}
+${deviceList}• Storage Used: ${storageMB} MB
+`;
+    } catch (e) {
+        return `User ID: ${userId}\n(Could not fetch additional details)`;
+    }
+};
+
+/**
+ * Get user tier for email subject line
+ * Returns formatted tier string like [FREE], [MONTHLY], [YEARLY], [3-YEARLY]
+ */
+const getUserTierForSubject = async (userId) => {
+    if (!userId) return "[UNKNOWN]";
+
+    try {
+        const [usageSnap, subSnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`subscription_records/${userId}/active`).once('value')
+        ]);
+
+        const usage = usageSnap.val() || {};
+        const subscription = subSnap.val() || {};
+        const plan = (usage.plan || subscription.plan || "free").toLowerCase();
+
+        // Map plan to display name
+        const tierMap = {
+            "free": "FREE",
+            "monthly": "MONTHLY",
+            "yearly": "YEARLY",
+            "3-yearly": "3-YEARLY",
+            "3yearly": "3-YEARLY",
+                    };
+
+        return `[${tierMap[plan] || plan.toUpperCase()}]`;
+    } catch (e) {
+        return "[UNKNOWN]";
+    }
+};
+
+/**
+ * Get identifying information for account recovery
+ * Gathers device names, phone numbers from calls/contacts, etc.
+ */
+const getUserIdentifyingInfo = async (userId) => {
+    if (!userId) return null;
+
+    try {
+        const [devicesSnap, callHistorySnap, contactsSnap, usageSnap, recoverySnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/devices`).once('value'),
+            admin.database().ref(`users/${userId}/call_history`).limitToLast(100).once('value'),
+            admin.database().ref(`users/${userId}/contacts`).limitToLast(50).once('value'),
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`users/${userId}/recovery_info`).once('value')
+        ]);
+
+        const devices = devicesSnap.val() || {};
+        const callHistory = callHistorySnap.val() || {};
+        const contacts = contactsSnap.val() || {};
+        const usage = usageSnap.val() || {};
+        const recoveryInfo = recoverySnap.val() || {};
+
+        // Extract device names
+        const deviceNames = [];
+        Object.values(devices).forEach((d) => {
+            const name = d.deviceName || d.name;
+            const platform = d.platform || "unknown";
+            if (name) {
+                deviceNames.push({ name, platform, lastActive: d.lastSeen || d.lastActive });
+            }
+        });
+
+        // Extract unique phone numbers from call history
+        const phoneNumbers = new Set();
+        Object.values(callHistory).forEach((call) => {
+            if (call.phoneNumber) {
+                phoneNumbers.add(call.phoneNumber);
+            }
+        });
+
+        // Extract phone numbers from contacts
+        Object.values(contacts).forEach((contact) => {
+            if (contact.phoneNumbers) {
+                Object.values(contact.phoneNumbers).forEach((phone) => {
+                    if (typeof phone === 'string') {
+                        phoneNumbers.add(phone);
+                    } else if (phone?.number) {
+                        phoneNumbers.add(phone.number);
+                    }
+                });
+            }
+            if (contact.phoneNumber) {
+                phoneNumbers.add(contact.phoneNumber);
+            }
+        });
+
+        // Convert to array and limit to most relevant (first 20)
+        const phoneNumberList = Array.from(phoneNumbers).slice(0, 20);
+
+        return {
+            userId,
+            deviceNames,
+            phoneNumbers: phoneNumberList,
+            deviceCount: deviceNames.length,
+            contactCount: Object.keys(contacts).length,
+            messageCount: usage.messageCount || 0,
+            storageBytes: usage.storageBytes || 0,
+            plan: usage.plan || "free",
+            accountCreatedAt: recoveryInfo.createdAt || null,
+            lastSyncAt: usage.lastSyncAt || null
+        };
+    } catch (error) {
+        console.error("[getUserIdentifyingInfo] Error:", error);
+        return { userId, error: "Could not fetch identifying info" };
+    }
+};
+
 const requireAdmin = (context) => {
     if (!context.auth) {
         throw new functions.https.HttpsError("unauthenticated", "Authentication required");
@@ -120,16 +703,13 @@ const updateSubscriptionRecord = async (userId, plan, expiresAt, source = "syste
     if (plan === "free") {
         updates["active/freeTrialExpiresAt"] = expiresAt;
         updates["active/planExpiresAt"] = null;
-    } else if (plan === "lifetime") {
-        updates["active/planExpiresAt"] = null;
-        updates["active/freeTrialExpiresAt"] = null;
     } else {
         updates["active/planExpiresAt"] = expiresAt;
         updates["active/freeTrialExpiresAt"] = null;
     }
 
     // Track premium status
-    const isPremium = ["monthly", "yearly", "lifetime"].includes(plan);
+    const isPremium = ["monthly", "yearly", "3-yearly", "3yearly"].includes(plan);
     if (isPremium) {
         updates["wasPremium"] = true;
         if (!snapshot.exists() || !snapshot.child("firstPremiumDate").exists()) {
@@ -594,6 +1174,18 @@ exports.recoverAccount = functions.https.onCall(async (data, context) => {
             throw new functions.https.HttpsError("internal", "Recovery code is corrupted");
         }
 
+        // Check if account is marked for deletion
+        const deletionSnap = await admin.database().ref(`users/${userId}/deletion_scheduled`).once('value');
+        if (deletionSnap.exists()) {
+            const deletion = deletionSnap.val();
+            const daysRemaining = Math.ceil((deletion.scheduledDeletionAt - Date.now()) / (24 * 60 * 60 * 1000));
+            console.log(`Recovery blocked - account ${userId} is scheduled for deletion`);
+            throw new functions.https.HttpsError(
+                "failed-precondition",
+                `This account is scheduled for deletion in ${Math.max(0, daysRemaining)} days. Recovery is disabled. If you want to keep your account, please contact support.`
+            );
+        }
+
         // Update last used timestamp
         await recoveryRef.child('lastUsedAt').set(admin.database.ServerValue.TIMESTAMP);
 
@@ -652,6 +1244,1059 @@ exports.getUserUsage = functions.https.onCall(async (data, context) => {
         }
         console.error('getUserUsage failed:', error.message);
         throw new functions.https.HttpsError("internal", "Failed to get usage data");
+    }
+});
+
+/**
+ * Clear MMS media data from Firebase Storage
+ * This frees up storage quota by deleting synced MMS attachments
+ * Note: This does NOT delete the message text, only the media files
+ */
+exports.clearMmsData = functions.https.onCall(async (data, context) => {
+    try {
+        // Use syncGroupUserId if provided (Mac/Web), otherwise fall back to auth uid
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        console.log(`[clearMmsData] Clearing MMS data for user: ${userId}`);
+
+        // Get list of all MMS media files in Storage
+        const bucket = admin.storage().bucket();
+
+        let deletedCount = 0;
+        let freedBytes = 0;
+
+        // MMS attachments are stored at: users/{userId}/attachments/
+        const attachmentsPrefix = `users/${userId}/attachments/`;
+        try {
+            const [files] = await bucket.getFiles({ prefix: attachmentsPrefix });
+            console.log(`[clearMmsData] Found ${files.length} attachment files`);
+
+            for (const file of files) {
+                try {
+                    // Get file metadata for size tracking
+                    const [metadata] = await file.getMetadata();
+                    const fileSize = parseInt(metadata.size || '0', 10);
+                    freedBytes += fileSize;
+
+                    await file.delete();
+                    deletedCount++;
+                } catch (err) {
+                    console.warn(`[clearMmsData] Failed to delete file ${file.name}:`, err.message);
+                }
+            }
+        } catch (storageError) {
+            console.warn(`[clearMmsData] Error listing attachment files:`, storageError.message);
+        }
+
+        // Also check legacy mms_attachments path (if any files exist there)
+        const legacyMmsPrefix = `mms_attachments/${userId}/`;
+        try {
+            const [legacyFiles] = await bucket.getFiles({ prefix: legacyMmsPrefix });
+            for (const file of legacyFiles) {
+                try {
+                    const [metadata] = await file.getMetadata();
+                    const fileSize = parseInt(metadata.size || '0', 10);
+                    freedBytes += fileSize;
+                    await file.delete();
+                    deletedCount++;
+                } catch (err) {
+                    console.warn(`[clearMmsData] Failed to delete legacy file:`, err.message);
+                }
+            }
+        } catch (err) {
+            // Ignore errors for legacy path
+        }
+
+        // File transfers are stored at: users/{userId}/transfers/
+        const transfersPrefix = `users/${userId}/transfers/`;
+        try {
+            const [transferFiles] = await bucket.getFiles({ prefix: transfersPrefix });
+            for (const file of transferFiles) {
+                try {
+                    const [metadata] = await file.getMetadata();
+                    const fileSize = parseInt(metadata.size || '0', 10);
+                    freedBytes += fileSize;
+
+                    await file.delete();
+                    deletedCount++;
+                } catch (err) {
+                    console.warn(`[clearMmsData] Failed to delete transfer file:`, err.message);
+                }
+            }
+        } catch (err) {
+            console.warn(`[clearMmsData] Error listing transfer files:`, err.message);
+        }
+
+        // Reset storage counter in database
+        const usageRef = admin.database().ref(`users/${userId}/usage`);
+        await usageRef.child('storageBytes').set(0);
+
+        // Also reset monthly mmsBytes and fileBytes counters
+        const usageSnapshot = await usageRef.once('value');
+        const usage = usageSnapshot.val() || {};
+        const monthly = usage.monthly || {};
+
+        const updates = {};
+        for (const periodKey of Object.keys(monthly)) {
+            updates[`monthly/${periodKey}/mmsBytes`] = 0;
+            updates[`monthly/${periodKey}/fileBytes`] = 0;
+        }
+        updates['lastUpdatedAt'] = admin.database.ServerValue.TIMESTAMP;
+
+        if (Object.keys(updates).length > 1) {
+            await usageRef.update(updates);
+        }
+
+        // Also clear R2 files if R2 is configured
+        let r2DeletedCount = 0;
+        let r2FreedBytes = 0;
+        const r2Client = getR2Client();
+
+        if (r2Client) {
+            const bucket = getR2Bucket();
+            let continuationToken = null;
+
+            // Clear files/ prefix
+            do {
+                try {
+                    const listCommand = new ListObjectsV2Command({
+                        Bucket: bucket,
+                        Prefix: `files/${userId}/`,
+                        ContinuationToken: continuationToken,
+                    });
+                    const listResponse = await r2Client.send(listCommand);
+
+                    if (listResponse.Contents) {
+                        for (const obj of listResponse.Contents) {
+                            try {
+                                await r2Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: obj.Key }));
+                                r2DeletedCount++;
+                                r2FreedBytes += obj.Size || 0;
+                            } catch (err) {
+                                console.warn(`[clearMmsData] Failed to delete R2 file:`, err.message);
+                            }
+                        }
+                    }
+                    continuationToken = listResponse.NextContinuationToken;
+                } catch (err) {
+                    console.warn(`[clearMmsData] Error listing R2 files:`, err.message);
+                    break;
+                }
+            } while (continuationToken);
+
+            // Clear mms/ prefix
+            continuationToken = null;
+            do {
+                try {
+                    const listCommand = new ListObjectsV2Command({
+                        Bucket: bucket,
+                        Prefix: `mms/${userId}/`,
+                        ContinuationToken: continuationToken,
+                    });
+                    const listResponse = await r2Client.send(listCommand);
+
+                    if (listResponse.Contents) {
+                        for (const obj of listResponse.Contents) {
+                            try {
+                                await r2Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: obj.Key }));
+                                r2DeletedCount++;
+                                r2FreedBytes += obj.Size || 0;
+                            } catch (err) {
+                                console.warn(`[clearMmsData] Failed to delete R2 mms file:`, err.message);
+                            }
+                        }
+                    }
+                    continuationToken = listResponse.NextContinuationToken;
+                } catch (err) {
+                    console.warn(`[clearMmsData] Error listing R2 mms files:`, err.message);
+                    break;
+                }
+            } while (continuationToken);
+
+            console.log(`[clearMmsData] Cleared ${r2DeletedCount} R2 files, freed ~${Math.round(r2FreedBytes / 1024 / 1024)}MB`);
+        }
+
+        const totalDeleted = deletedCount + r2DeletedCount;
+        const totalFreed = freedBytes + r2FreedBytes;
+
+        console.log(`[clearMmsData] Total cleared: ${totalDeleted} files, freed ~${Math.round(totalFreed / 1024 / 1024)}MB`);
+
+        return {
+            success: true,
+            deletedFiles: totalDeleted,
+            freedBytes: totalFreed,
+            message: `Cleared ${totalDeleted} media files. Storage usage has been reset.`
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[clearMmsData] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to clear MMS data");
+    }
+});
+
+// ============================================================================
+// CLOUDFLARE R2 FILE TRANSFER FUNCTIONS
+// ============================================================================
+
+/**
+ * Generate a presigned URL for uploading a file to R2
+ * This allows clients to upload directly to R2 without going through Firebase
+ */
+exports.getR2UploadUrl = functions.https.onCall(async (data, context) => {
+    try {
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        const { fileName, contentType, fileSize, transferType } = data;
+
+        if (!fileName || !contentType || !fileSize) {
+            throw new functions.https.HttpsError("invalid-argument", "fileName, contentType, and fileSize are required");
+        }
+
+        // Check file size limits
+        const usageRef = admin.database().ref(`users/${userId}/usage`);
+        const usageSnapshot = await usageRef.once('value');
+        const usage = usageSnapshot.val() || {};
+
+        const plan = usage.plan?.toLowerCase();
+        const planExpiresAt = usage.planExpiresAt;
+        const now = Date.now();
+
+        const isPaid = (plan === "lifetime" || plan === "3year") ||
+            ((plan === "monthly" || plan === "yearly" || plan === "paid") &&
+             (!planExpiresAt || planExpiresAt > now));
+
+        const maxFileSize = isPaid ? 500 * 1024 * 1024 : 50 * 1024 * 1024; // 500MB pro, 50MB free
+
+        if (fileSize > maxFileSize) {
+            const maxMB = maxFileSize / (1024 * 1024);
+            throw new functions.https.HttpsError(
+                "resource-exhausted",
+                `File too large. Max size: ${maxMB}MB${isPaid ? "" : " (Upgrade to Pro for 500MB)"}`
+            );
+        }
+
+        // Check storage quota
+        const storageLimit = isPaid ? 2 * 1024 * 1024 * 1024 : 100 * 1024 * 1024; // 2GB pro, 100MB free
+        const currentStorage = usage.storageBytes || 0;
+
+        if (currentStorage + fileSize > storageLimit) {
+            throw new functions.https.HttpsError(
+                "resource-exhausted",
+                "Storage limit reached. Clear old files or upgrade your plan."
+            );
+        }
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            throw new functions.https.HttpsError("unavailable", "R2 storage not configured");
+        }
+
+        // Generate unique file key based on transfer type
+        const fileId = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+        const messageId = data.messageId; // Optional, for MMS
+        let fileKey;
+
+        switch (transferType) {
+            case 'photos':
+            case 'photo':
+                // Photos: photos/{userId}/{fileId}.{ext}
+                const photoExt = fileName.includes('.') ? fileName.split('.').pop() : 'jpg';
+                fileKey = `photos/${userId}/${fileId}.${photoExt}`;
+                break;
+            case 'mms':
+                // MMS: mms/{userId}/{messageId}/{fileId}.{ext}
+                const mmsExt = fileName.includes('.') ? fileName.split('.').pop() : 'bin';
+                const msgId = messageId || fileId;
+                fileKey = `mms/${userId}/${msgId}/${fileId}.${mmsExt}`;
+                break;
+            default:
+                // Files: files/{userId}/{fileId}/{fileName}
+                fileKey = `files/${userId}/${fileId}/${fileName}`;
+        }
+
+        // Generate presigned upload URL (valid for 1 hour)
+        const command = new PutObjectCommand({
+            Bucket: getR2Bucket(),
+            Key: fileKey,
+            ContentType: contentType,
+            ContentLength: fileSize,
+        });
+
+        const uploadUrl = await getSignedUrl(r2Client, command, { expiresIn: 3600 });
+
+        console.log(`[R2] Generated upload URL for ${fileName} (${fileSize} bytes) -> ${fileKey}`);
+
+        return {
+            success: true,
+            uploadUrl: uploadUrl,
+            fileKey: fileKey,
+            fileId: fileId,
+            expiresIn: 3600
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[getR2UploadUrl] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to generate upload URL");
+    }
+});
+
+/**
+ * Confirm R2 upload completed and record usage
+ */
+exports.confirmR2Upload = functions.https.onCall(async (data, context) => {
+    try {
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        const { fileKey, fileSize, transferType, photoMetadata } = data;
+
+        if (!fileKey || !fileSize) {
+            throw new functions.https.HttpsError("invalid-argument", "fileKey and fileSize are required");
+        }
+
+        // Record usage in Firebase
+        const periodKey = new Date().toISOString().slice(0, 7).replace('-', ''); // YYYYMM
+        const usageRef = admin.database().ref(`users/${userId}/usage`);
+
+        const updates = {
+            [`monthly/${periodKey}/uploadBytes`]: admin.database.ServerValue.increment(fileSize),
+            'storageBytes': admin.database.ServerValue.increment(fileSize),
+            'lastUpdatedAt': admin.database.ServerValue.TIMESTAMP
+        };
+
+        if (transferType === 'mms') {
+            updates[`monthly/${periodKey}/mmsBytes`] = admin.database.ServerValue.increment(fileSize);
+        } else if (transferType === 'photo' || transferType === 'photos') {
+            updates[`monthly/${periodKey}/photoBytes`] = admin.database.ServerValue.increment(fileSize);
+
+            // For photos, also store the photo metadata in the database
+            if (photoMetadata) {
+                const photoId = photoMetadata.id || fileKey.split('/').pop()?.split('.')[0];
+                const photoRef = admin.database().ref(`users/${userId}/photos/${photoId}`);
+                await photoRef.set({
+                    id: photoId,
+                    r2Key: fileKey,
+                    originalId: photoMetadata.originalId || null,
+                    fileName: photoMetadata.fileName || null,
+                    dateTaken: photoMetadata.dateTaken || null,
+                    width: photoMetadata.width || null,
+                    height: photoMetadata.height || null,
+                    size: fileSize,
+                    mimeType: photoMetadata.mimeType || 'image/jpeg',
+                    syncedAt: admin.database.ServerValue.TIMESTAMP
+                });
+            }
+        } else {
+            updates[`monthly/${periodKey}/fileBytes`] = admin.database.ServerValue.increment(fileSize);
+        }
+
+        await usageRef.update(updates);
+
+        console.log(`[R2] Confirmed upload: ${fileKey} (${fileSize} bytes, type: ${transferType})`);
+
+        return { success: true };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[confirmR2Upload] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to confirm upload");
+    }
+});
+
+/**
+ * Generate a presigned URL for downloading a file from R2
+ */
+exports.getR2DownloadUrl = functions.https.onCall(async (data, context) => {
+    try {
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        const { fileKey } = data;
+
+        if (!fileKey) {
+            throw new functions.https.HttpsError("invalid-argument", "fileKey is required");
+        }
+
+        // Verify the file belongs to this user
+        if (!fileKey.includes(`/${userId}/`)) {
+            throw new functions.https.HttpsError("permission-denied", "Access denied to this file");
+        }
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            throw new functions.https.HttpsError("unavailable", "R2 storage not configured");
+        }
+
+        // Generate presigned download URL (valid for 1 hour)
+        const command = new GetObjectCommand({
+            Bucket: getR2Bucket(),
+            Key: fileKey,
+        });
+
+        const downloadUrl = await getSignedUrl(r2Client, command, { expiresIn: 3600 });
+
+        return {
+            success: true,
+            downloadUrl: downloadUrl,
+            expiresIn: 3600
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[getR2DownloadUrl] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to generate download URL");
+    }
+});
+
+/**
+ * Delete a file from R2 and update usage
+ */
+exports.deleteR2File = functions.https.onCall(async (data, context) => {
+    try {
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        const { fileKey, fileSize } = data;
+
+        if (!fileKey) {
+            throw new functions.https.HttpsError("invalid-argument", "fileKey is required");
+        }
+
+        // Verify the file belongs to this user
+        if (!fileKey.includes(`/${userId}/`)) {
+            throw new functions.https.HttpsError("permission-denied", "Access denied to this file");
+        }
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            throw new functions.https.HttpsError("unavailable", "R2 storage not configured");
+        }
+
+        // Delete the file
+        const command = new DeleteObjectCommand({
+            Bucket: getR2Bucket(),
+            Key: fileKey,
+        });
+
+        await r2Client.send(command);
+
+        // Update storage usage if fileSize provided
+        if (fileSize && fileSize > 0) {
+            const usageRef = admin.database().ref(`users/${userId}/usage`);
+            await usageRef.update({
+                'storageBytes': admin.database.ServerValue.increment(-fileSize),
+                'lastUpdatedAt': admin.database.ServerValue.TIMESTAMP
+            });
+        }
+
+        console.log(`[R2] Deleted file: ${fileKey}`);
+
+        return { success: true };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[deleteR2File] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to delete file");
+    }
+});
+
+/**
+ * Clear all R2 files for a user (called from clearMmsData)
+ */
+exports.clearR2Files = functions.https.onCall(async (data, context) => {
+    try {
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("unauthenticated", "User ID required");
+        }
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            // R2 not configured, return success (nothing to delete)
+            return { success: true, deletedFiles: 0, freedBytes: 0 };
+        }
+
+        const bucket = getR2Bucket();
+        let deletedCount = 0;
+        let freedBytes = 0;
+        let continuationToken = null;
+
+        // List and delete all files for this user
+        do {
+            const listCommand = new ListObjectsV2Command({
+                Bucket: bucket,
+                Prefix: `files/${userId}/`,
+                ContinuationToken: continuationToken,
+            });
+
+            const listResponse = await r2Client.send(listCommand);
+
+            if (listResponse.Contents) {
+                for (const obj of listResponse.Contents) {
+                    try {
+                        const deleteCommand = new DeleteObjectCommand({
+                            Bucket: bucket,
+                            Key: obj.Key,
+                        });
+                        await r2Client.send(deleteCommand);
+                        deletedCount++;
+                        freedBytes += obj.Size || 0;
+                    } catch (err) {
+                        console.warn(`[clearR2Files] Failed to delete ${obj.Key}:`, err.message);
+                    }
+                }
+            }
+
+            continuationToken = listResponse.NextContinuationToken;
+        } while (continuationToken);
+
+        // Also clear MMS files
+        continuationToken = null;
+        do {
+            const listCommand = new ListObjectsV2Command({
+                Bucket: bucket,
+                Prefix: `mms/${userId}/`,
+                ContinuationToken: continuationToken,
+            });
+
+            const listResponse = await r2Client.send(listCommand);
+
+            if (listResponse.Contents) {
+                for (const obj of listResponse.Contents) {
+                    try {
+                        const deleteCommand = new DeleteObjectCommand({
+                            Bucket: bucket,
+                            Key: obj.Key,
+                        });
+                        await r2Client.send(deleteCommand);
+                        deletedCount++;
+                        freedBytes += obj.Size || 0;
+                    } catch (err) {
+                        console.warn(`[clearR2Files] Failed to delete ${obj.Key}:`, err.message);
+                    }
+                }
+            }
+
+            continuationToken = listResponse.NextContinuationToken;
+        } while (continuationToken);
+
+        // Also clear photos files
+        continuationToken = null;
+        do {
+            const listCommand = new ListObjectsV2Command({
+                Bucket: bucket,
+                Prefix: `photos/${userId}/`,
+                ContinuationToken: continuationToken,
+            });
+
+            const listResponse = await r2Client.send(listCommand);
+
+            if (listResponse.Contents) {
+                for (const obj of listResponse.Contents) {
+                    try {
+                        const deleteCommand = new DeleteObjectCommand({
+                            Bucket: bucket,
+                            Key: obj.Key,
+                        });
+                        await r2Client.send(deleteCommand);
+                        deletedCount++;
+                        freedBytes += obj.Size || 0;
+                    } catch (err) {
+                        console.warn(`[clearR2Files] Failed to delete ${obj.Key}:`, err.message);
+                    }
+                }
+            }
+
+            continuationToken = listResponse.NextContinuationToken;
+        } while (continuationToken);
+
+        // Reset user's storage counter
+        if (freedBytes > 0) {
+            const usageRef = admin.database().ref(`users/${userId}/usage`);
+            await usageRef.update({
+                'storageBytes': 0,
+                'lastUpdatedAt': admin.database.ServerValue.TIMESTAMP
+            });
+        }
+
+        console.log(`[clearR2Files] Cleared ${deletedCount} R2 files, freed ~${Math.round(freedBytes / 1024 / 1024)}MB`);
+
+        return {
+            success: true,
+            deletedFiles: deletedCount,
+            freedBytes: freedBytes
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[clearR2Files] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to clear R2 files");
+    }
+});
+
+/**
+ * Get R2 storage analytics (admin function)
+ * Lists all files and calculates storage statistics
+ */
+exports.getR2Analytics = functions.https.onCall(async (data, context) => {
+    requireAdmin(context);
+
+    try {
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            return {
+                success: true,
+                totalFiles: 0,
+                totalSize: 0,
+                fileCounts: { files: 0, mms: 0, photos: 0 },
+                sizeCounts: { files: 0, mms: 0, photos: 0 },
+                largestFiles: [],
+                oldestFiles: [],
+                estimatedCost: 0,
+                userStorage: []
+            };
+        }
+
+        const bucket = getR2Bucket();
+        const allFiles = [];
+        const fileCounts = { files: 0, mms: 0, photos: 0 };
+        const sizeCounts = { files: 0, mms: 0, photos: 0 };
+
+        // List all objects with pagination
+        let continuationToken = null;
+        do {
+            const listCommand = new ListObjectsV2Command({
+                Bucket: bucket,
+                ContinuationToken: continuationToken,
+            });
+            const response = await r2Client.send(listCommand);
+
+            if (response.Contents) {
+                response.Contents.forEach(obj => {
+                    const key = obj.Key || '';
+                    const size = obj.Size || 0;
+                    const uploadedAt = obj.LastModified?.getTime() || 0;
+
+                    // Determine type from key prefix
+                    let type = 'files';
+                    if (key.startsWith('mms/')) {
+                        type = 'mms';
+                        fileCounts.mms++;
+                        sizeCounts.mms += size;
+                    } else if (key.startsWith('photos/')) {
+                        type = 'photos';
+                        fileCounts.photos++;
+                        sizeCounts.photos += size;
+                    } else {
+                        fileCounts.files++;
+                        sizeCounts.files += size;
+                    }
+
+                    allFiles.push({ key, size, uploadedAt, type });
+                });
+            }
+            continuationToken = response.NextContinuationToken;
+        } while (continuationToken);
+
+        // Calculate totals
+        const totalSize = sizeCounts.files + sizeCounts.mms + sizeCounts.photos;
+
+        // Get top 10 largest files
+        const largestFiles = [...allFiles]
+            .sort((a, b) => b.size - a.size)
+            .slice(0, 10);
+
+        // Get top 10 oldest files
+        const oldestFiles = [...allFiles]
+            .filter(f => f.uploadedAt > 0)
+            .sort((a, b) => a.uploadedAt - b.uploadedAt)
+            .slice(0, 10);
+
+        // R2 pricing: $0.015 per GB/month
+        const estimatedCost = (totalSize / (1024 * 1024 * 1024)) * 0.015;
+
+        // Get per-user storage from Firebase (tracked in real-time)
+        const usersSnapshot = await admin.database().ref('users').once('value');
+        const userStorage = [];
+
+        usersSnapshot.forEach(userSnapshot => {
+            const userId = userSnapshot.key;
+            const usage = userSnapshot.child('usage').val();
+            if (usage && usage.storageBytes > 0) {
+                userStorage.push({
+                    userId,
+                    storageBytes: usage.storageBytes || 0,
+                    lastUpdatedAt: usage.lastUpdatedAt || 0
+                });
+            }
+        });
+
+        // Sort by storage size descending, take top 20
+        userStorage.sort((a, b) => b.storageBytes - a.storageBytes);
+        const topUserStorage = userStorage.slice(0, 20);
+
+        console.log(`[getR2Analytics] Found ${allFiles.length} files, ${(totalSize / 1024 / 1024).toFixed(2)}MB total, ${userStorage.length} users with storage`);
+
+        return {
+            success: true,
+            totalFiles: allFiles.length,
+            totalSize,
+            fileCounts,
+            sizeCounts,
+            largestFiles,
+            oldestFiles,
+            estimatedCost,
+            userStorage: topUserStorage,
+            totalUsersWithStorage: userStorage.length
+        };
+    } catch (error) {
+        console.error('[getR2Analytics] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to get R2 analytics");
+    }
+});
+
+/**
+ * Cleanup old R2 files (admin function)
+ * Deletes files older than specified days threshold
+ */
+exports.cleanupOldR2Files = functions.https.onCall(async (data, context) => {
+    requireAdmin(context);
+
+    try {
+        const daysThreshold = data?.daysThreshold || 90;
+        const fileType = data?.fileType; // Optional: 'files', 'mms', 'photos', or null for all
+        const cutoffDate = Date.now() - (daysThreshold * 24 * 60 * 60 * 1000);
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            return { success: true, deletedFiles: 0, freedBytes: 0 };
+        }
+
+        const bucket = getR2Bucket();
+        let deletedCount = 0;
+        let freedBytes = 0;
+        let continuationToken = null;
+
+        // Track deleted bytes per user for storage counter updates
+        const userDeletedBytes = {};
+
+        // Build prefix filter if specific type requested
+        const prefix = fileType ? `${fileType}/` : undefined;
+
+        do {
+            const listCommand = new ListObjectsV2Command({
+                Bucket: bucket,
+                Prefix: prefix,
+                ContinuationToken: continuationToken,
+            });
+
+            const listResponse = await r2Client.send(listCommand);
+
+            if (listResponse.Contents) {
+                for (const obj of listResponse.Contents) {
+                    const objDate = obj.LastModified?.getTime() || 0;
+                    if (objDate > 0 && objDate < cutoffDate) {
+                        try {
+                            await r2Client.send(new DeleteObjectCommand({
+                                Bucket: bucket,
+                                Key: obj.Key,
+                            }));
+                            deletedCount++;
+                            const fileSize = obj.Size || 0;
+                            freedBytes += fileSize;
+
+                            // Track per-user deleted bytes
+                            const userId = extractUserIdFromR2Key(obj.Key);
+                            if (userId && fileSize > 0) {
+                                userDeletedBytes[userId] = (userDeletedBytes[userId] || 0) + fileSize;
+                            }
+                        } catch (err) {
+                            console.warn(`[cleanupOldR2Files] Failed to delete ${obj.Key}:`, err.message);
+                        }
+                    }
+                }
+            }
+
+            continuationToken = listResponse.NextContinuationToken;
+        } while (continuationToken);
+
+        // Update storage counters for affected users
+        const updatePromises = Object.entries(userDeletedBytes).map(([userId, bytes]) => {
+            const usageRef = admin.database().ref(`users/${userId}/usage`);
+            return usageRef.update({
+                'storageBytes': admin.database.ServerValue.increment(-bytes),
+                'lastUpdatedAt': admin.database.ServerValue.TIMESTAMP
+            }).catch(err => console.warn(`[cleanupOldR2Files] Failed to update usage for ${userId}:`, err.message));
+        });
+        await Promise.all(updatePromises);
+
+        console.log(`[cleanupOldR2Files] Deleted ${deletedCount} files older than ${daysThreshold} days, freed ${(freedBytes / 1024 / 1024).toFixed(2)}MB, updated ${Object.keys(userDeletedBytes).length} users`);
+
+        return {
+            success: true,
+            deletedFiles: deletedCount,
+            freedBytes,
+            daysThreshold,
+            usersAffected: Object.keys(userDeletedBytes).length
+        };
+    } catch (error) {
+        console.error('[cleanupOldR2Files] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to cleanup old R2 files");
+    }
+});
+
+/**
+ * Get paginated R2 file list (admin function)
+ */
+exports.getR2FileList = functions.https.onCall(async (data, context) => {
+    requireAdmin(context);
+
+    try {
+        const fileType = data?.fileType; // Optional: 'files', 'mms', 'photos'
+        const limit = Math.min(data?.limit || 100, 1000);
+        const continuationToken = data?.continuationToken;
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            return { success: true, files: [], nextToken: null, totalCount: 0 };
+        }
+
+        const bucket = getR2Bucket();
+        const prefix = fileType ? `${fileType}/` : undefined;
+
+        const listCommand = new ListObjectsV2Command({
+            Bucket: bucket,
+            Prefix: prefix,
+            MaxKeys: limit,
+            ContinuationToken: continuationToken,
+        });
+
+        const response = await r2Client.send(listCommand);
+
+        const files = (response.Contents || []).map(obj => {
+            const key = obj.Key || '';
+            let type = 'files';
+            if (key.startsWith('mms/')) type = 'mms';
+            else if (key.startsWith('photos/')) type = 'photos';
+
+            return {
+                key,
+                size: obj.Size || 0,
+                uploadedAt: obj.LastModified?.getTime() || 0,
+                type
+            };
+        });
+
+        return {
+            success: true,
+            files,
+            nextToken: response.NextContinuationToken || null,
+            hasMore: response.IsTruncated || false
+        };
+    } catch (error) {
+        console.error('[getR2FileList] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to get R2 file list");
+    }
+});
+
+/**
+ * Helper to extract userId from R2 file key
+ * Keys follow pattern: {type}/{userId}/...
+ */
+function extractUserIdFromR2Key(fileKey) {
+    const parts = fileKey.split('/');
+    if (parts.length >= 2) {
+        return parts[1]; // userId is always second segment
+    }
+    return null;
+}
+
+/**
+ * Delete a specific R2 file by key (admin function)
+ */
+exports.deleteR2FileAdmin = functions.https.onCall(async (data, context) => {
+    requireAdmin(context);
+
+    try {
+        const { fileKey } = data;
+        if (!fileKey) {
+            throw new functions.https.HttpsError("invalid-argument", "fileKey is required");
+        }
+
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            throw new functions.https.HttpsError("unavailable", "R2 storage not configured");
+        }
+
+        const bucket = getR2Bucket();
+
+        // Get file size before deletion for reporting
+        let fileSize = 0;
+        try {
+            const headCommand = new GetObjectCommand({
+                Bucket: bucket,
+                Key: fileKey,
+            });
+            const headResponse = await r2Client.send(headCommand);
+            fileSize = headResponse.ContentLength || 0;
+        } catch (e) {
+            // File may not exist
+        }
+
+        await r2Client.send(new DeleteObjectCommand({
+            Bucket: bucket,
+            Key: fileKey,
+        }));
+
+        // Update user's storage counter
+        if (fileSize > 0) {
+            const userId = extractUserIdFromR2Key(fileKey);
+            if (userId) {
+                const usageRef = admin.database().ref(`users/${userId}/usage`);
+                await usageRef.update({
+                    'storageBytes': admin.database.ServerValue.increment(-fileSize),
+                    'lastUpdatedAt': admin.database.ServerValue.TIMESTAMP
+                });
+            }
+        }
+
+        console.log(`[deleteR2FileAdmin] Deleted: ${fileKey} (${fileSize} bytes)`);
+
+        return {
+            success: true,
+            deletedKey: fileKey,
+            freedBytes: fileSize
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[deleteR2FileAdmin] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to delete R2 file");
+    }
+});
+
+/**
+ * Recalculate user's storage based on actual R2 files
+ * Admin function to fix storage counter mismatches
+ */
+exports.recalculateUserStorage = functions.https.onCall(async (data, context) => {
+    try {
+        const userId = data?.userId;
+
+        if (!userId) {
+            throw new functions.https.HttpsError("invalid-argument", "User ID required");
+        }
+
+        // Verify admin
+        if (!context.auth?.token?.admin) {
+            throw new functions.https.HttpsError("permission-denied", "Admin access required");
+        }
+
+        // Get R2 client
+        const r2Client = getR2Client();
+        if (!r2Client) {
+            throw new functions.https.HttpsError("failed-precondition", "R2 not configured");
+        }
+
+        // Get current storage counter
+        const usageRef = admin.database().ref(`users/${userId}/usage`);
+        const usageSnapshot = await usageRef.once('value');
+        const currentStorageBytes = usageSnapshot.child('storageBytes').val() || 0;
+
+        // List all files for this user in R2
+        let actualBytes = 0;
+        let fileCount = 0;
+        const prefixes = [`mms/${userId}/`, `files/${userId}/`, `photos/${userId}/`];
+
+        for (const prefix of prefixes) {
+            let continuationToken = null;
+
+            do {
+                const listParams = {
+                    Bucket: getR2Bucket(),
+                    Prefix: prefix,
+                    MaxKeys: 1000
+                };
+
+                if (continuationToken) {
+                    listParams.ContinuationToken = continuationToken;
+                }
+
+                const listResult = await r2Client.send(new ListObjectsV2Command(listParams));
+
+                if (listResult.Contents) {
+                    for (const obj of listResult.Contents) {
+                        actualBytes += obj.Size || 0;
+                        fileCount++;
+                    }
+                }
+
+                continuationToken = listResult.IsTruncated ? listResult.NextContinuationToken : null;
+            } while (continuationToken);
+        }
+
+        // Update storage counter to actual value
+        await usageRef.update({
+            'storageBytes': actualBytes,
+            'lastUpdatedAt': admin.database.ServerValue.TIMESTAMP
+        });
+
+        const diff = actualBytes - currentStorageBytes;
+        console.log(`[recalculateUserStorage] User ${userId}: ${fileCount} files, ${actualBytes} bytes actual, was ${currentStorageBytes} bytes (diff: ${diff})`);
+
+        return {
+            success: true,
+            userId,
+            fileCount,
+            actualBytes,
+            previousBytes: currentStorageBytes,
+            difference: diff
+        };
+    } catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        console.error('[recalculateUserStorage] Error:', error);
+        throw new functions.https.HttpsError("internal", "Failed to recalculate storage");
     }
 });
 
@@ -1573,15 +3218,28 @@ async function cleanupUserData(userId, now) {
         await Promise.all(deletePromises);
     }
 
-    // Clean old file transfers (older than 7 days)
+    // Clean old file transfers (older than 7 days) - includes R2 files
     const transfersRef = admin.database().ref(`/users/${userId}/file_transfers`);
     const transfersSnap = await transfersRef.once("value");
     if (transfersSnap.exists()) {
         const deletePromises = [];
+        const r2Client = getR2Client();
+        const r2Bucket = getR2Bucket();
+
         transfersSnap.forEach((child) => {
             const data = child.val();
             const timestamp = data.timestamp || data.startedAt || 0;
             if (now - timestamp > 7 * ONE_DAY) {
+                // Delete R2 file if r2Key exists
+                if (data.r2Key && r2Client) {
+                    deletePromises.push(
+                        r2Client.send(new DeleteObjectCommand({
+                            Bucket: r2Bucket,
+                            Key: data.r2Key,
+                        })).catch(err => console.warn(`[cleanup] Failed to delete R2 file ${data.r2Key}:`, err.message))
+                    );
+                }
+                // Delete database record
                 deletePromises.push(child.ref.remove());
                 stats.oldFileTransfers++;
             }
@@ -2149,7 +3807,7 @@ exports.updateSyncGroupPlan = functions.https.onCall(async (data, context) => {
             throw new functions.https.HttpsError("invalid-argument", "syncGroupId required");
         }
 
-        const validPlans = ["free", "monthly", "yearly", "lifetime"];
+        const validPlans = ["free", "monthly", "yearly", "3-yearly", "3yearly"];
         if (!validPlans.includes(plan)) {
             throw new functions.https.HttpsError("invalid-argument", "Invalid plan");
         }
@@ -2170,16 +3828,22 @@ exports.updateSyncGroupPlan = functions.https.onCall(async (data, context) => {
         // Calculate expiry based on plan
         if (plan === "free") {
             updates["planExpiresAt"] = null;
-        } else if (plan === "lifetime") {
-            updates["planExpiresAt"] = null;
         } else {
-            // Monthly/yearly expire in respective periods
-            const expiryMs = plan === "monthly" ? 30 * 24 * 60 * 60 * 1000 : 365 * 24 * 60 * 60 * 1000;
+            // Monthly/yearly/3-yearly expire in respective periods
+            let expiryMs;
+            if (plan === "monthly") {
+                expiryMs = 30 * 24 * 60 * 60 * 1000;
+            } else if (plan === "yearly") {
+                expiryMs = 365 * 24 * 60 * 60 * 1000;
+            } else {
+                // 3-yearly
+                expiryMs = 3 * 365 * 24 * 60 * 60 * 1000;
+            }
             updates["planExpiresAt"] = now + expiryMs;
         }
 
         // Track premium status
-        if (["monthly", "yearly", "lifetime"].includes(plan)) {
+        if (["monthly", "yearly", "3-yearly", "3yearly"].includes(plan)) {
             updates["wasPremium"] = true;
             if (!snapshot.child("firstPremiumDate").exists()) {
                 updates["firstPremiumDate"] = now;
@@ -2574,7 +4238,8 @@ function getDeviceLimit(plan) {
     switch (plan) {
         case "monthly":
         case "yearly":
-        case "lifetime":
+        case "3-yearly":
+        case "3yearly":
             return 999; // Effectively unlimited
         case "free":
         default:
@@ -3128,3 +4793,1812 @@ exports.cleanupExpiredPairingRequestsV2 = functions.pubsub
             return null;
         }
     });
+
+// ============================================
+// ACCOUNT DELETION (Soft Delete with 30-day grace period)
+// ============================================
+
+/**
+ * Request account deletion (soft delete)
+ * Marks account for deletion in 30 days
+ * Stores identifying info for admin recovery assistance
+ */
+exports.requestAccountDeletion = functions.https.onCall(async (data, context) => {
+    try {
+        const userId = requireAuth(context);
+        const reason = data?.reason || "Not specified";
+
+        const now = Date.now();
+        const deletionDate = now + (30 * 24 * 60 * 60 * 1000); // 30 days from now
+
+        // Gather identifying info for recovery assistance
+        const identifyingInfo = await getUserIdentifyingInfo(userId);
+
+        // Mark account for deletion
+        await admin.database().ref(`users/${userId}/deletion_scheduled`).set({
+            requestedAt: now,
+            scheduledDeletionAt: deletionDate,
+            reason: reason,
+            status: "pending"
+        });
+
+        // Store in scheduled_deletions with identifying info for admin search
+        await admin.database().ref(`scheduled_deletions/${userId}`).set({
+            requestedAt: now,
+            scheduledDeletionAt: deletionDate,
+            reason: reason,
+            // Identifying info for recovery
+            deviceNames: identifyingInfo?.deviceNames || [],
+            phoneNumbers: identifyingInfo?.phoneNumbers || [],
+            deviceCount: identifyingInfo?.deviceCount || 0,
+            messageCount: identifyingInfo?.messageCount || 0,
+            plan: identifyingInfo?.plan || "free"
+        });
+
+        // Send notification email to admin with identifying info
+        await sendAccountDeletionRequestEmail(userId, reason, deletionDate, identifyingInfo);
+
+        console.log(`[AccountDeletion] User ${userId} scheduled for deletion on ${new Date(deletionDate).toISOString()}`);
+
+        return {
+            success: true,
+            scheduledDeletionAt: deletionDate,
+            message: "Your account has been scheduled for deletion in 30 days."
+        };
+    } catch (error) {
+        console.error("[AccountDeletion] Error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to schedule account deletion");
+    }
+});
+
+/**
+ * Cancel account deletion request
+ */
+exports.cancelAccountDeletion = functions.https.onCall(async (data, context) => {
+    try {
+        const userId = requireAuth(context);
+
+        // Check if deletion is scheduled
+        const deletionSnap = await admin.database().ref(`users/${userId}/deletion_scheduled`).once('value');
+        if (!deletionSnap.exists()) {
+            throw new functions.https.HttpsError("not-found", "No deletion request found");
+        }
+
+        // Remove deletion markers
+        await Promise.all([
+            admin.database().ref(`users/${userId}/deletion_scheduled`).remove(),
+            admin.database().ref(`scheduled_deletions/${userId}`).remove()
+        ]);
+
+        console.log(`[AccountDeletion] User ${userId} cancelled deletion request`);
+
+        return {
+            success: true,
+            message: "Account deletion has been cancelled. Your account is safe."
+        };
+    } catch (error) {
+        console.error("[AccountDeletion] Cancel error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to cancel account deletion");
+    }
+});
+
+/**
+ * Check account deletion status
+ */
+exports.getAccountDeletionStatus = functions.https.onCall(async (data, context) => {
+    try {
+        const userId = requireAuth(context);
+
+        const deletionSnap = await admin.database().ref(`users/${userId}/deletion_scheduled`).once('value');
+
+        if (!deletionSnap.exists()) {
+            return {
+                success: true,
+                isScheduledForDeletion: false
+            };
+        }
+
+        const deletion = deletionSnap.val();
+        const now = Date.now();
+        const daysRemaining = Math.ceil((deletion.scheduledDeletionAt - now) / (24 * 60 * 60 * 1000));
+
+        return {
+            success: true,
+            isScheduledForDeletion: true,
+            requestedAt: deletion.requestedAt,
+            scheduledDeletionAt: deletion.scheduledDeletionAt,
+            daysRemaining: Math.max(0, daysRemaining),
+            reason: deletion.reason
+        };
+    } catch (error) {
+        console.error("[AccountDeletion] Status check error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to check deletion status");
+    }
+});
+
+/**
+ * Scheduled job to process account deletions (runs daily at 4 AM UTC)
+ */
+exports.processScheduledDeletions = functions.pubsub
+    .schedule("0 4 * * *") // 4 AM UTC daily
+    .timeZone("UTC")
+    .onRun(async () => {
+        console.log("[AccountDeletion] Starting scheduled deletion processing...");
+
+        const now = Date.now();
+        let deletedCount = 0;
+        let errorCount = 0;
+
+        try {
+            // Get all scheduled deletions
+            const deletionsSnap = await admin.database().ref("scheduled_deletions").once("value");
+
+            if (!deletionsSnap.exists()) {
+                console.log("[AccountDeletion] No scheduled deletions found");
+                return null;
+            }
+
+            const deletions = [];
+            deletionsSnap.forEach((child) => {
+                const data = child.val();
+                if (data.scheduledDeletionAt && data.scheduledDeletionAt <= now) {
+                    deletions.push({ userId: child.key, ...data });
+                }
+            });
+
+            console.log(`[AccountDeletion] Found ${deletions.length} accounts to delete`);
+
+            // Process each deletion
+            for (const deletion of deletions) {
+                try {
+                    await performAccountDeletion(deletion.userId, deletion.reason);
+                    deletedCount++;
+                } catch (error) {
+                    console.error(`[AccountDeletion] Failed to delete ${deletion.userId}:`, error);
+                    errorCount++;
+                }
+            }
+
+            // Send summary email to admin
+            if (deletedCount > 0 || errorCount > 0) {
+                await sendDeletionSummaryEmail(deletedCount, errorCount);
+            }
+
+            console.log(`[AccountDeletion] Completed: ${deletedCount} deleted, ${errorCount} errors`);
+            return { deletedCount, errorCount };
+        } catch (error) {
+            console.error("[AccountDeletion] Scheduled job error:", error);
+            return null;
+        }
+    });
+
+/**
+ * Perform actual account deletion
+ * Preserves identifying info in deleted_accounts for admin recovery
+ */
+async function performAccountDeletion(userId, reason) {
+    console.log(`[AccountDeletion] Deleting account: ${userId}`);
+
+    // Get scheduled deletion info (contains identifying info)
+    let scheduledInfo = {};
+    try {
+        const scheduledSnap = await admin.database().ref(`scheduled_deletions/${userId}`).once('value');
+        scheduledInfo = scheduledSnap.val() || {};
+    } catch (e) {
+        console.log("[AccountDeletion] Could not fetch scheduled deletion info");
+    }
+
+    // Get recovery code hash to delete
+    let recoveryCodeHash = null;
+    try {
+        const recoverySnap = await admin.database().ref(`users/${userId}/recovery_info/codeHash`).once('value');
+        recoveryCodeHash = recoverySnap.val();
+    } catch (e) {
+        console.log("[AccountDeletion] No recovery code hash found");
+    }
+
+    // Store deletion record BEFORE deleting user data (preserve identifying info)
+    await admin.database().ref(`deleted_accounts/${userId}`).set({
+        deletedAt: Date.now(),
+        requestedAt: scheduledInfo.requestedAt || null,
+        reason: reason || scheduledInfo.reason || "User requested",
+        // Preserve identifying info for admin recovery
+        deviceNames: scheduledInfo.deviceNames || [],
+        phoneNumbers: scheduledInfo.phoneNumbers || [],
+        deviceCount: scheduledInfo.deviceCount || 0,
+        messageCount: scheduledInfo.messageCount || 0,
+        plan: scheduledInfo.plan || "free",
+        // Mark as permanently deleted (not restorable)
+        status: "deleted",
+        canRestore: false
+    });
+
+    // Delete all user data
+    const deletions = [
+        admin.database().ref(`users/${userId}`).remove(),
+        admin.database().ref(`scheduled_deletions/${userId}`).remove(),
+        admin.database().ref(`subscription_records/${userId}`).remove(),
+        admin.database().ref(`fcm_tokens/${userId}`).remove(),
+        admin.database().ref(`data_export_requests`).orderByChild('userId').equalTo(userId).once('value')
+            .then(snap => {
+                const updates = {};
+                snap.forEach(child => { updates[child.key] = null; });
+                if (Object.keys(updates).length > 0) {
+                    return admin.database().ref('data_export_requests').update(updates);
+                }
+            })
+    ];
+
+    // Delete recovery code mapping if exists
+    if (recoveryCodeHash) {
+        deletions.push(admin.database().ref(`recovery_codes/${recoveryCodeHash}`).remove());
+    }
+
+    await Promise.all(deletions);
+
+    console.log(`[AccountDeletion] Successfully deleted account: ${userId}`);
+}
+
+/**
+ * Send email when user requests deletion (includes identifying info for recovery)
+ */
+const sendAccountDeletionRequestEmail = async (userId, reason, deletionDate, identifyingInfo = null) => {
+    const resend = getResend();
+    if (!resend) return false;
+
+    // Get user info and tier
+    const [userInfo, tierTag] = await Promise.all([
+        getUserInfoForEmail(userId),
+        getUserTierForSubject(userId)
+    ]);
+    const timestamp = new Date().toLocaleString();
+    const deletionDateStr = new Date(deletionDate).toLocaleString();
+
+    // Format identifying info for admin reference
+    let identifyingSection = "";
+    if (identifyingInfo) {
+        const deviceList = (identifyingInfo.deviceNames || [])
+            .map(d => `  - ${d.name} (${d.platform})`)
+            .join("\n") || "  (no devices)";
+
+        const phoneList = (identifyingInfo.phoneNumbers || [])
+            .slice(0, 10)
+            .map(p => `  - ${p}`)
+            .join("\n") || "  (no phone numbers)";
+
+        identifyingSection = `
+IDENTIFYING INFO (for account recovery):
+========================================
+Device Names:
+${deviceList}
+
+Phone Numbers (contacts):
+${phoneList}
+
+Account Stats:
+• Messages synced: ${identifyingInfo.messageCount || 0}
+• Plan: ${identifyingInfo.plan || "free"}
+`;
+    }
+
+    const subject = `${tierTag} [Account Deletion] User Requested Account Deletion`;
+    const body = `
+SYNCFLOW ACCOUNT DELETION REQUEST
+==================================
+
+A user has requested account deletion via the app.
+
+Request Time: ${timestamp}
+Scheduled Deletion: ${deletionDateStr}
+Reason: ${reason}
+
+${userInfo}
+${identifyingSection}
+The account will be automatically deleted in 30 days unless the user cancels.
+
+User can cancel anytime before the deletion date.
+
+If user contacts support to recover, search by:
+- User ID: ${userId}
+- Device names listed above
+- Phone numbers (contacts) listed above
+
+---
+SyncFlow Admin System
+Account Deletion Notice
+`;
+
+    try {
+        await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: subject,
+            text: body,
+        });
+        return true;
+    } catch (error) {
+        console.error("Failed to send deletion request email:", error);
+        return false;
+    }
+};
+
+/**
+ * Send summary email after processing deletions
+ */
+const sendDeletionSummaryEmail = async (deletedCount, errorCount) => {
+    const resend = getResend();
+    if (!resend) return false;
+
+    const timestamp = new Date().toLocaleString();
+
+    const subject = `[Account Deletion] Daily Summary: ${deletedCount} accounts deleted`;
+    const body = `
+SYNCFLOW ACCOUNT DELETION SUMMARY
+==================================
+
+Daily Deletion Job Completed: ${timestamp}
+
+Results:
+• Accounts Deleted: ${deletedCount}
+• Errors: ${errorCount}
+
+${errorCount > 0 ? "⚠️ Some deletions failed. Check logs for details." : "✓ All scheduled deletions processed successfully."}
+
+---
+SyncFlow Admin System
+Automated Deletion Summary
+`;
+
+    try {
+        await resend.emails.send({
+            from: "SyncFlow Admin <noreply@resend.dev>",
+            to: [ADMIN_EMAIL],
+            subject: subject,
+            text: body,
+        });
+        return true;
+    } catch (error) {
+        console.error("Failed to send deletion summary email:", error);
+        return false;
+    }
+};
+
+// ============================================
+// AI SUPPORT CHAT
+// Handles user-specific queries about their own data
+// ============================================
+
+/**
+ * AI Support Chat - helps users with their own account queries
+ * Users can ask about: recovery code, user ID, data usage, subscription, etc.
+ */
+exports.supportChat = functions.https.onCall(async (data, context) => {
+    try {
+        const message = data?.message?.toLowerCase() || "";
+        const conversationHistory = data?.conversationHistory || [];
+
+        // Use syncGroupUserId if provided (Mac/Web pass the actual sync group user ID)
+        // Fall back to context.auth.uid for Android (which uses the actual user ID for auth)
+        const syncGroupUserId = data?.syncGroupUserId;
+        const authUserId = context.auth?.uid;
+        const userId = syncGroupUserId || authUserId;
+
+        // Detect query type and respond appropriately
+        const queryType = detectUserQueryType(message);
+
+        let response;
+        switch (queryType) {
+            case "recovery_code":
+                response = await handleRecoveryCodeQuery(userId);
+                break;
+            case "user_id":
+                response = handleUserIdQuery(userId);
+                break;
+            case "data_usage":
+                response = await handleDataUsageQuery(userId);
+                break;
+            case "subscription":
+                response = await handleSubscriptionQuery(userId);
+                break;
+            case "account_info":
+                response = await handleAccountInfoQuery(userId);
+                break;
+            case "device_info":
+                response = await handleDeviceInfoQuery(userId);
+                break;
+            case "sync_status":
+                response = await handleSyncStatusQuery(userId);
+                break;
+            case "message_stats":
+                response = await handleMessageStatsQuery(userId);
+                break;
+            case "unpair_device":
+                response = await handleUnpairDeviceQuery(userId, data?.message);
+                break;
+            case "reset_sync":
+                response = await handleResetSyncQuery(userId);
+                break;
+            case "delete_account":
+                response = await handleDeleteAccountQuery(userId);
+                break;
+            case "regenerate_recovery":
+                response = handleRegenerateRecoveryQuery();
+                break;
+            case "billing_history":
+                response = await handleBillingHistoryQuery(userId);
+                break;
+            case "cancel_subscription":
+                response = await handleCancelSubscriptionQuery(userId);
+                break;
+            case "login_history":
+                response = await handleLoginHistoryQuery(userId);
+                break;
+            case "signout_all":
+                response = await handleSignOutAllQuery(userId);
+                break;
+            case "download_data":
+                response = await handleDownloadDataQuery(userId);
+                break;
+            case "spam_settings":
+                response = await handleSpamSettingsQuery(userId);
+                break;
+            case "spam_stats":
+                response = await handleSpamStatsQuery(userId);
+                break;
+            case "help":
+                response = getHelpResponse();
+                break;
+            default:
+                response = getGeneralResponse(message);
+                break;
+        }
+
+        return {
+            success: true,
+            response: response
+        };
+    } catch (error) {
+        console.error("[SupportChat] Error:", error);
+        return {
+            success: false,
+            response: "I'm sorry, I encountered an error processing your request. Please try again or contact support at syncflow.contact@gmail.com"
+        };
+    }
+});
+
+/**
+ * Detect what type of user-specific query this is
+ */
+function detectUserQueryType(message) {
+    const msg = message.toLowerCase();
+
+    // Regenerate recovery code (check before recovery_code)
+    if ((msg.includes("regenerate") || msg.includes("new") || msg.includes("reset")) &&
+        (msg.includes("recovery") && (msg.includes("code") || msg.includes("key")))) {
+        return "regenerate_recovery";
+    }
+
+    // Recovery code queries
+    if (msg.includes("recovery") && (msg.includes("code") || msg.includes("key"))) {
+        return "recovery_code";
+    }
+    if (msg.includes("backup code") || msg.includes("restore code")) {
+        return "recovery_code";
+    }
+
+    // User ID queries
+    if (msg.includes("user id") || msg.includes("userid") || msg.includes("my id")) {
+        return "user_id";
+    }
+    if (msg.includes("account id")) {
+        return "user_id";
+    }
+
+    // Sync status queries
+    if (msg.includes("sync") && (msg.includes("status") || msg.includes("last") || msg.includes("when"))) {
+        return "sync_status";
+    }
+    if (msg.includes("last sync") || msg.includes("sync error") || msg.includes("sync fail")) {
+        return "sync_status";
+    }
+
+    // Reset sync queries
+    if ((msg.includes("reset") || msg.includes("clear")) && msg.includes("sync")) {
+        return "reset_sync";
+    }
+
+    // Message stats queries
+    if (msg.includes("message") && (msg.includes("count") || msg.includes("total") || msg.includes("how many") || msg.includes("stats"))) {
+        return "message_stats";
+    }
+    if (msg.includes("how many messages")) {
+        return "message_stats";
+    }
+
+    // Unpair device queries
+    if (msg.includes("unpair")) {
+        return "unpair_device";
+    }
+    if ((msg.includes("remove") || msg.includes("disconnect")) && msg.includes("device")) {
+        return "unpair_device";
+    }
+
+    // Delete account queries
+    if (msg.includes("delete") && (msg.includes("account") || msg.includes("my data"))) {
+        return "delete_account";
+    }
+
+    // Billing history queries
+    if (msg.includes("billing") || msg.includes("payment") || msg.includes("invoice") || msg.includes("receipt")) {
+        return "billing_history";
+    }
+
+    // Cancel subscription queries
+    if (msg.includes("cancel") && (msg.includes("subscription") || msg.includes("plan") || msg.includes("pro"))) {
+        return "cancel_subscription";
+    }
+
+    // Login history queries
+    if (msg.includes("login") && (msg.includes("history") || msg.includes("activity") || msg.includes("recent"))) {
+        return "login_history";
+    }
+    if (msg.includes("sign in") && msg.includes("history")) {
+        return "login_history";
+    }
+
+    // Sign out all devices queries
+    if ((msg.includes("sign out") || msg.includes("signout") || msg.includes("logout") || msg.includes("log out")) &&
+        (msg.includes("all") || msg.includes("everywhere") || msg.includes("device"))) {
+        return "signout_all";
+    }
+
+    // Download data / GDPR queries
+    if ((msg.includes("download") || msg.includes("export")) && (msg.includes("data") || msg.includes("my"))) {
+        return "download_data";
+    }
+    if (msg.includes("gdpr") || msg.includes("data request")) {
+        return "download_data";
+    }
+
+    // Spam settings queries
+    if (msg.includes("spam") && (msg.includes("setting") || msg.includes("filter") || msg.includes("config"))) {
+        return "spam_settings";
+    }
+
+    // Spam stats queries
+    if (msg.includes("spam") && (msg.includes("blocked") || msg.includes("count") || msg.includes("how many") || msg.includes("stats"))) {
+        return "spam_stats";
+    }
+
+    // Data usage queries
+    if (msg.includes("data") && (msg.includes("usage") || msg.includes("used") || msg.includes("storage"))) {
+        return "data_usage";
+    }
+    if (msg.includes("how much") && (msg.includes("data") || msg.includes("storage") || msg.includes("space"))) {
+        return "data_usage";
+    }
+    if (msg.includes("storage") || msg.includes("quota")) {
+        return "data_usage";
+    }
+
+    // Subscription queries
+    if (msg.includes("subscription") || msg.includes("plan") || msg.includes("premium") || msg.includes("pro")) {
+        return "subscription";
+    }
+    if (msg.includes("trial") || msg.includes("expire") || msg.includes("renew")) {
+        return "subscription";
+    }
+
+    // Account info queries
+    if (msg.includes("account") && (msg.includes("info") || msg.includes("details") || msg.includes("status"))) {
+        return "account_info";
+    }
+    if (msg.includes("my account")) {
+        return "account_info";
+    }
+
+    // Device info queries
+    if (msg.includes("device") && (msg.includes("info") || msg.includes("list") || msg.includes("connected"))) {
+        return "device_info";
+    }
+    if (msg.includes("paired device") || msg.includes("my device")) {
+        return "device_info";
+    }
+
+    // Help queries
+    if (msg.includes("help") || msg.includes("what can you") || msg.includes("how do i")) {
+        return "help";
+    }
+
+    return "general";
+}
+
+/**
+ * Handle recovery code query
+ */
+async function handleRecoveryCodeQuery(userId) {
+    if (!userId) {
+        return "To view your recovery code, you need to be signed in. Please make sure you're logged into the app and try again.\n\nYour recovery code is shown in the app under Settings > Account > Recovery Code.";
+    }
+
+    try {
+        const recoveryRef = admin.database().ref(`users/${userId}/recovery_info`);
+        const snapshot = await recoveryRef.once('value');
+
+        if (snapshot.exists()) {
+            const data = snapshot.val();
+            const code = data.code;
+            const createdAt = data.createdAt;
+
+            if (code) {
+                const createdDate = createdAt ? new Date(createdAt).toLocaleDateString() : "unknown";
+                return `Your recovery code is:\n\n**${code}**\n\nThis code was created on ${createdDate}.\n\n**Important:** Keep this code safe! You'll need it to recover your account if you reinstall the app or switch devices. Never share it with anyone.`;
+            }
+        }
+
+        return "I couldn't find a recovery code for your account. You can generate one in the app under Settings > Account > Recovery Code.\n\nIf you've already set one up, try refreshing the app.";
+    } catch (error) {
+        console.error("[SupportChat] Error fetching recovery code:", error);
+        return "I had trouble retrieving your recovery code. Please try again later or view it directly in the app under Settings > Account > Recovery Code.";
+    }
+}
+
+/**
+ * Handle user ID query
+ */
+function handleUserIdQuery(userId) {
+    if (!userId) {
+        return "To view your user ID, you need to be signed in. Please make sure you're logged into the app.\n\nYour user ID is shown in the app under Settings > Account.";
+    }
+
+    return `Your user ID is:\n\n**${userId}**\n\nThis is your unique account identifier. You may need this when contacting support.`;
+}
+
+/**
+ * Handle data usage query
+ */
+async function handleDataUsageQuery(userId) {
+    if (!userId) {
+        return "To view your data usage, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const usageRef = admin.database().ref(`users/${userId}/usage`);
+        const snapshot = await usageRef.once('value');
+
+        if (snapshot.exists()) {
+            const data = snapshot.val();
+            const storageBytes = data.storageBytes || 0;
+            const monthly = data.monthly || {};
+
+            // Format storage
+            const storageMB = (storageBytes / (1024 * 1024)).toFixed(2);
+            const storageGB = (storageBytes / (1024 * 1024 * 1024)).toFixed(3);
+
+            // Get current month stats
+            const now = new Date();
+            const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+            const thisMonth = monthly[monthKey] || {};
+            const messagesSynced = thisMonth.messagesSynced || 0;
+            const mediaSynced = thisMonth.mediaSynced || 0;
+
+            let response = `**Your Data Usage**\n\n`;
+            response += `**Storage Used:** ${storageMB} MB (${storageGB} GB)\n`;
+            response += `**Messages Synced This Month:** ${messagesSynced.toLocaleString()}\n`;
+            response += `**Media Files Synced This Month:** ${mediaSynced.toLocaleString()}\n`;
+
+            if (data.lastUpdatedAt) {
+                const lastUpdated = new Date(data.lastUpdatedAt).toLocaleString();
+                response += `\n*Last updated: ${lastUpdated}*`;
+            }
+
+            return response;
+        }
+
+        return "No usage data found for your account yet. Usage statistics will appear here once you start syncing messages.";
+    } catch (error) {
+        console.error("[SupportChat] Error fetching usage data:", error);
+        return "I had trouble retrieving your usage data. Please try again later.";
+    }
+}
+
+/**
+ * Handle subscription query
+ */
+async function handleSubscriptionQuery(userId) {
+    if (!userId) {
+        return "To view your subscription details, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        // Check both usage and subscription_records
+        const [usageSnap, subRecordSnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`subscription_records/${userId}/active`).once('value')
+        ]);
+
+        const usage = usageSnap.val() || {};
+        const subRecord = subRecordSnap.val() || {};
+
+        // Merge data, preferring more specific values
+        const plan = usage.plan || subRecord.plan || "free";
+        const planExpiresAt = usage.planExpiresAt || subRecord.planExpiresAt;
+        const trialExpiresAt = usage.freeTrialExpiresAt || subRecord.freeTrialExpiresAt;
+
+        let response = `**Your Subscription**\n\n`;
+        response += `**Current Plan:** ${plan.charAt(0).toUpperCase() + plan.slice(1)}\n`;
+
+        if (plan === "free") {
+            if (trialExpiresAt) {
+                const trialEnd = new Date(trialExpiresAt);
+                const now = new Date();
+                if (trialEnd > now) {
+                    const daysLeft = Math.ceil((trialEnd - now) / (1000 * 60 * 60 * 24));
+                    response += `**Free Trial:** ${daysLeft} days remaining\n`;
+                    response += `**Trial Ends:** ${trialEnd.toLocaleDateString()}\n`;
+                } else {
+                    response += `**Free Trial:** Expired\n`;
+                }
+            }
+            response += `\nUpgrade to Pro to unlock unlimited devices, priority sync, and more features!`;
+        } else if (planExpiresAt) {
+            const expiryDate = new Date(planExpiresAt);
+            const now = new Date();
+            if (expiryDate > now) {
+                const daysLeft = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
+                response += `**Status:** Active\n`;
+                response += `**Renews/Expires:** ${expiryDate.toLocaleDateString()} (${daysLeft} days)\n`;
+            } else {
+                response += `**Status:** Expired\n`;
+                response += `**Expired On:** ${expiryDate.toLocaleDateString()}\n`;
+            }
+        }
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching subscription:", error);
+        return "I had trouble retrieving your subscription details. Please try again later or check in the app under Settings > Subscription.";
+    }
+}
+
+/**
+ * Handle account info query (combines multiple pieces of info)
+ */
+async function handleAccountInfoQuery(userId) {
+    if (!userId) {
+        return "To view your account information, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const [usageSnap, devicesSnap, recoverySnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`users/${userId}/devices`).once('value'),
+            admin.database().ref(`users/${userId}/recovery_info`).once('value')
+        ]);
+
+        const usage = usageSnap.val() || {};
+        const devices = devicesSnap.val() || {};
+        const recovery = recoverySnap.val() || {};
+
+        const deviceCount = Object.keys(devices).length;
+        const plan = usage.plan || "free";
+        const hasRecoveryCode = !!recovery.code;
+
+        let response = `**Your Account Summary**\n\n`;
+        response += `**User ID:** ${userId}\n`;
+        response += `**Plan:** ${plan.charAt(0).toUpperCase() + plan.slice(1)}\n`;
+        response += `**Connected Devices:** ${deviceCount}\n`;
+        response += `**Recovery Code:** ${hasRecoveryCode ? "Set up" : "Not set up"}\n`;
+
+        if (usage.storageBytes) {
+            const storageMB = (usage.storageBytes / (1024 * 1024)).toFixed(2);
+            response += `**Storage Used:** ${storageMB} MB\n`;
+        }
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching account info:", error);
+        return "I had trouble retrieving your account information. Please try again later.";
+    }
+}
+
+/**
+ * Handle device info query
+ */
+async function handleDeviceInfoQuery(userId) {
+    if (!userId) {
+        return "To view your connected devices, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const devicesRef = admin.database().ref(`users/${userId}/devices`);
+        const snapshot = await devicesRef.once('value');
+
+        if (snapshot.exists()) {
+            const devices = snapshot.val();
+            const deviceList = Object.entries(devices);
+
+            if (deviceList.length === 0) {
+                return "You don't have any devices connected yet. Open SyncFlow on your devices to connect them.";
+            }
+
+            let response = `**Your Connected Devices (${deviceList.length})**\n\n`;
+
+            deviceList.forEach(([deviceId, info], index) => {
+                const deviceName = info.deviceName || info.name || "Unknown Device";
+                const platform = info.platform || "unknown";
+                const lastSeen = info.lastSeen ? new Date(info.lastSeen).toLocaleString() : "unknown";
+
+                response += `${index + 1}. **${deviceName}**\n`;
+                response += `   - Platform: ${platform}\n`;
+                response += `   - Last active: ${lastSeen}\n\n`;
+            });
+
+            return response;
+        }
+
+        return "No devices found for your account. Open SyncFlow on your devices to connect them.";
+    } catch (error) {
+        console.error("[SupportChat] Error fetching devices:", error);
+        return "I had trouble retrieving your device information. Please try again later.";
+    }
+}
+
+/**
+ * Get help response listing available queries
+ */
+function getHelpResponse() {
+    return `**Hi! I'm the SyncFlow AI Assistant.**\n\nI can help you with your account. Here's what you can ask:\n\n**Account & Security:**\n- "What's my user ID?"\n- "What's my recovery code?"\n- "Show my login history"\n- "Sign out all devices"\n- "Regenerate recovery code"\n\n**Sync & Messages:**\n- "What's my sync status?"\n- "How many messages synced?"\n- "Reset my sync"\n\n**Devices:**\n- "Show my devices"\n- "Unpair a device"\n\n**Subscription & Billing:**\n- "What's my plan?"\n- "Show billing history"\n- "Cancel subscription"\n\n**Data & Privacy:**\n- "How much data have I used?"\n- "Download my data"\n- "Delete my account"\n\n**Spam:**\n- "Show spam settings"\n- "How many spam blocked?"\n\n**General Help:**\n- "How do I pair devices?"\n- "Messages not syncing"\n\nJust type your question!`;
+}
+
+/**
+ * Get general response for non-specific queries
+ */
+function getGeneralResponse(message) {
+    const msg = message.toLowerCase();
+
+    // Unpair device questions (must check BEFORE "pair" since "unpair" contains "pair")
+    if (msg.includes("unpair") || (msg.includes("remove") && msg.includes("device")) || (msg.includes("disconnect") && msg.includes("device"))) {
+        return `**How to Unpair a Device:**\n\nYou can unpair devices in two ways:\n\n**Option 1 - Ask me:**\nSay "unpair device [device name]" and I'll remove it for you.\n\nFirst, ask "show my devices" to see your connected devices.\n\n**Option 2 - Manual:**\n- On Android: Settings → Pair Device → tap the X next to the device\n- On Mac/Web: Settings → Connected Devices → Remove\n\n**Note:** Unpairing removes the device's access to your messages. You can re-pair anytime.`;
+    }
+
+    // Device pairing questions
+    if (msg.includes("pair") || msg.includes("connect") || msg.includes("link") || msg.includes("qr")) {
+        return `**How to Pair Devices:**\n\n1. Open SyncFlow on your Android phone\n2. Go to Settings → Pair Device\n3. Tap "Scan QR Code"\n4. On Mac: Open SyncFlow app - QR code appears automatically\n5. On Web: Go to https://sfweb.app - QR code appears\n6. Scan the QR code with your Android phone\n\nYou can pair multiple Mac computers and web browsers to the same phone.`;
+    }
+
+    // Sync issues
+    if (msg.includes("not working") || msg.includes("messages not") || (msg.includes("sync") && msg.includes("issue"))) {
+        return `**Troubleshooting Sync Issues:**\n\n1. **Check connection:** Make sure both devices have internet\n2. **Check permissions:** On Android, ensure SMS permissions are granted\n3. **Force sync:** Go to Settings → Sync Message History → Sync\n4. **Battery optimization:** Make sure SyncFlow isn't being killed by battery saver\n5. **Reset sync:** Ask me "reset my sync" to clear and restart\n\nIf issues persist, try unpairing and re-pairing your devices.`;
+    }
+
+    // Pro/Premium/Subscription features
+    if (msg.includes("pro") || msg.includes("premium") || msg.includes("upgrade") || msg.includes("price") || msg.includes("cost")) {
+        return `**SyncFlow Plans:**\n\n| Plan | Price | Features |\n|------|-------|----------|\n| Free Trial | 7 days | Full access |\n| Monthly | $4.99/mo | Full access |\n| Yearly | $39.99/yr | Save 33% |\n| 3-Year | $79.99 | Best value |\n\n**Pro features:** Unlimited devices, 100MB file transfers, 500MB/day transfer limit, priority sync, no ads.\n\nUpgrade in Settings → Subscription.`;
+    }
+
+    // File transfer questions
+    if (msg.includes("file") || msg.includes("transfer") || msg.includes("send photo") || msg.includes("send video")) {
+        return `**File Transfer:**\n\n**From Mac to Android:**\n- Use Quick Drop in Mac sidebar, or\n- File → Send File menu\n\n**From Android to Mac:**\n- Go to Settings → Send Files to Mac (only visible when paired)\n\n**Limits:**\n| Plan | Max File | Daily Limit |\n|------|----------|-------------|\n| Free | 25 MB | 100 MB/day |\n| Pro | 100 MB | 500 MB/day |\n\nFiles are saved to Downloads folder on both devices.`;
+    }
+
+    // Recovery code questions
+    if (msg.includes("recovery") && !msg.includes("delete") && !msg.includes("account")) {
+        return `**Recovery Code:**\n\nYour recovery code lets you restore your account on new devices.\n\n**Find it:** Ask me "What's my recovery code?"\n\n**Use it:** When setting up a new device, tap "I have a recovery code" and enter your 12-character code.\n\n**Regenerate:** Ask me "Regenerate my recovery code" (invalidates the old one immediately)\n\n⚠️ If your account is scheduled for deletion, the recovery code is disabled.`;
+    }
+
+    // Account deletion questions
+    if (msg.includes("delete") && !msg.includes("message")) {
+        return `**Account Deletion:**\n\n1. Go to Settings → Account → Delete Account\n2. Choose a reason (optional)\n3. Confirm deletion\n\n**What happens:**\n- Account is scheduled for deletion in **30 days**\n- Recovery code is **immediately disabled**\n- You can continue using the app during this period\n- After 30 days, all data is permanently deleted\n\n**Cancel deletion:** Go to Settings → Account → Cancel Deletion (within 30 days)\n\n**Changed your mind after deleting the app?** Contact syncflow.contact@gmail.com with your device name.`;
+    }
+
+    // Privacy/Security
+    if (msg.includes("privacy") || msg.includes("secure") || (msg.includes("data") && msg.includes("safe"))) {
+        return `**Your Privacy & Security:**\n\n- End-to-end encryption using Signal Protocol\n- HTTPS/TLS for all data transmission\n- Data stored securely in Firebase (Google Cloud)\n- We never sell or share your data\n- Recovery codes are hashed\n- On-device AI processing (no data sent to AI servers)\n\n**Delete your data:** Settings → Account → Delete Account (30-day grace period)`;
+    }
+
+    // Call/calling questions
+    if (msg.includes("call") || msg.includes("phone") || msg.includes("dial")) {
+        return `**Making Calls:**\n\n**From Mac/Web:**\n- Click the phone icon next to any contact or conversation\n- This triggers your Android phone to dial the number\n- The actual call happens on your phone\n\n**SyncFlow-to-SyncFlow calls:**\n- Audio/video calls between SyncFlow users over the internet\n- Works via WebRTC\n\n**Call recording:** Available on macOS for WebRTC calls only.`;
+    }
+
+    // MMS/Group messages
+    if (msg.includes("mms") || msg.includes("group") || msg.includes("picture") || msg.includes("image")) {
+        return `**MMS & Group Messages:**\n\n- ✅ Full MMS support (images, videos, audio)\n- ✅ Group MMS conversations supported\n- ✅ View all participants in group chats\n- ✅ Send media from Mac/Web\n\n**Note:** RCS is not yet supported (requires carrier integration).`;
+    }
+
+    // iOS/Windows questions
+    if (msg.includes("ios") || msg.includes("iphone") || msg.includes("windows") || msg.includes("pc")) {
+        return `**Platform Support:**\n\n- ✅ **Android phone** (required - source of messages)\n- ✅ **macOS app** (Mac App Store)\n- ✅ **Web app** (https://sfweb.app)\n\n❌ **No iOS app** - iPhone doesn't allow third-party SMS access\n❌ **No Windows app** - Use the web app at sfweb.app instead\n\nThe web app works on any device with a browser!`;
+    }
+
+    // Default helpful response
+    return `I can help with:\n\n**Account:**\n- "What's my user ID?" / "What's my recovery code?"\n- "Show my subscription" / "How much data have I used?"\n- "Show my devices" / "How do I delete my account?"\n\n**Features:**\n- "How do I pair?" / "How do I transfer files?"\n- "What are Pro features?" / "Is there an iOS app?"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset my sync"\n\nOr contact syncflow.contact@gmail.com for more help!`;
+}
+
+/**
+ * Handle sync status query
+ */
+async function handleSyncStatusQuery(userId) {
+    if (!userId) {
+        return "To view your sync status, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const [devicesSnap, syncErrorsSnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/devices`).once('value'),
+            admin.database().ref(`users/${userId}/sync_errors`).limitToLast(5).once('value')
+        ]);
+
+        const devices = devicesSnap.val() || {};
+        const syncErrors = syncErrorsSnap.val() || {};
+
+        let response = `**Your Sync Status**\n\n`;
+
+        // Show last sync per device
+        const deviceList = Object.entries(devices);
+        if (deviceList.length > 0) {
+            response += `**Last Sync by Device:**\n`;
+            deviceList.forEach(([deviceId, info]) => {
+                const deviceName = info.deviceName || info.name || "Unknown Device";
+                const lastSync = info.lastSyncedAt || info.lastSeen;
+                const syncTime = lastSync ? new Date(lastSync).toLocaleString() : "Never";
+                const status = info.syncStatus || "unknown";
+                response += `- **${deviceName}:** ${syncTime}`;
+                if (status === "error") {
+                    response += ` (Error)`;
+                }
+                response += `\n`;
+            });
+        } else {
+            response += `No devices connected.\n`;
+        }
+
+        // Show recent errors if any
+        const errorList = Object.values(syncErrors);
+        if (errorList.length > 0) {
+            response += `\n**Recent Sync Issues:**\n`;
+            errorList.slice(-3).forEach((error) => {
+                const errorTime = error.timestamp ? new Date(error.timestamp).toLocaleString() : "Unknown time";
+                const errorMsg = error.message || error.error || "Unknown error";
+                response += `- ${errorTime}: ${errorMsg}\n`;
+            });
+        } else {
+            response += `\n*No recent sync errors.*`;
+        }
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching sync status:", error);
+        return "I had trouble retrieving your sync status. Please try again later.";
+    }
+}
+
+/**
+ * Handle message stats query
+ */
+async function handleMessageStatsQuery(userId) {
+    if (!userId) {
+        return "To view your message statistics, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const [usageSnap, messagesSnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/usage`).once('value'),
+            admin.database().ref(`users/${userId}/messages`).once('value')
+        ]);
+
+        const usage = usageSnap.val() || {};
+        const messages = messagesSnap.val() || {};
+        const monthly = usage.monthly || {};
+
+        // Count total messages
+        const totalMessages = Object.keys(messages).length;
+
+        // Get monthly stats
+        const now = new Date();
+        const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        const thisMonth = monthly[monthKey] || {};
+
+        // Calculate all-time total from monthly data
+        let allTimeSynced = 0;
+        Object.values(monthly).forEach((m) => {
+            allTimeSynced += m.messagesSynced || 0;
+        });
+
+        let response = `**Your Message Statistics**\n\n`;
+        response += `**Total Messages Stored:** ${totalMessages.toLocaleString()}\n`;
+        response += `**All-Time Messages Synced:** ${allTimeSynced.toLocaleString()}\n`;
+        response += `**This Month Synced:** ${(thisMonth.messagesSynced || 0).toLocaleString()}\n`;
+        response += `**This Month Media:** ${(thisMonth.mediaSynced || 0).toLocaleString()} files\n`;
+
+        if (usage.lastMessageAt) {
+            const lastMsg = new Date(usage.lastMessageAt).toLocaleString();
+            response += `\n**Last Message:** ${lastMsg}`;
+        }
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching message stats:", error);
+        return "I had trouble retrieving your message statistics. Please try again later.";
+    }
+}
+
+/**
+ * Handle unpair device query
+ */
+async function handleUnpairDeviceQuery(userId, originalMessage) {
+    if (!userId) {
+        return "To manage your devices, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const devicesSnap = await admin.database().ref(`users/${userId}/devices`).once('value');
+        const devices = devicesSnap.val() || {};
+        const deviceList = Object.entries(devices);
+
+        if (deviceList.length === 0) {
+            return "You don't have any devices connected to unpair.";
+        }
+
+        // Check if user specified a device name or number
+        const msg = (originalMessage || "").toLowerCase();
+
+        // Try to match device by name or number
+        let matchedDevice = null;
+        deviceList.forEach(([deviceId, info], index) => {
+            const deviceName = (info.deviceName || info.name || "").toLowerCase();
+            if (msg.includes(deviceName) || msg.includes(`device ${index + 1}`) || msg.includes(`#${index + 1}`)) {
+                matchedDevice = { deviceId, info, index };
+            }
+        });
+
+        if (matchedDevice) {
+            // Remove the device
+            await admin.database().ref(`users/${userId}/devices/${matchedDevice.deviceId}`).remove();
+
+            const deviceName = matchedDevice.info.deviceName || matchedDevice.info.name || "Device";
+            return `**Device Unpaired Successfully**\n\n"${deviceName}" has been removed from your account.\n\nIf you want to use this device again, you'll need to re-pair it.`;
+        }
+
+        // Show device list for user to choose
+        let response = `**Which device would you like to unpair?**\n\n`;
+        deviceList.forEach(([deviceId, info], index) => {
+            const deviceName = info.deviceName || info.name || "Unknown Device";
+            const platform = info.platform || "unknown";
+            response += `${index + 1}. **${deviceName}** (${platform})\n`;
+        });
+
+        response += `\nReply with "unpair device [name]" or "unpair device #[number]" to remove a device.`;
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error handling unpair request:", error);
+        return "I had trouble processing your request. Please try again later or unpair devices from the app Settings.";
+    }
+}
+
+/**
+ * Handle reset sync query
+ */
+async function handleResetSyncQuery(userId) {
+    if (!userId) {
+        return "To reset your sync, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        // Clear sync state data
+        const updates = {};
+        updates[`users/${userId}/sync_state`] = null;
+        updates[`users/${userId}/sync_errors`] = null;
+        updates[`users/${userId}/last_sync_token`] = null;
+
+        await admin.database().ref().update(updates);
+
+        // Update device sync timestamps
+        const devicesSnap = await admin.database().ref(`users/${userId}/devices`).once('value');
+        if (devicesSnap.exists()) {
+            const deviceUpdates = {};
+            devicesSnap.forEach((child) => {
+                deviceUpdates[`users/${userId}/devices/${child.key}/needsFullSync`] = true;
+                deviceUpdates[`users/${userId}/devices/${child.key}/syncResetAt`] = Date.now();
+            });
+            await admin.database().ref().update(deviceUpdates);
+        }
+
+        // Send service health alert email to admin
+        try {
+            await sendServiceHealthEmail(userId, "sync_reset");
+        } catch (e) {
+            console.error("[SupportChat] Failed to send service health email:", e);
+        }
+
+        return `**Sync Reset Complete**\n\nYour sync state has been cleared. The next time you open SyncFlow on any device, it will perform a fresh sync.\n\n**What happens now:**\n- Your messages are still stored safely\n- All devices will re-sync from scratch\n- This may take a few minutes depending on your message count\n\nOpen the SyncFlow app to start the fresh sync.`;
+    } catch (error) {
+        console.error("[SupportChat] Error resetting sync:", error);
+        return "I had trouble resetting your sync. Please try again later or contact support.";
+    }
+}
+
+/**
+ * Handle delete account query
+ */
+async function handleDeleteAccountQuery(userId) {
+    if (!userId) {
+        return "To delete your account, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    // Check if already scheduled for deletion
+    try {
+        const deletionSnap = await admin.database().ref(`users/${userId}/deletion_scheduled`).once('value');
+        if (deletionSnap.exists()) {
+            const deletion = deletionSnap.val();
+            const daysRemaining = Math.ceil((deletion.scheduledDeletionAt - Date.now()) / (24 * 60 * 60 * 1000));
+            const deletionDate = new Date(deletion.scheduledDeletionAt).toLocaleDateString();
+
+            return `**Account Already Scheduled for Deletion**\n\nYour account is scheduled to be deleted on **${deletionDate}** (${Math.max(0, daysRemaining)} days remaining).\n\n**Changed your mind?**\nYou can cancel the deletion anytime before that date:\n1. Go to Settings > Account\n2. Tap "Cancel Deletion"\n\nOnce cancelled, your account will be restored to normal.`;
+        }
+    } catch (e) {
+        console.error("[SupportChat] Error checking deletion status:", e);
+    }
+
+    // Send notification email to admin
+    try {
+        await sendDeletionNotificationEmail(userId, "account_deletion_inquiry");
+    } catch (e) {
+        console.error("[SupportChat] Failed to send deletion notification email:", e);
+    }
+
+    return `**Delete Your Account**\n\nTo delete your SyncFlow account and all associated data:\n\n**In the App:**\n1. Open SyncFlow on your Android or Mac\n2. Go to Settings > Account\n3. Tap "Delete Account"\n4. Confirm the deletion\n\n**What happens:**\n- Your account will be marked for deletion\n- You have **30 days** to change your mind\n- After 30 days, all data is permanently deleted\n- Recovery code will stop working immediately\n\n**What gets deleted:**\n- All synced messages\n- All connected devices\n- Your recovery code\n- Subscription data\n- All personal information\n\n**Important:** Cancel any active subscriptions through Google Play/App Store first.`;
+}
+
+/**
+ * Handle regenerate recovery code query
+ */
+function handleRegenerateRecoveryQuery() {
+    return `**Regenerate Recovery Code**\n\nTo generate a new recovery code:\n\n1. Open SyncFlow on your Android device\n2. Go to Settings > Account > Recovery Code\n3. Tap "Regenerate Code"\n4. Save your new code securely\n\n**Important:**\n- Your old recovery code will stop working immediately\n- Make sure to save the new code before closing the screen\n- Store it somewhere safe (password manager, written down, etc.)\n\n*For security, recovery codes can only be regenerated from the Android app.*`;
+}
+
+/**
+ * Handle billing history query
+ */
+async function handleBillingHistoryQuery(userId) {
+    if (!userId) {
+        return "To view your billing history, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const [subRecordSnap, paymentsSnap] = await Promise.all([
+            admin.database().ref(`subscription_records/${userId}`).once('value'),
+            admin.database().ref(`users/${userId}/payments`).limitToLast(10).once('value')
+        ]);
+
+        const subRecord = subRecordSnap.val() || {};
+        const payments = paymentsSnap.val() || {};
+        const history = subRecord.history || {};
+
+        let response = `**Your Billing History**\n\n`;
+
+        // Show current plan
+        const active = subRecord.active || {};
+        response += `**Current Plan:** ${(active.plan || "free").charAt(0).toUpperCase() + (active.plan || "free").slice(1)}\n`;
+        if (subRecord.wasPremium) {
+            response += `*Premium member since ${subRecord.firstPremiumDate ? new Date(subRecord.firstPremiumDate).toLocaleDateString() : "unknown"}*\n`;
+        }
+
+        // Show payment history
+        const paymentList = Object.values(payments);
+        if (paymentList.length > 0) {
+            response += `\n**Recent Payments:**\n`;
+            paymentList.slice(-5).reverse().forEach((payment) => {
+                const date = payment.timestamp ? new Date(payment.timestamp).toLocaleDateString() : "Unknown";
+                const amount = payment.amount ? `$${(payment.amount / 100).toFixed(2)}` : "N/A";
+                const status = payment.status || "completed";
+                response += `- ${date}: ${amount} (${payment.plan || "Pro"}) - ${status}\n`;
+            });
+        } else {
+            response += `\n*No payment history found.*\n`;
+        }
+
+        // Show plan changes
+        const historyList = Object.entries(history).sort((a, b) => parseInt(b[0]) - parseInt(a[0]));
+        if (historyList.length > 0) {
+            response += `\n**Plan History:**\n`;
+            historyList.slice(0, 5).forEach(([timestamp, entry]) => {
+                const date = new Date(parseInt(timestamp)).toLocaleDateString();
+                response += `- ${date}: Changed to ${entry.newPlan || "unknown"}\n`;
+            });
+        }
+
+        response += `\n*For receipts or billing questions, contact syncflow.contact@gmail.com*`;
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching billing history:", error);
+        return "I had trouble retrieving your billing history. Please try again later.";
+    }
+}
+
+/**
+ * Handle cancel subscription query
+ */
+async function handleCancelSubscriptionQuery(userId) {
+    // Send churn alert email to admin
+    try {
+        await sendChurnAlertEmail(userId, "cancel_subscription_inquiry");
+    } catch (e) {
+        console.error("[SupportChat] Failed to send churn alert email:", e);
+    }
+
+    return `**Cancel Your Subscription**\n\nSyncFlow subscriptions are managed through your device's app store:\n\n**For Google Play (Android):**\n1. Open Google Play Store\n2. Tap your profile icon > Payments & subscriptions\n3. Tap Subscriptions\n4. Find SyncFlow and tap Cancel\n\n**For Apple (if applicable):**\n1. Open Settings > tap your name\n2. Tap Subscriptions\n3. Find SyncFlow and tap Cancel\n\n**What happens after cancellation:**\n- You keep Pro features until your current period ends\n- After that, you'll be downgraded to the free plan\n- Your data and messages remain intact\n- You can resubscribe anytime\n\n*Need help? Contact syncflow.contact@gmail.com*`;
+}
+
+/**
+ * Handle login history query
+ */
+async function handleLoginHistoryQuery(userId) {
+    if (!userId) {
+        return "To view your login history, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const [sessionsSnap, loginHistorySnap] = await Promise.all([
+            admin.database().ref(`users/${userId}/sessions`).once('value'),
+            admin.database().ref(`users/${userId}/login_history`).limitToLast(10).once('value')
+        ]);
+
+        const sessions = sessionsSnap.val() || {};
+        const loginHistory = loginHistorySnap.val() || {};
+
+        let response = `**Your Login History**\n\n`;
+
+        // Active sessions
+        const sessionList = Object.entries(sessions);
+        if (sessionList.length > 0) {
+            response += `**Active Sessions (${sessionList.length}):**\n`;
+            sessionList.forEach(([sessionId, info]) => {
+                const device = info.deviceName || info.device || "Unknown device";
+                const lastActive = info.lastActivity ? new Date(info.lastActivity).toLocaleString() : "Unknown";
+                const location = info.location || info.ip || "";
+                response += `- **${device}**\n  Last active: ${lastActive}${location ? `\n  Location: ${location}` : ""}\n`;
+            });
+        } else {
+            response += `*No active sessions found.*\n`;
+        }
+
+        // Recent logins
+        const historyList = Object.values(loginHistory);
+        if (historyList.length > 0) {
+            response += `\n**Recent Sign-ins:**\n`;
+            historyList.slice(-5).reverse().forEach((login) => {
+                const date = login.timestamp ? new Date(login.timestamp).toLocaleString() : "Unknown";
+                const device = login.device || "Unknown device";
+                const status = login.success === false ? " (Failed)" : "";
+                response += `- ${date}: ${device}${status}\n`;
+            });
+        }
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching login history:", error);
+        return "I had trouble retrieving your login history. Please try again later.";
+    }
+}
+
+/**
+ * Handle sign out all devices query
+ */
+async function handleSignOutAllQuery(userId) {
+    if (!userId) {
+        return "To sign out all devices, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        // Clear all sessions
+        await admin.database().ref(`users/${userId}/sessions`).remove();
+
+        // Set a flag to force re-authentication on all devices
+        await admin.database().ref(`users/${userId}/forceReauth`).set({
+            timestamp: Date.now(),
+            reason: "user_requested"
+        });
+
+        // Revoke all refresh tokens if using Firebase Auth
+        try {
+            await admin.auth().revokeRefreshTokens(userId);
+        } catch (authError) {
+            // User might be anonymous, which doesn't have revokable tokens
+            console.log("[SupportChat] Could not revoke tokens (might be anonymous user)");
+        }
+
+        // Send security alert email to admin
+        try {
+            await sendSecurityAlertEmail(userId, "signout_all_devices");
+        } catch (e) {
+            console.error("[SupportChat] Failed to send security alert email:", e);
+        }
+
+        return `**Signed Out of All Devices**\n\nYou have been signed out of all devices except this one.\n\n**What happens now:**\n- All other devices will need to sign in again\n- Any active syncs on other devices will stop\n- Your data remains safe and intact\n\nIf you didn't request this, please change your recovery code immediately and contact support.`;
+    } catch (error) {
+        console.error("[SupportChat] Error signing out all devices:", error);
+        return "I had trouble signing out your devices. Please try again later.";
+    }
+}
+
+/**
+ * Handle download data query (GDPR)
+ */
+async function handleDownloadDataQuery(userId) {
+    if (!userId) {
+        return "To request your data, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        // Create a data export request
+        const requestId = `export_${Date.now()}`;
+        await admin.database().ref(`data_export_requests/${requestId}`).set({
+            userId: userId,
+            requestedAt: Date.now(),
+            status: "pending",
+            type: "full_export"
+        });
+
+        // Send notification email to admin
+        try {
+            await sendDeletionNotificationEmail(userId, "data_export_request", requestId);
+        } catch (e) {
+            console.error("[SupportChat] Failed to send data export notification email:", e);
+        }
+
+        return `**Data Export Request Submitted**\n\nYour request ID: **${requestId}**\n\n**What happens next:**\n1. We'll prepare an export of all your data\n2. This includes: messages, contacts, settings, and account info\n3. You'll receive an email when it's ready (usually within 24-48 hours)\n4. The download link will be valid for 7 days\n\n**Your data includes:**\n- All synced messages\n- Contact information\n- Device settings\n- Account preferences\n- Subscription history\n\n*If you don't receive the email, check your spam folder or contact syncflow.contact@gmail.com*`;
+    } catch (error) {
+        console.error("[SupportChat] Error creating data export request:", error);
+        return "I had trouble submitting your data export request. Please try again later or email syncflow.contact@gmail.com with subject 'Data Export Request'.";
+    }
+}
+
+/**
+ * Handle spam settings query
+ */
+async function handleSpamSettingsQuery(userId) {
+    if (!userId) {
+        return "To view your spam settings, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const settingsSnap = await admin.database().ref(`users/${userId}/settings/spam`).once('value');
+        const settings = settingsSnap.val() || {};
+
+        const filterLevel = settings.filterLevel || "medium";
+        const autoDelete = settings.autoDelete || false;
+        const autoDeleteDays = settings.autoDeleteDays || 30;
+        const notifyOnSpam = settings.notifyOnSpam !== false;
+
+        let response = `**Your Spam Filter Settings**\n\n`;
+        response += `**Filter Level:** ${filterLevel.charAt(0).toUpperCase() + filterLevel.slice(1)}\n`;
+        response += `- Low: Only obvious spam\n- Medium: Balanced detection (recommended)\n- High: Aggressive filtering\n\n`;
+        response += `**Auto-Delete Spam:** ${autoDelete ? `Yes (after ${autoDeleteDays} days)` : "No"}\n`;
+        response += `**Spam Notifications:** ${notifyOnSpam ? "On" : "Off"}\n`;
+
+        response += `\n**To change these settings:**\nOpen SyncFlow > Settings > Spam Filter`;
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching spam settings:", error);
+        return "I had trouble retrieving your spam settings. Please try again later.";
+    }
+}
+
+/**
+ * Handle spam stats query
+ */
+async function handleSpamStatsQuery(userId) {
+    if (!userId) {
+        return "To view your spam statistics, you need to be signed in. Please make sure you're logged into the app.";
+    }
+
+    try {
+        const spamSnap = await admin.database().ref(`users/${userId}/spam_messages`).once('value');
+        const spam = spamSnap.val() || {};
+
+        const spamList = Object.values(spam);
+        const totalBlocked = spamList.length;
+
+        // Count by category
+        const byCategory = {};
+        const byDate = {};
+        const now = Date.now();
+        const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
+
+        spamList.forEach((msg) => {
+            // By category
+            const category = msg.spamCategory || msg.category || "Unknown";
+            byCategory[category] = (byCategory[category] || 0) + 1;
+
+            // By recent (last 30 days)
+            const msgDate = msg.date || msg.detectedAt || 0;
+            if (msgDate > thirtyDaysAgo) {
+                const dateKey = new Date(msgDate).toLocaleDateString();
+                byDate[dateKey] = (byDate[dateKey] || 0) + 1;
+            }
+        });
+
+        let response = `**Your Spam Statistics**\n\n`;
+        response += `**Total Spam Blocked:** ${totalBlocked.toLocaleString()} messages\n\n`;
+
+        // Top categories
+        const sortedCategories = Object.entries(byCategory)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5);
+
+        if (sortedCategories.length > 0) {
+            response += `**Top Spam Categories:**\n`;
+            sortedCategories.forEach(([category, count]) => {
+                response += `- ${category}: ${count}\n`;
+            });
+        }
+
+        // Recent activity
+        const recentCount = Object.values(byDate).reduce((sum, c) => sum + c, 0);
+        response += `\n**Last 30 Days:** ${recentCount} spam messages blocked`;
+
+        return response;
+    } catch (error) {
+        console.error("[SupportChat] Error fetching spam stats:", error);
+        return "I had trouble retrieving your spam statistics. Please try again later.";
+    }
+}
+
+// ============================================
+// ADMIN - ACCOUNT RECOVERY MANAGEMENT
+// ============================================
+
+/**
+ * Admin: List all accounts scheduled for deletion
+ */
+exports.adminListScheduledDeletions = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const deletionsSnap = await admin.database().ref("scheduled_deletions").once("value");
+
+        if (!deletionsSnap.exists()) {
+            return { success: true, scheduledDeletions: [] };
+        }
+
+        const deletions = [];
+        const now = Date.now();
+
+        deletionsSnap.forEach((child) => {
+            const deletion = child.val();
+            const daysRemaining = Math.ceil((deletion.scheduledDeletionAt - now) / (24 * 60 * 60 * 1000));
+
+            deletions.push({
+                userId: child.key,
+                requestedAt: deletion.requestedAt,
+                scheduledDeletionAt: deletion.scheduledDeletionAt,
+                daysRemaining: Math.max(0, daysRemaining),
+                reason: deletion.reason,
+                deviceNames: deletion.deviceNames || [],
+                phoneNumbers: deletion.phoneNumbers || [],
+                deviceCount: deletion.deviceCount || 0,
+                messageCount: deletion.messageCount || 0,
+                plan: deletion.plan || "free"
+            });
+        });
+
+        // Sort by days remaining (soonest first)
+        deletions.sort((a, b) => a.daysRemaining - b.daysRemaining);
+
+        console.log(`[Admin] Listed ${deletions.length} scheduled deletions`);
+        return { success: true, scheduledDeletions: deletions };
+    } catch (error) {
+        console.error("[Admin] List scheduled deletions error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to list scheduled deletions");
+    }
+});
+
+/**
+ * Admin: List all permanently deleted accounts
+ */
+exports.adminListDeletedAccounts = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const limit = data?.limit || 100;
+        const deletedSnap = await admin.database().ref("deleted_accounts")
+            .orderByChild("deletedAt")
+            .limitToLast(limit)
+            .once("value");
+
+        if (!deletedSnap.exists()) {
+            return { success: true, deletedAccounts: [] };
+        }
+
+        const deletedAccounts = [];
+        deletedSnap.forEach((child) => {
+            const account = child.val();
+            deletedAccounts.push({
+                userId: child.key,
+                deletedAt: account.deletedAt,
+                requestedAt: account.requestedAt,
+                reason: account.reason,
+                deviceNames: account.deviceNames || [],
+                phoneNumbers: account.phoneNumbers || [],
+                deviceCount: account.deviceCount || 0,
+                messageCount: account.messageCount || 0,
+                plan: account.plan || "free",
+                status: account.status || "deleted",
+                canRestore: account.canRestore || false
+            });
+        });
+
+        // Sort by deletion date (most recent first)
+        deletedAccounts.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+
+        console.log(`[Admin] Listed ${deletedAccounts.length} deleted accounts`);
+        return { success: true, deletedAccounts };
+    } catch (error) {
+        console.error("[Admin] List deleted accounts error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to list deleted accounts");
+    }
+});
+
+/**
+ * Admin: Search accounts by phone number, device name, or user ID
+ */
+exports.adminSearchAccounts = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const searchQuery = data?.query?.toLowerCase();
+        if (!searchQuery || searchQuery.length < 3) {
+            throw new functions.https.HttpsError("invalid-argument", "Search query must be at least 3 characters");
+        }
+
+        const results = {
+            scheduledDeletions: [],
+            deletedAccounts: []
+        };
+
+        // Search scheduled deletions
+        const scheduledSnap = await admin.database().ref("scheduled_deletions").once("value");
+        if (scheduledSnap.exists()) {
+            scheduledSnap.forEach((child) => {
+                const data = child.val();
+                const userId = child.key;
+
+                // Search in userId
+                if (userId.toLowerCase().includes(searchQuery)) {
+                    results.scheduledDeletions.push({ userId, ...data, matchedOn: "userId" });
+                    return;
+                }
+
+                // Search in phone numbers
+                const phoneNumbers = data.phoneNumbers || [];
+                const matchedPhone = phoneNumbers.find(p =>
+                    p.replace(/\D/g, '').includes(searchQuery.replace(/\D/g, ''))
+                );
+                if (matchedPhone) {
+                    results.scheduledDeletions.push({ userId, ...data, matchedOn: "phoneNumber", matchedValue: matchedPhone });
+                    return;
+                }
+
+                // Search in device names
+                const deviceNames = data.deviceNames || [];
+                const matchedDevice = deviceNames.find(d =>
+                    d.name?.toLowerCase().includes(searchQuery)
+                );
+                if (matchedDevice) {
+                    results.scheduledDeletions.push({ userId, ...data, matchedOn: "deviceName", matchedValue: matchedDevice.name });
+                }
+            });
+        }
+
+        // Search deleted accounts
+        const deletedSnap = await admin.database().ref("deleted_accounts").once("value");
+        if (deletedSnap.exists()) {
+            deletedSnap.forEach((child) => {
+                const data = child.val();
+                const userId = child.key;
+
+                // Search in userId
+                if (userId.toLowerCase().includes(searchQuery)) {
+                    results.deletedAccounts.push({ userId, ...data, matchedOn: "userId" });
+                    return;
+                }
+
+                // Search in phone numbers
+                const phoneNumbers = data.phoneNumbers || [];
+                const matchedPhone = phoneNumbers.find(p =>
+                    p.replace(/\D/g, '').includes(searchQuery.replace(/\D/g, ''))
+                );
+                if (matchedPhone) {
+                    results.deletedAccounts.push({ userId, ...data, matchedOn: "phoneNumber", matchedValue: matchedPhone });
+                    return;
+                }
+
+                // Search in device names
+                const deviceNames = data.deviceNames || [];
+                const matchedDevice = deviceNames.find(d =>
+                    d.name?.toLowerCase().includes(searchQuery)
+                );
+                if (matchedDevice) {
+                    results.deletedAccounts.push({ userId, ...data, matchedOn: "deviceName", matchedValue: matchedDevice.name });
+                }
+            });
+        }
+
+        console.log(`[Admin] Search "${searchQuery}": found ${results.scheduledDeletions.length} scheduled, ${results.deletedAccounts.length} deleted`);
+        return { success: true, ...results };
+    } catch (error) {
+        console.error("[Admin] Search accounts error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to search accounts");
+    }
+});
+
+/**
+ * Admin: Cancel a user's scheduled deletion
+ */
+exports.adminCancelDeletion = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const targetUserId = data?.userId;
+        if (!targetUserId) {
+            throw new functions.https.HttpsError("invalid-argument", "User ID is required");
+        }
+
+        // Check if deletion is scheduled
+        const deletionSnap = await admin.database().ref(`scheduled_deletions/${targetUserId}`).once('value');
+        if (!deletionSnap.exists()) {
+            throw new functions.https.HttpsError("not-found", "No deletion scheduled for this user");
+        }
+
+        // Remove deletion markers
+        await Promise.all([
+            admin.database().ref(`users/${targetUserId}/deletion_scheduled`).remove(),
+            admin.database().ref(`scheduled_deletions/${targetUserId}`).remove()
+        ]);
+
+        console.log(`[Admin] Cancelled deletion for user ${targetUserId}`);
+
+        return {
+            success: true,
+            message: `Account deletion cancelled for user ${targetUserId}. User can continue using their account.`
+        };
+    } catch (error) {
+        console.error("[Admin] Cancel deletion error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to cancel deletion");
+    }
+});
+
+/**
+ * Admin: Mark deleted account as acknowledged/handled
+ * Note: We cannot actually restore data once deleted, but we can update the status
+ */
+exports.adminUpdateDeletedAccountStatus = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const targetUserId = data?.userId;
+        const newStatus = data?.status || "acknowledged";
+        const adminNotes = data?.notes || "";
+
+        if (!targetUserId) {
+            throw new functions.https.HttpsError("invalid-argument", "User ID is required");
+        }
+
+        // Check if account exists in deleted_accounts
+        const deletedSnap = await admin.database().ref(`deleted_accounts/${targetUserId}`).once('value');
+        if (!deletedSnap.exists()) {
+            throw new functions.https.HttpsError("not-found", "Deleted account not found");
+        }
+
+        // Update status
+        await admin.database().ref(`deleted_accounts/${targetUserId}`).update({
+            status: newStatus,
+            adminNotes: adminNotes,
+            statusUpdatedAt: Date.now(),
+            statusUpdatedBy: context.auth.uid
+        });
+
+        console.log(`[Admin] Updated deleted account ${targetUserId} status to ${newStatus}`);
+
+        return {
+            success: true,
+            message: `Account ${targetUserId} status updated to ${newStatus}`,
+            note: "Data cannot be restored once deleted. User must create a new account."
+        };
+    } catch (error) {
+        console.error("[Admin] Update deleted account status error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to update account status");
+    }
+});
+
+/**
+ * Admin: Get account recovery stats
+ */
+exports.adminGetRecoveryStats = functions.https.onCall(async (data, context) => {
+    try {
+        requireAdmin(context);
+
+        const [scheduledSnap, deletedSnap] = await Promise.all([
+            admin.database().ref("scheduled_deletions").once("value"),
+            admin.database().ref("deleted_accounts").once("value")
+        ]);
+
+        const now = Date.now();
+        const scheduledDeletions = [];
+        const deletedAccounts = [];
+
+        if (scheduledSnap.exists()) {
+            scheduledSnap.forEach((child) => {
+                scheduledDeletions.push(child.val());
+            });
+        }
+
+        if (deletedSnap.exists()) {
+            deletedSnap.forEach((child) => {
+                deletedAccounts.push(child.val());
+            });
+        }
+
+        // Calculate stats
+        const urgentDeletions = scheduledDeletions.filter(d => {
+            const daysRemaining = Math.ceil((d.scheduledDeletionAt - now) / (24 * 60 * 60 * 1000));
+            return daysRemaining <= 7;
+        }).length;
+
+        const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
+        const recentDeletions = deletedAccounts.filter(d => d.deletedAt > thirtyDaysAgo).length;
+
+        // Group by reason
+        const reasonCounts = {};
+        [...scheduledDeletions, ...deletedAccounts].forEach(account => {
+            const reason = account.reason || "Not specified";
+            reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+        });
+
+        return {
+            success: true,
+            stats: {
+                totalScheduled: scheduledDeletions.length,
+                urgentDeletions: urgentDeletions, // within 7 days
+                totalDeleted: deletedAccounts.length,
+                recentDeletions: recentDeletions, // last 30 days
+                reasonBreakdown: reasonCounts
+            }
+        };
+    } catch (error) {
+        console.error("[Admin] Get recovery stats error:", error);
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+        throw new functions.https.HttpsError("internal", "Failed to get recovery stats");
+    }
+});

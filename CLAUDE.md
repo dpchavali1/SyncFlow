@@ -93,3 +93,28 @@ The SmsReceiver operates independently of the MainActivity lifecycle. Incoming m
 
 ### Compose UI State Management
 The UI uses `collectAsStateWithLifecycle()` to safely collect StateFlow emissions while respecting the Compose lifecycle. This prevents memory leaks and ensures state collection stops when the UI is not visible.
+
+## CRITICAL: Data Safety Rules
+
+### NEVER DELETE USER DATA WITHOUT EXPLICIT PERMISSION
+
+This is a **mandatory rule** for all code in this project:
+
+1. **NO automatic deletions** - Never write code that automatically deletes SMS, MMS, contacts, or any user data
+2. **NO sync-based deletions** - Never delete local data because it's "missing" from Firebase/cloud
+3. **NO reconciliation deletions** - Never compare local vs remote and delete differences
+4. **NO cleanup functions** that touch user content without explicit user action
+5. **EVERY delete action** must require explicit user tap/confirmation in the UI
+
+**Why:** A bug in `reconcileDeletedMessages()` caused loss of 17,000+ user messages. This function incorrectly deleted local messages that weren't yet synced to Firebase.
+
+**The only acceptable deletion patterns:**
+- User explicitly taps "Delete" button on a specific message/conversation
+- User explicitly confirms deletion in a dialog
+- Admin explicitly triggers cleanup from admin panel with confirmation
+
+**Never write code that:**
+- Deletes based on "not found in cloud"
+- Deletes based on timestamps or age
+- Deletes as part of "sync" operations
+- Deletes in background services without user action

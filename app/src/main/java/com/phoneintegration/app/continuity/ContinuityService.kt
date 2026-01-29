@@ -60,6 +60,8 @@ class ContinuityService(context: Context) {
         lastPublishAt = now
         lastPayloadHash = payloadHash
 
+        database.goOnline()
+
         val ref = database.reference
             .child("users")
             .child(userId)
@@ -87,6 +89,8 @@ class ContinuityService(context: Context) {
 
     fun startListening(onUpdate: (ContinuityState?) -> Unit) {
         val userId = auth.currentUser?.uid ?: return
+
+        database.goOnline()
 
         val ref = database.reference
             .child("users")
