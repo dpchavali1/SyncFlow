@@ -554,6 +554,8 @@ struct AIAssistantView: View {
                 digestCard(digest)
             case .trends(let thisMonth, let lastMonth):
                 trendsCard(thisMonth: thisMonth, lastMonth: lastMonth)
+            case .currencyTotals(let totals):
+                currencyTotalsCard(totals)
             case .help(let text):
                 helpCard(text)
             case .noResults(let message):
@@ -1100,6 +1102,44 @@ struct AIAssistantView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Card displaying currency totals breakdown
+    private func currencyTotalsCard(_ totals: [String: Double]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if totals.isEmpty {
+                Text("No currency amounts found in messages")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(totals.sorted(by: { $0.value > $1.value }), id: \.key) { currency, amount in
+                    HStack {
+                        Text(getCurrencySymbol(currency))
+                            .font(.title2)
+                            .foregroundColor(.primary)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(format: "%.2f", amount))
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                            Text(currency)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+
+                    if currency != totals.sorted(by: { $0.value > $1.value }).last?.key {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(12)
+    }
+
     /// Simple help text card
     private func helpCard(_ text: String) -> some View {
         Text(text)
@@ -1297,6 +1337,12 @@ struct AIAssistantView: View {
         case .trends(let thisMonth, let lastMonth):
             text += "This Month: \(thisMonth.formattedTotal) (\(thisMonth.transactionCount) transactions)\n"
             text += "Last Month: \(lastMonth.formattedTotal) (\(lastMonth.transactionCount) transactions)\n"
+        case .currencyTotals(let totals):
+            text += "Currency Totals:\n"
+            for (currency, amount) in totals.sorted(by: { $0.value > $1.value }) {
+                let symbol = getCurrencySymbol(currency)
+                text += "\(symbol)\(String(format: "%.2f", amount)) \(currency)\n"
+            }
         case .help(let helpText):
             text += helpText
         case .noResults(let msg), .error(let msg):
@@ -1314,8 +1360,27 @@ struct AIAssistantView: View {
 
     /// Formats an amount with the appropriate currency symbol
     private func formatCurrency(_ amount: Double, _ currency: String) -> String {
-        let symbol = currency == "INR" ? "₹" : "$"
+        let symbol = getCurrencySymbol(currency)
         return "\(symbol)\(String(format: "%.2f", amount))"
+    }
+
+    /// Gets the currency symbol for a given currency code
+    private func getCurrencySymbol(_ currency: String) -> String {
+        switch currency.uppercased() {
+        case "USD": return "$"
+        case "EUR": return "€"
+        case "GBP": return "£"
+        case "JPY": return "¥"
+        case "INR": return "₹"
+        case "CAD": return "CA$"
+        case "AUD": return "AU$"
+        case "NZD": return "NZ$"
+        case "CHF": return "CHF"
+        case "SEK": return "SEK"
+        case "NOK": return "NOK"
+        case "DKK": return "DKK"
+        default: return currency
+        }
     }
 
     /// Creates a compact stat pill with value and label
