@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState, useRef, useEffect, useCallback, memo } from 'react'
-import { Search, User, GripVertical, X } from 'lucide-react'
+import { Search, User, GripVertical, X, Lock, Unlock } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { format } from 'date-fns'
 
@@ -13,6 +13,9 @@ interface Conversation {
   lastMessage: string
   timestamp: number
   unreadCount: number
+  lastMessageEncrypted?: boolean
+  lastMessageE2eeFailed?: boolean
+  lastMessageDecryptionFailed?: boolean
 }
 
 // LRU Cache for phone number normalization
@@ -66,6 +69,17 @@ const ConversationItem = memo(function ConversationItem({
   isSelected: boolean
   onClick: () => void
 }) {
+  const showEncrypted = !!conv.lastMessageEncrypted
+  const showDecryptWarning = !!conv.lastMessageDecryptionFailed
+  const showEncryptWarning = !!conv.lastMessageE2eeFailed
+  const EncryptionIcon = showEncrypted ? Lock : Unlock
+  const encryptionTitle = showEncrypted
+    ? (showDecryptWarning ? 'Encrypted (keys missing)' : 'Encrypted')
+    : (showEncryptWarning ? 'Not encrypted (E2EE failed)' : 'Not encrypted')
+  const encryptionClass = showEncrypted
+    ? (showDecryptWarning ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400')
+    : (showEncryptWarning ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400 dark:text-gray-500')
+
   return (
     <div
       onClick={onClick}
@@ -85,9 +99,12 @@ const ConversationItem = memo(function ConversationItem({
             <h3 className="font-semibold text-gray-900 dark:text-white truncate">
               {conv.contactName || conv.address}
             </h3>
-            <span className="text-xs text-gray-500 dark:text-gray-400 ml-2 flex-shrink-0">
-              {format(new Date(conv.timestamp), 'MMM d')}
-            </span>
+            <div className="flex items-center gap-2 ml-2 flex-shrink-0">
+              <EncryptionIcon className={`w-3.5 h-3.5 ${encryptionClass}`} title={encryptionTitle} />
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                {format(new Date(conv.timestamp), 'MMM d')}
+              </span>
+            </div>
           </div>
 
           <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
@@ -238,11 +255,17 @@ export default function ConversationList() {
           lastMessage: msg.body,
           timestamp: msg.date,
           unreadCount: isUnread ? 1 : 0,
+          lastMessageEncrypted: !!msg.encrypted,
+          lastMessageE2eeFailed: !!msg.e2eeFailed,
+          lastMessageDecryptionFailed: !!msg.decryptionFailed,
         })
       } else {
         if (msg.date > existing.timestamp) {
           existing.lastMessage = msg.body
           existing.timestamp = msg.date
+          existing.lastMessageEncrypted = !!msg.encrypted
+          existing.lastMessageE2eeFailed = !!msg.e2eeFailed
+          existing.lastMessageDecryptionFailed = !!msg.decryptionFailed
           if (msg.contactName && !existing.contactName) {
             existing.contactName = msg.contactName
           }

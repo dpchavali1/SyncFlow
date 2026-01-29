@@ -784,6 +784,9 @@ enum AIQueryType {
     /// Month-over-month spending comparison and trends
     case spendingTrends
 
+    /// Currency totals breakdown across all messages
+    case currencyTotals
+
     /// General help or capability explanation
     case generalHelp
 
@@ -832,6 +835,9 @@ enum AIResponseDetails {
 
     /// Month-over-month comparison (this month analysis, last month analysis)
     case trends(SpendingAnalysis, SpendingAnalysis)
+
+    /// Currency totals breakdown (currency code -> total amount map)
+    case currencyTotals([String: Double])
 
     /// Help text explaining assistant capabilities
     case help(String)

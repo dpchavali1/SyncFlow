@@ -117,6 +117,15 @@ class FirebaseService {
     /// Region is set to us-central1 to match the deployed functions.
     private let functions = Functions.functions(region: "us-central1")
 
+    private func isE2eeEnabled() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "e2ee_enabled") == nil {
+            defaults.set(true, forKey: "e2ee_enabled")
+            return true
+        }
+        return defaults.bool(forKey: "e2ee_enabled")
+    }
+
     // MARK: - Connection Management
 
     /// Ensures Firebase database connection is active before write operations.
@@ -771,7 +780,7 @@ class FirebaseService {
                     guard let messageData = value as? [String: Any],
                           let address = messageData["address"] as? String,
                           let body = messageData["body"] as? String,
-                          let date = messageData["date"] as? Double,
+                          let date = self.normalizeMessageDate(messageData) ,
                           let type = messageData["type"] as? Int else {
                         continue
                     }
@@ -814,7 +823,7 @@ class FirebaseService {
 
                         // If decryption failed, show a user-friendly message instead of garbled text
                         if decryptionFailed {
-                            decryptedBody = "[🔒 Encrypted message - re-pair device to decrypt]"
+                            decryptedBody = "[🔒 Encrypted message - sync keys to decrypt]"
                         }
                     }
 
@@ -856,7 +865,8 @@ class FirebaseService {
                         type: type,
                         contactName: contactName,
                         isMms: isMms,
-                        attachments: attachments
+                        attachments: attachments,
+                        isEncrypted: isEncrypted
                     )
 
                     // Set read status from Android sync data (if available)
@@ -926,6 +936,33 @@ class FirebaseService {
         return nil
     }
 
+    private func normalizeMessageDate(_ messageData: [String: Any]) -> Double? {
+        let rawDate = coerceToDouble(messageData["date"])
+        let rawTimestamp = coerceToDouble(messageData["timestamp"])
+        guard let value = rawDate ?? rawTimestamp, value > 0 else {
+            return nil
+        }
+        // Heuristic: seconds vs milliseconds since epoch
+        return value < 1_000_000_000_000 ? value * 1000.0 : value
+    }
+
+    private func coerceToDouble(_ value: Any?) -> Double? {
+        switch value {
+        case let number as NSNumber:
+            return number.doubleValue
+        case let doubleValue as Double:
+            return doubleValue
+        case let intValue as Int:
+            return Double(intValue)
+        case let int64Value as Int64:
+            return Double(int64Value)
+        case let stringValue as String:
+            return Double(stringValue)
+        default:
+            return nil
+        }
+    }
+
     func removeMessageListener(userId: String, handle: DatabaseHandle) {
         let messagesRef = database.reference()
             .child("users")
@@ -962,7 +999,7 @@ class FirebaseService {
             guard let messageData = value as? [String: Any],
                   let address = messageData["address"] as? String,
                   let body = messageData["body"] as? String,
-                  let date = messageData["date"] as? Double,
+                  let date = normalizeMessageDate(messageData),
                   let type = messageData["type"] as? Int else {
                 continue
             }
@@ -1004,7 +1041,7 @@ class FirebaseService {
                 }
 
                 if decryptionFailed {
-                    decryptedBody = "[🔒 Encrypted message - re-pair device to decrypt]"
+                    decryptedBody = "[🔒 Encrypted message - sync keys to decrypt]"
                 }
             }
 
@@ -1046,7 +1083,8 @@ class FirebaseService {
                 type: type,
                 contactName: contactName,
                 isMms: isMms,
-                attachments: attachments
+                attachments: attachments,
+                isEncrypted: isEncrypted
             )
 
             if let isReadFromSync = isReadFromSync {
@@ -1298,7 +1336,7 @@ class FirebaseService {
         var messageBody = body
         var isEncrypted = false
 
-        if E2EEManager.shared.isInitialized {
+        if E2EEManager.shared.isInitialized && isE2eeEnabled() {
             do {
                 messageBody = try await E2EEManager.shared.encryptMessage(body, for: userId)
                 isEncrypted = true
@@ -1360,7 +1398,7 @@ class FirebaseService {
         var dataToUpload = attachmentData
         var isEncrypted = false
 
-        if E2EEManager.shared.isInitialized {
+        if E2EEManager.shared.isInitialized && isE2eeEnabled() {
             do {
                 dataToUpload = try await E2EEManager.shared.encryptData(attachmentData, for: userId)
                 isEncrypted = true
@@ -1468,7 +1506,7 @@ class FirebaseService {
         var messageBody = body
         var bodyEncrypted = false
 
-        if E2EEManager.shared.isInitialized && !body.isEmpty {
+        if E2EEManager.shared.isInitialized && isE2eeEnabled() && !body.isEmpty {
             do {
                 messageBody = try await E2EEManager.shared.encryptMessage(body, for: userId)
                 bodyEncrypted = true
@@ -1552,7 +1590,7 @@ class FirebaseService {
         var messageBody = body
         var isEncrypted = false
 
-        if E2EEManager.shared.isInitialized {
+        if E2EEManager.shared.isInitialized && isE2eeEnabled() {
             do {
                 messageBody = try await E2EEManager.shared.encryptMessage(body, for: userId)
                 isEncrypted = true
@@ -2453,6 +2491,221 @@ class FirebaseService {
         }.filter { $0.isAndroid && $0.online }
     }
 
+    // MARK: - E2EE Key Recovery
+
+    /// Check for E2EE key mismatch and ensure a device key backup exists.
+    /// Returns (mismatchDetected, message).
+    func checkE2eeKeyStatus(userId: String, deviceId: String) async -> (Bool, String?) {
+        try? await E2EEManager.shared.initializeKeys()
+        guard let localPublicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() else {
+            return (false, nil)
+        }
+
+        var mismatchDetected = false
+        var message: String?
+
+        // Compare against remote device key entry if present
+        do {
+            let deviceKeyRef = database.reference()
+                .child("e2ee_keys")
+                .child(userId)
+                .child(deviceId)
+                .child("publicKeyX963")
+            let keySnapshot = try await deviceKeyRef.getData()
+            if let remoteKey = keySnapshot.value as? String,
+               !remoteKey.isEmpty,
+               remoteKey != localPublicKeyX963 {
+                mismatchDetected = true
+                message = "This Mac's encryption keys don't match the keys registered for this device."
+            }
+        } catch {
+            // Ignore device key lookup errors; we'll still try backup flow
+        }
+
+        // Check existing backup; create if missing and keys match
+        do {
+            let backupRef = database.reference()
+                .child("users")
+                .child(userId)
+                .child("e2ee_key_backups")
+                .child(deviceId)
+            let backupSnapshot = try await backupRef.getData()
+            if backupSnapshot.exists(),
+               let backupData = backupSnapshot.value as? [String: Any],
+               let backupPublicKey = backupData["publicKeyX963"] as? String,
+               !backupPublicKey.isEmpty {
+                if backupPublicKey != localPublicKeyX963 {
+                    mismatchDetected = true
+                    message = "Encryption keys changed for this device. Sync keys to restore message history."
+                }
+            } else {
+                try await createE2eeKeyBackup(userId: userId, deviceId: deviceId)
+            }
+        } catch {
+            // Backup creation failed; don't block UI
+        }
+
+        return (mismatchDetected, message)
+    }
+
+    /// Request key sync from the paired phone for this device.
+    func requestE2eeKeySync(userId: String, deviceId: String) async throws {
+        guard let localPublicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() else {
+            throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "E2EE not initialized"])
+        }
+
+        let requestRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("e2ee_key_requests")
+            .child(deviceId)
+
+        let payload: [String: Any] = [
+            "requesterDeviceId": deviceId,
+            "requesterPlatform": "macos",
+            "requesterPublicKeyX963": localPublicKeyX963,
+            "requestedAt": ServerValue.timestamp(),
+            "status": "pending"
+        ]
+
+        try await requestRef.setValue(payload)
+    }
+
+    /// Wait for key sync response, import keys, and return success.
+    func waitForE2eeKeySyncResponse(userId: String, deviceId: String, timeout: TimeInterval = 30) async throws -> Bool {
+        let responseRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("e2ee_key_responses")
+            .child(deviceId)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            var resolved = false
+            var handle: DatabaseHandle = 0
+            handle = responseRef.observe(.value) { snapshot in
+                guard snapshot.exists(),
+                      let data = snapshot.value as? [String: Any],
+                      let status = data["status"] as? String else {
+                    return
+                }
+
+                if status == "ready",
+                   let envelope = data["encryptedPrivateKeyEnvelope"] as? String {
+                    do {
+                        let rawKey = try E2EEManager.shared.decryptDataKey(from: envelope)
+                        try E2EEManager.shared.importPrivateKey(rawData: rawKey)
+                        Task {
+                            try? await E2EEManager.shared.publishDevicePublicKey()
+                        }
+                        responseRef.removeObserver(withHandle: handle)
+                        responseRef.removeValue()
+                        resolved = true
+                        continuation.resume(returning: true)
+                    } catch {
+                        responseRef.removeObserver(withHandle: handle)
+                        responseRef.removeValue()
+                        resolved = true
+                        continuation.resume(throwing: error)
+                    }
+                } else if status == "error" {
+                    let errorMessage = data["error"] as? String ?? "Key sync failed"
+                    responseRef.removeObserver(withHandle: handle)
+                    responseRef.removeValue()
+                    resolved = true
+                    continuation.resume(throwing: NSError(domain: "E2EE", code: 2, userInfo: [NSLocalizedDescriptionKey: errorMessage]))
+                }
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                if resolved { return }
+                responseRef.removeObserver(withHandle: handle)
+                continuation.resume(throwing: NSError(domain: "E2EE", code: 3, userInfo: [NSLocalizedDescriptionKey: "Key sync timed out"]))
+            }
+        }
+    }
+
+    /// Create a key backup for this device encrypted to the paired Android device.
+    private func createE2eeKeyBackup(userId: String, deviceId: String) async throws {
+        guard let privateKeyRaw = E2EEManager.shared.getMyPrivateKeyRaw(),
+              let publicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() else {
+            throw NSError(domain: "E2EE", code: 4, userInfo: [NSLocalizedDescriptionKey: "E2EE not initialized"])
+        }
+
+        guard let androidDeviceId = try await getAndroidDeviceId(userId: userId) else {
+            throw NSError(domain: "E2EE", code: 5, userInfo: [NSLocalizedDescriptionKey: "No Android device found"])
+        }
+
+        let androidKeyRef = database.reference()
+            .child("e2ee_keys")
+            .child(userId)
+            .child(androidDeviceId)
+            .child("publicKeyX963")
+        let androidKeySnapshot = try await androidKeyRef.getData()
+        guard let androidPublicKeyX963 = androidKeySnapshot.value as? String else {
+            throw NSError(domain: "E2EE", code: 6, userInfo: [NSLocalizedDescriptionKey: "Android device key missing"])
+        }
+
+        let envelope = try E2EEManager.shared.encryptDataKeyForDevice(
+            publicKeyX963Base64: androidPublicKeyX963,
+            data: privateKeyRaw
+        )
+
+        let backupRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("e2ee_key_backups")
+            .child(deviceId)
+
+        let payload: [String: Any] = [
+            "publicKeyX963": publicKeyX963,
+            "encryptedPrivateKeyEnvelope": envelope,
+            "platform": "macos",
+            "keyVersion": 2,
+            "createdAt": ServerValue.timestamp()
+        ]
+
+        try await backupRef.setValue(payload)
+    }
+
+    private func getAndroidDeviceId(userId: String) async throws -> String? {
+        let devicesRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("devices")
+
+        let snapshot = try await devicesRef.getData()
+        guard let devicesData = snapshot.value as? [String: [String: Any]] else {
+            return nil
+        }
+
+        return devicesData.compactMap { (id, dict) in
+            SyncFlowDevice.from(id: id, dict: dict)
+        }.first(where: { $0.isAndroid })?.id
+    }
+
+    // MARK: - Sync History Requests
+
+    /// Request a message history sync from the paired phone.
+    func requestHistorySync(userId: String, days: Int = 3650) async throws {
+        let requestId = UUID().uuidString
+        let requestRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("sync_requests")
+            .child(requestId)
+
+        let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") ?? "macos"
+
+        let payload: [String: Any] = [
+            "days": days,
+            "requestedBy": "macos:\(deviceId)",
+            "requestedAt": ServerValue.timestamp(),
+            "status": "pending"
+        ]
+
+        try await requestRef.setValue(payload)
+    }
+
     // MARK: - Find My Phone
 
     /// Ring the phone to help locate it
@@ -2551,7 +2804,7 @@ extension FirebaseService {
                   let messageData = snapshot.value as? [String: Any],
                   let address = messageData["address"] as? String,
                   let body = messageData["body"] as? String,
-                  let date = messageData["date"] as? Double,
+                  let date = normalizeMessageDate(messageData),
                   let type = messageData["type"] as? Int else {
                 continue
             }
@@ -2570,7 +2823,8 @@ extension FirebaseService {
                 type: type,
                 contactName: contactName,
                 isMms: isMms,
-                attachments: nil
+                attachments: nil,
+                isEncrypted: isEncrypted
             )
 
             messages.append(message)

@@ -18,6 +18,7 @@ import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.data.database.SpamMessage
 import com.phoneintegration.app.data.database.SyncFlowDatabase
+import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.utils.SpamFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -65,6 +66,41 @@ fun PrivacySettingsScreen(
                 "Security",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            SwitchCard(
+                title = "End-to-end encryption",
+                subtitle = "Encrypt messages and attachments between paired devices",
+                checked = prefsManager.e2eeEnabled.value,
+                onCheckedChange = { enabled ->
+                    prefsManager.setE2eeEnabled(enabled)
+                    if (enabled) {
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    SignalProtocolManager(context).initializeKeys()
+                                }
+                                Toast.makeText(
+                                    context,
+                                    "End-to-end encryption enabled",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(
+                                    context,
+                                    "Failed to enable encryption",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "End-to-end encryption disabled",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
             )
             
             SwitchCard(

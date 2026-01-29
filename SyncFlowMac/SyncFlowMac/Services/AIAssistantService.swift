@@ -203,6 +203,17 @@ class AIAssistantService: ObservableObject {
                 suggestedFollowUps: ["Show by category", "Top merchants", "Show subscriptions"]
             )
 
+        case .currencyTotals:
+            let totals = analyzeCurrencyTotals(messages: messages)
+            let count = totals.count
+            let summary = count == 0 ? "No currency amounts found" : "Found amounts in \(count) currency\(count == 1 ? "" : "/currencies")"
+            return AIResponse(
+                queryType: queryType,
+                summary: summary,
+                details: count == 0 ? .noResults("No currency amounts detected in your messages") : .currencyTotals(totals),
+                suggestedFollowUps: ["Show spending this month", "Recent transactions", "Account balance"]
+            )
+
         case .generalHelp:
             return AIResponse(
                 queryType: queryType,
@@ -267,6 +278,10 @@ class AIAssistantService: ObservableObject {
 
         if containsAny(lowerQuery, ["trend", "compare", "vs last", "versus"]) {
             return .spendingTrends
+        }
+
+        if containsAny(lowerQuery, ["money total", "currency total", "money summary", "financial summary", "show money", "currency breakdown"]) {
+            return .currencyTotals
         }
 
         if containsAny(lowerQuery, ["help", "what can you", "how to", "?"]) {
@@ -355,18 +370,18 @@ class AIAssistantService: ObservableObject {
             var amount: Double? = nil
             var currency = "USD"
 
-            if let match = body.range(of: usdPattern, options: .regularExpression) {
-                let amountStr = String(body[match]).replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+            if let match = body.range(of: usdPattern, options: String.CompareOptionsString.CompareOptions.regularExpression) {
+                let amountStr = String(body[match]).replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
                 amount = Double(amountStr)
                 currency = "USD"
-            } else if let match = body.range(of: inrPattern, options: .regularExpression) {
+            } else if let match = body.range(of: inrPattern, options: String.CompareOptionsString.CompareOptions.regularExpression) {
                 var amountStr = String(body[match])
                 amountStr = amountStr.replacingOccurrences(of: "Rs.", with: "")
                     .replacingOccurrences(of: "Rs", with: "")
                     .replacingOccurrences(of: "₹", with: "")
                     .replacingOccurrences(of: "INR", with: "")
                     .replacingOccurrences(of: ",", with: "")
-                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet.whitespaces)
                 amount = Double(amountStr)
                 currency = "INR"
             }
@@ -428,7 +443,7 @@ class AIAssistantService: ObservableObject {
             // Extract due date
             var dueDate: Date? = nil
             for pattern in dueDatePatterns {
-                if let match = body.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
+                if let match = body.range(of: pattern, options: [String.CompareOptions.regularExpression, String.CompareOptions.caseInsensitive]) {
                     let dateStr = String(body[match])
                     dueDate = parseDate(from: dateStr)
                     if dueDate != nil { break }
@@ -438,13 +453,13 @@ class AIAssistantService: ObservableObject {
             // Extract amount
             var amount: Double? = nil
             var currency = "USD"
-            if let match = body.range(of: amountPattern, options: [.regularExpression, .caseInsensitive]) {
+            if let match = body.range(of: amountPattern, options: [String.CompareOptions.regularExpression, String.CompareOptions.caseInsensitive]) {
                 let amountStr = String(body[match])
                     .replacingOccurrences(of: "$", with: "")
                     .replacingOccurrences(of: "Rs.", with: "")
                     .replacingOccurrences(of: "₹", with: "")
                     .replacingOccurrences(of: ",", with: "")
-                if let numMatch = amountStr.range(of: #"[0-9]+(?:\.\d{2})?"#, options: .regularExpression) {
+                if let numMatch = amountStr.range(of: #"[0-9]+(?:\.\d{2})?"#, options: String.CompareOptions.regularExpression) {
                     amount = Double(amountStr[numMatch])
                 }
                 currency = bodyLower.contains("rs") || bodyLower.contains("₹") ? "INR" : "USD"
@@ -498,7 +513,7 @@ class AIAssistantService: ObservableObject {
 
             // Extract tracking number
             var trackingNumber: String? = nil
-            if let match = body.range(of: trackingPattern, options: [.regularExpression, .caseInsensitive]) {
+            if let match = body.range(of: trackingPattern, options: [String.CompareOptions.regularExpression, String.CompareOptions.caseInsensitive]) {
                 trackingNumber = String(body[match]).uppercased()
                 // Clean up the tracking number
                 trackingNumber = trackingNumber?.replacingOccurrences(of: "TRACKING", with: "")
@@ -560,11 +575,11 @@ class AIAssistantService: ObservableObject {
             var currency = "USD"
 
             for pattern in balancePatterns {
-                if let match = body.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
+                if let match = body.range(of: pattern, options: [String.CompareOptions.regularExpression, String.CompareOptions.caseInsensitive]) {
                     let matchedStr = String(body[match])
                     // Extract just the number
                     let numberPattern = #"[0-9,]+(?:\.\d{1,2})?"#
-                    if let numMatch = matchedStr.range(of: numberPattern, options: .regularExpression) {
+                    if let numMatch = matchedStr.range(of: numberPattern, options: String.CompareOptions.regularExpression) {
                         let numStr = String(matchedStr[numMatch]).replacingOccurrences(of: ",", with: "")
                         if let parsed = Double(numStr), parsed > 0, parsed < 10_000_000 {
                             balance = parsed
@@ -645,7 +660,7 @@ class AIAssistantService: ObservableObject {
             }
 
             // Extract OTP code
-            guard let match = body.range(of: otpPattern, options: .regularExpression) else {
+            guard let match = body.range(of: otpPattern, options: String.CompareOptions.regularExpression) else {
                 continue
             }
 
@@ -658,7 +673,7 @@ class AIAssistantService: ObservableObject {
             var expiresIn: String? = nil
             if bodyLower.contains("valid for") || bodyLower.contains("expires in") {
                 let expiryPattern = #"(?:valid for|expires in)[:\s]*(\d+\s*(?:min|minute|sec|second|hr|hour))"#
-                if let expiryMatch = body.range(of: expiryPattern, options: [.regularExpression, .caseInsensitive]) {
+                if let expiryMatch = body.range(of: expiryPattern, options: [String.CompareOptions.regularExpression, String.CompareOptions.caseInsensitive]) {
                     expiresIn = String(body[expiryMatch])
                 }
             }
@@ -825,6 +840,104 @@ class AIAssistantService: ObservableObject {
         }
 
         return transactions
+    }
+
+    // MARK: - Currency Totals Analysis
+
+    /// Analyzes all messages to extract and total currency amounts
+    ///
+    /// Scans ALL messages (not just bank SMS) for currency symbols and amounts,
+    /// groups by currency type, and returns totals per currency.
+    ///
+    /// Supported currencies:
+    /// - $ (USD), € (EUR), £ (GBP), ¥ (JPY), ₹ (INR)
+    /// - CA$ (CAD), AU$ (AUD), NZ$ (NZD)
+    /// - CHF, SEK, NOK, DKK (text-based)
+    ///
+    /// - Parameter messages: All messages to scan
+    /// - Returns: Dictionary mapping currency code to total amount
+    func analyzeCurrencyTotals(messages: [Message]) -> [String: Double] {
+        var currencyTotals: [String: Double] = [:]
+
+        // Currency patterns with symbol and text detection
+        let currencyPatterns: [String: [NSRegularExpression]] = [
+            "USD": [
+                try! NSRegularExpression(pattern: #"\$\s*([0-9,]+(?:\.\d{1,2})?)"#),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*USD"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "EUR": [
+                try! NSRegularExpression(pattern: #"€\s*([0-9,]+(?:\.\d{1,2})?)"#),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*EUR"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "GBP": [
+                try! NSRegularExpression(pattern: #"£\s*([0-9,]+(?:\.\d{1,2})?)"#),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*GBP"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "JPY": [
+                try! NSRegularExpression(pattern: #"¥\s*([0-9,]+(?:\.\d{1,2})?)"#),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*JPY"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "INR": [
+                try! NSRegularExpression(pattern: #"₹\s*([0-9,]+(?:\.\d{1,2})?)"#),
+                try! NSRegularExpression(pattern: #"(?:Rs\.?|INR)\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*(?:Rs\.?|INR)"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "CAD": [
+                try! NSRegularExpression(pattern: #"CA\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*CAD"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "AUD": [
+                try! NSRegularExpression(pattern: #"AU\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*AUD"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "NZD": [
+                try! NSRegularExpression(pattern: #"NZ\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*NZD"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "CHF": [
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*CHF"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"CHF\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "SEK": [
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*SEK"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"SEK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "NOK": [
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*NOK"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"NOK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+            ],
+            "DKK": [
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*DKK"#, options: String.CompareOptions.caseInsensitive),
+                try! NSRegularExpression(pattern: #"DKK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+            ]
+        ]
+
+        // Scan all messages for currency mentions
+        for message in messages {
+            let body = message.body
+            let nsBody = body as NSString
+            let range = NSRange(location: 0, length: nsBody.length)
+
+            for (currency, patterns) in currencyPatterns {
+                for pattern in patterns {
+                    let matches = pattern.matches(in: body, options: [], range: range)
+
+                    for match in matches {
+                        if match.numberOfRanges > 1 {
+                            let amountRange = match.range(at: 1)
+                            if let swiftRange = Range(amountRange, in: body) {
+                                let amountStr = String(body[swiftRange]).replacingOccurrences(of: ",", with: "")
+                                if let amount = Double(amountStr), amount > 0, amount < 10_000_000 {
+                                    currencyTotals[currency, default: 0] += amount
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return currencyTotals
     }
 
     // MARK: - Helper Methods
@@ -1011,6 +1124,7 @@ class AIAssistantService: ObservableObject {
         • "How much did I spend this month?"
         • "Spent at Amazon"
         • "Show my expenses this week"
+        • "Show money totals" or "Currency totals"
 
         **Bills & Payments**
         • "Show my upcoming bills"

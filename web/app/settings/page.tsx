@@ -3,7 +3,15 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Header from '@/components/Header'
-import { getUsageSummary, UsageSummary, waitForAuth } from '@/lib/firebase'
+import {
+  ensureWebE2EEKeyBackup,
+  ensureWebE2EEKeyPublished,
+  getUsageSummary,
+  requestWebE2EEKeySync,
+  UsageSummary,
+  waitForAuth,
+  waitForWebE2EEKeySyncResponse,
+} from '@/lib/firebase'
 import { useAppStore } from '@/lib/store'
 import { NotificationSyncSettings } from '@/components/notification-sync-settings'
 import { ArrowLeft, Bell, BarChart3, User } from 'lucide-react'
@@ -37,6 +45,8 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<TabType>('notifications')
+  const [keySyncStatus, setKeySyncStatus] = useState<string | null>(null)
+  const [keySyncLoading, setKeySyncLoading] = useState(false)
 
   const loadUsage = useCallback(async (currentUserId: string) => {
     setIsLoading(true)
@@ -78,6 +88,34 @@ export default function SettingsPage() {
 
     setup()
   }, [router, setUserId, loadUsage])
+
+  useEffect(() => {
+    if (!userId) return
+    const prepareE2ee = async () => {
+      try {
+        await ensureWebE2EEKeyPublished(userId)
+        await ensureWebE2EEKeyBackup(userId)
+      } catch (err) {
+        console.error('Failed to prepare web E2EE keys', err)
+      }
+    }
+    prepareE2ee()
+  }, [userId])
+
+  const handleKeySync = async () => {
+    if (!userId) return
+    setKeySyncLoading(true)
+    setKeySyncStatus(null)
+    try {
+      await requestWebE2EEKeySync(userId)
+      await waitForWebE2EEKeySyncResponse(userId)
+      setKeySyncStatus('Keys synced successfully. Messages will decrypt when you return to Messages.')
+    } catch (err: any) {
+      setKeySyncStatus(err?.message || 'Key sync failed')
+    } finally {
+      setKeySyncLoading(false)
+    }
+  }
 
   if (!userId) {
     return (
@@ -307,6 +345,25 @@ export default function SettingsPage() {
                       </div>
                     </div>
                   </div>
+                </div>
+
+                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">End-to-end encryption</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                    If messages show “sync keys to decrypt”, request a key sync from your phone.
+                  </p>
+                  <button
+                    onClick={handleKeySync}
+                    disabled={keySyncLoading}
+                    className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {keySyncLoading ? 'Syncing…' : 'Sync Keys'}
+                  </button>
+                  {keySyncStatus && (
+                    <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
+                      {keySyncStatus}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

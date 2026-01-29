@@ -476,6 +476,68 @@ class E2EEManager {
         return publicKey?.rawRepresentation.base64EncodedString()
     }
 
+    /// Get my public key as X9.63 Base64 string (for per-device E2EE v2)
+    func getMyPublicKeyX963Base64() -> String? {
+        return publicKey?.x963Representation.base64EncodedString()
+    }
+
+    /// Get my private key raw bytes
+    func getMyPrivateKeyRaw() -> Data? {
+        return privateKey?.rawRepresentation
+    }
+
+    /// Replace local keypair with a provided private key
+    func importPrivateKey(rawData: Data) throws {
+        let newPrivateKey = try P256.KeyAgreement.PrivateKey(rawRepresentation: rawData)
+        let newPublicKey = newPrivateKey.publicKey
+
+        try storePrivateKey(newPrivateKey)
+        try storePublicKey(newPublicKey)
+
+        self.privateKey = newPrivateKey
+        self.publicKey = newPublicKey
+    }
+
+    /// Encrypt arbitrary data for a device public key using E2EE v2 envelope format
+    func encryptDataKeyForDevice(publicKeyX963Base64: String, data: Data) throws -> String {
+        guard let privateKey = privateKey else {
+            throw E2EEError.notInitialized
+        }
+
+        guard let publicKeyData = Data(base64Encoded: publicKeyX963Base64) else {
+            throw E2EEError.invalidPublicKey
+        }
+
+        let recipientPublicKey = try P256.KeyAgreement.PublicKey(x963Representation: publicKeyData)
+
+        let ephemeralPrivateKey = P256.KeyAgreement.PrivateKey()
+        let sharedSecret = try ephemeralPrivateKey.sharedSecretFromKeyAgreement(with: recipientPublicKey)
+        let symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: Data(),
+            sharedInfo: contextInfoV2,
+            outputByteCount: 32
+        )
+
+        let sealedBox = try AES.GCM.seal(data, using: symmetricKey)
+        guard let combined = sealedBox.combined else {
+            throw E2EEError.encryptionFailed
+        }
+
+        let nonceSize = 12
+        let nonce = combined.prefix(nonceSize)
+        let ciphertextAndTag = combined.dropFirst(nonceSize)
+
+        let ephemeralPublicKey = ephemeralPrivateKey.publicKey.x963Representation
+
+        var output = Data()
+        output.append(ephemeralPublicKey)
+        output.append(nonce)
+        output.append(ciphertextAndTag)
+
+        return "v2:" + output.base64EncodedString()
+    }
+
     // MARK: - Binary Data Encryption/Decryption (for MMS attachments)
 
     /// Encrypt binary data (for MMS attachments)

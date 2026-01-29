@@ -832,7 +832,9 @@ class MessageStore: ObservableObject {
                 isPinned: isPinned,
                 isArchived: isArchived,
                 isBlocked: isBlocked,
-                avatarColor: avatarColor
+                avatarColor: avatarColor,
+                lastMessageEncrypted: data.lastMessage.isEncrypted ?? false,
+                lastMessageE2eeFailed: data.lastMessage.e2eeFailed
             )
 
             newConversations.append(conversation)
@@ -907,7 +909,9 @@ class MessageStore: ObservableObject {
                 isPinned: isPinned,
                 isArchived: isArchived,
                 isBlocked: isBlocked,
-                avatarColor: avatarColor
+                avatarColor: avatarColor,
+                lastMessageEncrypted: data.lastMessage.isEncrypted ?? false,
+                lastMessageE2eeFailed: data.lastMessage.e2eeFailed
             )
             newConversations.append(conversation)
         }
@@ -1366,6 +1370,19 @@ class MessageStore: ObservableObject {
         return value.filter { $0.isNumber }
     }
 
+    private func normalizeSearchText(_ value: String) -> String {
+        let folded = value
+            .folding(options: [.diacriticInsensitive], locale: .current)
+            .lowercased()
+        let cleaned = folded.map { char in
+            char.isLetter || char.isNumber ? char : " "
+        }
+        let collapsed = String(cleaned)
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        return collapsed
+    }
+
     func search(query: String, in conversationsList: [Conversation] = []) -> [Conversation] {
         let list = conversationsList.isEmpty ? conversations : conversationsList
 
@@ -1375,6 +1392,12 @@ class MessageStore: ObservableObject {
 
         let lowercaseQuery = query.lowercased()
         let queryDigits = query.filter { $0.isNumber }
+        let normalizedQuery = normalizeSearchText(query)
+        let compactQuery = normalizedQuery.replacingOccurrences(of: " ", with: "")
+
+        if normalizedQuery.isEmpty {
+            return list
+        }
 
         return list.filter { conversation in
             // Match by display name (contact name or address)
@@ -1400,6 +1423,35 @@ class MessageStore: ObservableObject {
 
             // Match by conversation ID
             if conversation.id.lowercased().contains(lowercaseQuery) {
+                return true
+            }
+
+            // Normalized/compact matching (handles punctuation/spacing)
+            let displayNameNormalized = normalizeSearchText(conversation.displayName)
+            let displayNameCompact = displayNameNormalized.replacingOccurrences(of: " ", with: "")
+            if displayNameNormalized.contains(normalizedQuery) || displayNameCompact.contains(compactQuery) {
+                return true
+            }
+            if let contactName = conversation.contactName {
+                let contactNormalized = normalizeSearchText(contactName)
+                let contactCompact = contactNormalized.replacingOccurrences(of: " ", with: "")
+                if contactNormalized.contains(normalizedQuery) || contactCompact.contains(compactQuery) {
+                    return true
+                }
+            }
+            let lastMessageNormalized = normalizeSearchText(conversation.lastMessage)
+            let lastMessageCompact = lastMessageNormalized.replacingOccurrences(of: " ", with: "")
+            if lastMessageNormalized.contains(normalizedQuery) || lastMessageCompact.contains(compactQuery) {
+                return true
+            }
+            let addressNormalized = normalizeSearchText(conversation.address)
+            let addressCompact = addressNormalized.replacingOccurrences(of: " ", with: "")
+            if addressNormalized.contains(normalizedQuery) || addressCompact.contains(compactQuery) {
+                return true
+            }
+            let idNormalized = normalizeSearchText(conversation.id)
+            let idCompact = idNormalized.replacingOccurrences(of: " ", with: "")
+            if idNormalized.contains(normalizedQuery) || idCompact.contains(compactQuery) {
                 return true
             }
 
@@ -1434,6 +1486,12 @@ class MessageStore: ObservableObject {
             return []
         }
 
+        let normalizedQuery = normalizeSearchText(query)
+        let compactQuery = normalizedQuery.replacingOccurrences(of: " ", with: "")
+        if normalizedQuery.isEmpty {
+            return []
+        }
+
         // Get digits from query for phone number matching
         let queryDigits = digitsOnly(query)
         let isPhoneSearch = queryDigits.count >= 4
@@ -1450,6 +1508,24 @@ class MessageStore: ObservableObject {
             // Match by contact name
             if message.contactName?.localizedCaseInsensitiveContains(query) == true {
                 return true
+            }
+            // Normalized/compact matching for punctuation/spacing variations
+            let bodyNormalized = normalizeSearchText(message.body)
+            let bodyCompact = bodyNormalized.replacingOccurrences(of: " ", with: "")
+            if bodyNormalized.contains(normalizedQuery) || bodyCompact.contains(compactQuery) {
+                return true
+            }
+            let addressNormalized = normalizeSearchText(message.address)
+            let addressCompact = addressNormalized.replacingOccurrences(of: " ", with: "")
+            if addressNormalized.contains(normalizedQuery) || addressCompact.contains(compactQuery) {
+                return true
+            }
+            if let contactName = message.contactName {
+                let contactNormalized = normalizeSearchText(contactName)
+                let contactCompact = contactNormalized.replacingOccurrences(of: " ", with: "")
+                if contactNormalized.contains(normalizedQuery) || contactCompact.contains(compactQuery) {
+                    return true
+                }
             }
             // Match by phone number digits (handles all formats)
             if isPhoneSearch {

@@ -4,12 +4,16 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAppStore } from '@/lib/store'
 import {
+  ensureWebE2EEKeyBackup,
   ensureWebE2EEKeyPublished,
   listenToDeviceStatus,
   listenToMessages,
   listenToReadReceipts,
   listenToSpamMessages,
+  requestWebE2EEKeyBackfill,
+  requestWebE2EEKeySync,
   waitForAuth,
+  waitForWebE2EEKeySyncResponse,
 } from '@/lib/firebase'
 import ConversationList from '@/components/ConversationList'
 import MessageView from '@/components/MessageView'
@@ -35,6 +39,28 @@ export default function MessagesPage() {
     initializeConversationListVisibility,
   } = useAppStore()
   const [showAI, setShowAI] = useState(false)
+  const [keySyncLoading, setKeySyncLoading] = useState(false)
+  const [keySyncStatus, setKeySyncStatus] = useState<string | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
+
+  const hasDecryptFailures = messages.some((msg) => msg.decryptionFailed)
+
+  const handleKeySync = async () => {
+    if (!userId || keySyncLoading) return
+    setKeySyncLoading(true)
+    setKeySyncStatus(null)
+    try {
+      await requestWebE2EEKeySync(userId)
+      await waitForWebE2EEKeySyncResponse(userId)
+      setKeySyncStatus('Keys synced. Backfilling access to older messages...')
+      await requestWebE2EEKeyBackfill(userId)
+      setReloadToken(Date.now())
+    } catch (err: any) {
+      setKeySyncStatus(err?.message || 'Key sync failed')
+    } finally {
+      setKeySyncLoading(false)
+    }
+  }
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null
@@ -54,6 +80,8 @@ export default function MessagesPage() {
       initializeConversationListVisibility()
       ensureWebE2EEKeyPublished(storedUserId)
         .catch((err) => console.error('Failed to publish web E2EE key', err))
+      ensureWebE2EEKeyBackup(storedUserId)
+        .catch((err) => console.error('Failed to create web E2EE key backup', err))
 
       // Wait for authentication before setting up listener
       // This is required for Firebase rules to allow data access
@@ -132,7 +160,7 @@ export default function MessagesPage() {
         unsubscribeReadReceipts()
       }
     }
-  }, [router, setUserId, setMessages, setReadReceipts])
+  }, [router, setUserId, setMessages, setReadReceipts, reloadToken, initializeConversationListVisibility, setSpamMessages])
 
   useEffect(() => {
     if (!userId) return
@@ -184,6 +212,29 @@ export default function MessagesPage() {
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {isConversationListVisible && <ConversationList />}
         <div className="flex-1 flex flex-col min-w-0">
+          {hasDecryptFailures && (
+            <div className="flex-shrink-0 px-4 pt-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-100">
+                <div className="text-sm">
+                  Some messages are encrypted and can’t be decrypted. Sync keys to unlock them.
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleKeySync}
+                    disabled={keySyncLoading}
+                    className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors text-sm"
+                  >
+                    {keySyncLoading ? 'Syncing…' : 'Sync Keys'}
+                  </button>
+                  {keySyncStatus && (
+                    <span className="text-xs text-amber-800 dark:text-amber-200">
+                      {keySyncStatus}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           {!isConversationListVisible && (
             <div className="flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700">
               <button

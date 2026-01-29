@@ -39,6 +39,119 @@
         "message_reactions": {
           ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
           ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)"
+        },
+        "e2ee_key_backups": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$deviceId": {
+            ".read": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            "publicKeyX963": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "encryptedPrivateKeyEnvelope": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "platform": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "keyVersion": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "createdAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            }
+          }
+        },
+        "e2ee_key_requests": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$deviceId": {
+            ".read": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            "requesterDeviceId": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "requesterPlatform": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "requesterPublicKeyX963": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "requestedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "e2ee_key_backfill_requests": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$deviceId": {
+            ".read": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            "requesterDeviceId": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "requesterPlatform": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "requesterPublicKeyX963": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "requestedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "scanned": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "updated": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "skipped": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "lastKey": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "startedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "updatedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "completedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "error": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
+        },
+        "e2ee_key_responses": {
+          ".read": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          ".write": "auth != null && (auth.uid == $uid || auth.token.pairedUid == $uid)",
+          "$deviceId": {
+            ".read": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            ".write": "auth != null && (auth.uid == $uid || (auth.token.pairedUid == $uid && auth.token.deviceId == $deviceId))",
+            "encryptedPrivateKeyEnvelope": {
+              ".validate": "newData.isString() && newData.val().length > 0"
+            },
+            "respondedAt": {
+              ".validate": "!newData.exists() || newData.isNumber()"
+            },
+            "status": {
+              ".validate": "!newData.exists() || newData.isString()"
+            },
+            "error": {
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          }
         }
       }
     },

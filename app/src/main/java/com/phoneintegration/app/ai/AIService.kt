@@ -43,12 +43,23 @@
  * | "OTP codes"             | findOTPs()                 |
  * | "account balance"       | findBalanceInfo()          |
  * | "summarize messages"    | summarizeConversation()    |
+ * | "money totals"          | analyzeCurrencyTotals()    |
  *
  * ## Currency Support
  *
- * Supports parsing amounts in:
- * - INR: Rs., Rs, INR, (Indian Rupees)
+ * Supports parsing amounts in multiple currencies:
  * - USD: $, USD (US Dollars)
+ * - EUR: €, EUR (Euro)
+ * - GBP: £, GBP (British Pound)
+ * - JPY: ¥, JPY (Japanese Yen)
+ * - INR: ₹, Rs., Rs, INR (Indian Rupees)
+ * - CAD: CA$, CAD (Canadian Dollar)
+ * - AUD: AU$, AUD (Australian Dollar)
+ * - NZD: NZ$, NZD (New Zealand Dollar)
+ * - CHF: CHF (Swiss Franc)
+ * - SEK: SEK (Swedish Krona)
+ * - NOK: NOK (Norwegian Krone)
+ * - DKK: DKK (Danish Krone)
  *
  * @param context Android context for resources and preferences
  *
@@ -276,6 +287,12 @@ class AIService(private val context: Context) {
             lowerQuestion.contains("summary") || lowerQuestion.contains("summarize") -> {
                 runBlocking { summarizeConversation(messages) }
             }
+            // Currency totals
+            lowerQuestion.contains("money total") || lowerQuestion.contains("currency total") ||
+            lowerQuestion.contains("money summary") || lowerQuestion.contains("financial summary") ||
+            lowerQuestion.contains("show money") || lowerQuestion.contains("currency breakdown") -> {
+                analyzeCurrencyTotals(messages)
+            }
             else -> null // Not an SMS analysis query
         }
     }
@@ -331,7 +348,8 @@ class AIService(private val context: Context) {
                     "💰 **Spending Analysis**\n" +
                     "• Track your expenses by merchant\n" +
                     "• Show spending patterns and trends\n" +
-                    "• Analyze transactions and payments\n\n" +
+                    "• Analyze transactions and payments\n" +
+                    "• Show currency totals across all messages\n\n" +
                     "📱 **SMS Insights**\n" +
                     "• Find OTP codes and verification messages\n" +
                     "• Summarize conversations\n" +
@@ -340,7 +358,7 @@ class AIService(private val context: Context) {
                     "• Answer questions about your messages\n" +
                     "• Provide contextual suggestions\n" +
                     "• Help organize your SMS data\n\n" +
-                    "Try asking: \"How much did I spend this month?\" or \"Show my recent transactions\" or \"Summarize my messages\""
+                    "Try asking: \"How much did I spend this month?\" or \"Show money totals\" or \"Summarize my messages\""
         }
 
         // Questions about capabilities
@@ -359,6 +377,7 @@ class AIService(private val context: Context) {
                 "Try asking me questions like:\n" +
                 "• \"How much did I spend this month?\"\n" +
                 "• \"Show my recent transactions\"\n" +
+                "• \"Show money totals\" or \"Currency totals\"\n" +
                 "• \"What OTPs did I receive?\"\n" +
                 "• \"Summarize my Amazon orders\"\n" +
                 "• \"What's my account balance?\"\n\n" +
@@ -838,6 +857,142 @@ class AIService(private val context: Context) {
         }
 
         return "🏦 Banking Messages (${bankingMessages.size} total):\n\n$banking"
+    }
+
+    /**
+     * Analyzes all messages to extract and total currency amounts
+     *
+     * Scans ALL messages (not just bank SMS) for currency symbols and amounts,
+     * groups by currency type, and displays totals per currency.
+     *
+     * Supported currencies:
+     * - $ (USD), € (EUR), £ (GBP), ¥ (JPY), ₹ (INR)
+     * - CA$ (CAD), AU$ (AUD), NZ$ (NZD)
+     * - CHF, SEK, NOK, DKK (text-based)
+     *
+     * @param messages List of SMS messages to analyze
+     * @return Formatted string with currency totals breakdown
+     */
+    private fun analyzeCurrencyTotals(messages: List<SmsMessage>): String {
+        val currencyTotals = mutableMapOf<String, Double>()
+
+        // Currency patterns with symbol and text detection
+        val currencyPatterns = mapOf(
+            "USD" to listOf(
+                Regex("""\$\s*([0-9,]+(?:\.\d{1,2})?)"""),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*USD""", RegexOption.IGNORE_CASE)
+            ),
+            "EUR" to listOf(
+                Regex("""€\s*([0-9,]+(?:\.\d{1,2})?)"""),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*EUR""", RegexOption.IGNORE_CASE)
+            ),
+            "GBP" to listOf(
+                Regex("""£\s*([0-9,]+(?:\.\d{1,2})?)"""),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*GBP""", RegexOption.IGNORE_CASE)
+            ),
+            "JPY" to listOf(
+                Regex("""¥\s*([0-9,]+(?:\.\d{1,2})?)"""),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*JPY""", RegexOption.IGNORE_CASE)
+            ),
+            "INR" to listOf(
+                Regex("""₹\s*([0-9,]+(?:\.\d{1,2})?)"""),
+                Regex("""(?:Rs\.?|INR)\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*(?:Rs\.?|INR)""", RegexOption.IGNORE_CASE)
+            ),
+            "CAD" to listOf(
+                Regex("""CA\$\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*CAD""", RegexOption.IGNORE_CASE)
+            ),
+            "AUD" to listOf(
+                Regex("""AU\$\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*AUD""", RegexOption.IGNORE_CASE)
+            ),
+            "NZD" to listOf(
+                Regex("""NZ\$\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*NZD""", RegexOption.IGNORE_CASE)
+            ),
+            "CHF" to listOf(
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*CHF""", RegexOption.IGNORE_CASE),
+                Regex("""CHF\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
+            ),
+            "SEK" to listOf(
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*SEK""", RegexOption.IGNORE_CASE),
+                Regex("""SEK\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
+            ),
+            "NOK" to listOf(
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*NOK""", RegexOption.IGNORE_CASE),
+                Regex("""NOK\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
+            ),
+            "DKK" to listOf(
+                Regex("""([0-9,]+(?:\.\d{1,2})?)\s*DKK""", RegexOption.IGNORE_CASE),
+                Regex("""DKK\s*([0-9,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
+            )
+        )
+
+        // Scan all messages for currency mentions
+        for (msg in messages) {
+            for ((currency, patterns) in currencyPatterns) {
+                for (pattern in patterns) {
+                    val matches = pattern.findAll(msg.body)
+                    for (match in matches) {
+                        val amountStr = match.groupValues[1].replace(",", "")
+                        val amount = amountStr.toDoubleOrNull()
+
+                        // Validate amount (positive, reasonable range)
+                        if (amount != null && amount > 0 && amount < 10_000_000) {
+                            currencyTotals[currency] = currencyTotals.getOrDefault(currency, 0.0) + amount
+                        }
+                    }
+                }
+            }
+        }
+
+        if (currencyTotals.isEmpty()) {
+            return "💰 Currency Totals\n\n" +
+                   "No currency amounts found in your messages.\n\n" +
+                   "I can detect amounts in:\n" +
+                   "• $, €, £, ¥, ₹\n" +
+                   "• CA$, AU$, NZ$\n" +
+                   "• CHF, SEK, NOK, DKK"
+        }
+
+        // Build formatted response
+        val sortedTotals = currencyTotals.entries.sortedByDescending { it.value }
+
+        val response = buildString {
+            append("💰 Currency Totals\n\n")
+            append("Found amounts in ${sortedTotals.size} currency/currencies:\n\n")
+
+            for ((currency, total) in sortedTotals) {
+                val symbol = getCurrencySymbol(currency)
+                append("$symbol${String.format("%,.2f", total)} $currency\n")
+            }
+
+            append("\n📊 Scanned ${messages.size} messages")
+        }
+
+        return response
+    }
+
+    /**
+     * Get display symbol for currency code
+     */
+    private fun getCurrencySymbol(currencyCode: String): String {
+        return when (currencyCode) {
+            "USD" -> "$"
+            "EUR" -> "€"
+            "GBP" -> "£"
+            "JPY" -> "¥"
+            "INR" -> "₹"
+            "CAD" -> "CA$"
+            "AUD" -> "AU$"
+            "NZD" -> "NZ$"
+            "CHF" -> "CHF "
+            "SEK" -> "SEK "
+            "NOK" -> "NOK "
+            "DKK" -> "DKK "
+            else -> ""
+        }
     }
 
     // ==========================================

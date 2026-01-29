@@ -16,6 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -24,8 +26,13 @@ fun SyncSettingsScreen(
 ) {
     val context = LocalContext.current
     val syncState by SyncManager.syncState.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
 
     var selectedDays by remember { mutableStateOf(30) }
+    var showEstimateDialog by remember { mutableStateOf(false) }
+    var estimateLoading by remember { mutableStateOf(false) }
+    var estimateError by remember { mutableStateOf<String?>(null) }
+    var estimateResult by remember { mutableStateOf<SyncManager.SyncEstimate?>(null) }
 
     val dayOptions = listOf(
         30 to "Last 30 days",
@@ -35,6 +42,25 @@ fun SyncSettingsScreen(
         365 to "Last year",
         -1 to "All messages"
     )
+
+    val selectedRangeLabel = dayOptions.firstOrNull { it.first == selectedDays }?.second ?: "Selected range"
+
+    fun requestEstimate() {
+        if (syncState.isSyncing) return
+        showEstimateDialog = true
+        estimateLoading = true
+        estimateError = null
+        estimateResult = null
+        scope.launch {
+            try {
+                estimateResult = SyncManager.estimateSync(context, selectedDays)
+            } catch (e: Exception) {
+                estimateError = e.message ?: "Failed to estimate sync size"
+            } finally {
+                estimateLoading = false
+            }
+        }
+    }
 
     // Show toast when sync completes or fails
     LaunchedEffect(syncState.isComplete, syncState.error) {
@@ -161,7 +187,7 @@ fun SyncSettingsScreen(
 
             // Sync Button
             Button(
-                onClick = { SyncManager.startSync(context, selectedDays) },
+                onClick = { requestEstimate() },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !syncState.isSyncing
             ) {
@@ -176,6 +202,76 @@ fun SyncSettingsScreen(
                 Icon(Icons.Filled.CloudDownload, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(if (syncState.isSyncing) "Syncing..." else "Sync Message History")
+            }
+
+            if (showEstimateDialog) {
+                AlertDialog(
+                    onDismissRequest = {
+                        if (!estimateLoading) {
+                            showEstimateDialog = false
+                        }
+                    },
+                    title = { Text("Confirm message sync") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Range: $selectedRangeLabel")
+                            if (estimateLoading) {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                Text(
+                                    "Calculating message count and data size...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else if (estimateError != null) {
+                                Text(
+                                    "Unable to estimate: $estimateError",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            } else if (estimateResult != null) {
+                                val estimate = estimateResult!!
+                                Text("Messages: ${estimate.totalMessages}")
+                                Text("Estimated data: ${formatBytes(estimate.estimatedBytes)}")
+                                Text("Estimated time: ${formatDurationRange(estimate.minMinutes, estimate.maxMinutes)}")
+                                Text(
+                                    "MMS attachments are excluded to keep the sync fast.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (estimate.totalMessages == 0) {
+                                    Text(
+                                        "No messages found for this range.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        val canStart = estimateResult != null &&
+                            estimateResult!!.totalMessages > 0 &&
+                            !estimateLoading &&
+                            estimateError == null
+                        TextButton(
+                            onClick = {
+                                showEstimateDialog = false
+                                SyncManager.startSync(context, selectedDays)
+                            },
+                            enabled = canStart
+                        ) {
+                            Text("Start sync")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showEstimateDialog = false },
+                            enabled = !estimateLoading
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                )
             }
 
             // Progress
@@ -237,4 +333,30 @@ fun SyncSettingsScreen(
             )
         }
     }
+}
+
+private fun formatBytes(bytes: Long): String {
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    val gb = mb * 1024.0
+    return when {
+        bytes >= gb -> String.format(Locale.US, "%.2f GB", bytes / gb)
+        bytes >= mb -> String.format(Locale.US, "%.1f MB", bytes / mb)
+        bytes >= kb -> String.format(Locale.US, "%.0f KB", bytes / kb)
+        else -> "$bytes B"
+    }
+}
+
+private fun formatDurationRange(minMinutes: Int, maxMinutes: Int): String {
+    if (minMinutes <= 0 && maxMinutes <= 0) return "Under 1 min"
+    if (minMinutes == maxMinutes) return formatMinutes(minMinutes)
+    return "${formatMinutes(minMinutes)} - ${formatMinutes(maxMinutes)}"
+}
+
+private fun formatMinutes(minutes: Int): String {
+    if (minutes <= 0) return "Under 1 min"
+    if (minutes < 60) return "$minutes min"
+    val hours = minutes / 60
+    val rem = minutes % 60
+    return if (rem == 0) "$hours hr" else "$hours hr $rem min"
 }

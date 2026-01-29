@@ -834,6 +834,13 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         var recipientUid: String
         if let uid = snapshot.value as? String {
             recipientUid = uid
+            if recipientUid == myUid {
+                print("SyncFlowCallManager: phone_to_uid resolved to caller UID; blocking self-call")
+                await MainActor.run {
+                    callState = .failed("Cannot call your own device")
+                }
+                throw SyncFlowCallError.userNotOnSyncFlow
+            }
         } else {
             // Fallback: If phone_to_uid lookup fails, try using the paired user's UID
             // This enables video calls between paired devices when the Android hasn't

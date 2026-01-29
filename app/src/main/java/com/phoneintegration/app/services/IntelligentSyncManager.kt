@@ -65,10 +65,14 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     private var callListener: ChildEventListener? = null
     private var notificationListener: ChildEventListener? = null
     private var syncRequestListener: ChildEventListener? = null
+    private var e2eeKeyRequestListener: ChildEventListener? = null
+    private var e2eeKeyBackfillListener: ChildEventListener? = null
     private var messageListenerRef: com.google.firebase.database.Query? = null
     private var callListenerRef: DatabaseReference? = null
     private var notificationListenerRef: DatabaseReference? = null
     private var syncRequestListenerRef: DatabaseReference? = null
+    private var e2eeKeyRequestListenerRef: DatabaseReference? = null
+    private var e2eeKeyBackfillListenerRef: DatabaseReference? = null
     private val appContext = context.applicationContext
     private val desktopSyncService by lazy { DesktopSyncService(appContext) }
 
@@ -104,6 +108,10 @@ class IntelligentSyncManager private constructor(private val context: Context) {
 
                 // Sync request listener (for loading older messages on demand)
                 setupSyncRequestListener(userId)
+
+                // E2EE key recovery listener
+                setupE2eeKeyRequestListener(userId)
+                setupE2eeKeyBackfillRequestListener(userId)
 
                 Log.i(TAG, "Real-time listeners established for user: $userId")
             } catch (e: Exception) {
@@ -268,6 +276,109 @@ class IntelligentSyncManager private constructor(private val context: Context) {
         syncRequestListenerRef = syncRequestsRef
 
         Log.i(TAG, "Sync request listener established at: users/$userId/sync_requests")
+    }
+
+    /**
+     * Listen for E2EE key sync requests from Mac/Web clients.
+     */
+    private suspend fun setupE2eeKeyRequestListener(userId: String) {
+        val requestsRef = database.getReference("users").child(userId).child("e2ee_key_requests")
+        Log.d(TAG, "Setting up E2EE key request listener at path: users/$userId/e2ee_key_requests")
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                val requesterDeviceId = snapshot.key ?: return
+                val data = snapshot.value as? Map<String, Any?> ?: return
+
+                val status = data["status"] as? String ?: "pending"
+                if (status != "pending") return
+
+                val requesterPublicKeyX963 = data["requesterPublicKeyX963"] as? String
+                if (requesterPublicKeyX963.isNullOrBlank()) {
+                    Log.w(TAG, "E2EE key request missing requesterPublicKeyX963 for device: $requesterDeviceId")
+                    return
+                }
+
+                scope.launch {
+                    try {
+                        desktopSyncService.processE2eeKeySyncRequest(
+                            requesterDeviceId = requesterDeviceId,
+                            requesterPublicKeyX963 = requesterPublicKeyX963
+                        )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to process E2EE key request for $requesterDeviceId", e)
+                    }
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onChildRemoved(snapshot: DataSnapshot) {}
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "E2EE key request listener cancelled", error.toException())
+            }
+        }
+
+        requestsRef.addChildEventListener(listener)
+        e2eeKeyRequestListener = listener
+        e2eeKeyRequestListenerRef = requestsRef
+
+        Log.i(TAG, "E2EE key request listener established at: users/$userId/e2ee_key_requests")
+    }
+
+    /**
+     * Listen for E2EE key backfill requests from Mac/Web clients.
+     */
+    private suspend fun setupE2eeKeyBackfillRequestListener(userId: String) {
+        val requestsRef = database.getReference("users").child(userId).child("e2ee_key_backfill_requests")
+        Log.d(TAG, "Setting up E2EE key backfill listener at path: users/$userId/e2ee_key_backfill_requests")
+
+        fun handleRequest(snapshot: DataSnapshot) {
+            val requesterDeviceId = snapshot.key ?: return
+            val data = snapshot.value as? Map<String, Any?> ?: return
+
+            val status = data["status"] as? String ?: "pending"
+            if (status != "pending") return
+
+            val requesterPublicKeyX963 = data["requesterPublicKeyX963"] as? String
+            if (requesterPublicKeyX963.isNullOrBlank()) {
+                Log.w(TAG, "E2EE backfill request missing requesterPublicKeyX963 for device: $requesterDeviceId")
+                return
+            }
+
+            scope.launch {
+                try {
+                    desktopSyncService.processE2eeKeyBackfillRequest(
+                        requesterDeviceId = requesterDeviceId,
+                        requesterPublicKeyX963 = requesterPublicKeyX963
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to process E2EE backfill request for $requesterDeviceId", e)
+                }
+            }
+        }
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                handleRequest(snapshot)
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                handleRequest(snapshot)
+            }
+
+            override fun onChildRemoved(snapshot: DataSnapshot) {}
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "E2EE key backfill listener cancelled", error.toException())
+            }
+        }
+
+        requestsRef.addChildEventListener(listener)
+        e2eeKeyBackfillListener = listener
+        e2eeKeyBackfillListenerRef = requestsRef
+
+        Log.i(TAG, "E2EE key backfill listener established at: users/$userId/e2ee_key_backfill_requests")
     }
 
     /**

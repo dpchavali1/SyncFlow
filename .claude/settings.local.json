@@ -79,7 +79,17 @@
       "Bash(npx vercel:*)",
       "Bash(./gradlew build:*)",
       "Bash(git checkout:*)",
-      "Bash(npm --version:*)"
+      "Bash(npm --version:*)",
+      "Bash(git stash:*)",
+      "Bash(swift -parse:*)",
+      "Bash(tree:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git push:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run deploy:*)",
+      "Bash(swiftc:*)",
+      "Bash(chmod:*)",
+      "Bash(git reset:*)"
     ],
     "deny": [],
     "ask": []

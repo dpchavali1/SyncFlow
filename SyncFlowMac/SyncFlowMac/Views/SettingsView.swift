@@ -147,6 +147,11 @@ struct GeneralSettingsView: View {
     @State private var showThemeResetAlert = false
     /// Preferred appearance mode (auto, light, dark)
     @AppStorage("preferred_color_scheme") private var preferredColorScheme = "auto"
+    /// End-to-end encryption toggle (default on)
+    @AppStorage("e2ee_enabled") private var e2eeEnabled = true
+    /// Manual key sync state
+    @State private var isKeySyncInProgress = false
+    @State private var keySyncStatusMessage: String?
 
     // MARK: - Body
 
@@ -195,6 +200,42 @@ struct GeneralSettingsView: View {
                 if #available(macOS 13.0, *) {
                     autoStart = SMAppService.mainApp.status == .enabled
                 }
+            }
+
+            Section {
+                Toggle("End-to-end encryption", isOn: $e2eeEnabled)
+                    .onChange(of: e2eeEnabled) { enabled in
+                        if enabled {
+                            Task {
+                                try? await E2EEManager.shared.initializeKeys()
+                            }
+                        }
+                    }
+                Text("Encrypts message bodies and attachments between devices. Metadata (addresses and timestamps) is not encrypted.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if appState.isPaired {
+                    HStack {
+                        Button(isKeySyncInProgress ? "Syncing..." : "Sync Keys") {
+                            guard let userId = appState.userId,
+                                  let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") else {
+                                keySyncStatusMessage = "Device not registered yet."
+                                return
+                            }
+                            startKeySync(userId: userId, deviceId: deviceId)
+                        }
+                        .disabled(isKeySyncInProgress)
+
+                        if let status = keySyncStatusMessage {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Security")
             }
 
             Section {
@@ -380,6 +421,30 @@ struct GeneralSettingsView: View {
                 }
             }
         )
+    }
+
+    private func startKeySync(userId: String, deviceId: String) {
+        guard !isKeySyncInProgress else { return }
+        isKeySyncInProgress = true
+        keySyncStatusMessage = "Requesting keys..."
+
+        Task {
+            do {
+                try await E2EEManager.shared.initializeKeys()
+                try await FirebaseService.shared.requestE2eeKeySync(userId: userId, deviceId: deviceId)
+                let success = try await FirebaseService.shared.waitForE2eeKeySyncResponse(userId: userId, deviceId: deviceId)
+                await MainActor.run {
+                    keySyncStatusMessage = success ? "Keys synced successfully." : "Key sync failed."
+                }
+            } catch {
+                await MainActor.run {
+                    keySyncStatusMessage = "Key sync failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run {
+                isKeySyncInProgress = false
+            }
+        }
     }
 
     /// Checks if app is currently set to launch at login.

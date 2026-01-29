@@ -1239,6 +1239,117 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
       return response.trim()
     }
 
+    // Currency totals
+    if (lowerQuery.includes('money total') || lowerQuery.includes('currency total') ||
+        lowerQuery.includes('money summary') || lowerQuery.includes('financial summary') ||
+        lowerQuery.includes('show money') || lowerQuery.includes('currency breakdown')) {
+
+      const currencyTotals: Record<string, number> = {}
+
+      // Currency patterns with symbol and text detection
+      const currencyPatterns: Record<string, RegExp[]> = {
+        'USD': [
+          /\$\s*([0-9,]+(?:\.\d{1,2})?)/g,
+          /([0-9,]+(?:\.\d{1,2})?)\s*USD/gi
+        ],
+        'EUR': [
+          /€\s*([0-9,]+(?:\.\d{1,2})?)/g,
+          /([0-9,]+(?:\.\d{1,2})?)\s*EUR/gi
+        ],
+        'GBP': [
+          /£\s*([0-9,]+(?:\.\d{1,2})?)/g,
+          /([0-9,]+(?:\.\d{1,2})?)\s*GBP/gi
+        ],
+        'JPY': [
+          /¥\s*([0-9,]+(?:\.\d{1,2})?)/g,
+          /([0-9,]+(?:\.\d{1,2})?)\s*JPY/gi
+        ],
+        'INR': [
+          /₹\s*([0-9,]+(?:\.\d{1,2})?)/g,
+          /(?:Rs\.?|INR)\s*([0-9,]+(?:\.\d{1,2})?)/gi,
+          /([0-9,]+(?:\.\d{1,2})?)\s*(?:Rs\.?|INR)/gi
+        ],
+        'CAD': [
+          /CA\$\s*([0-9,]+(?:\.\d{1,2})?)/gi,
+          /([0-9,]+(?:\.\d{1,2})?)\s*CAD/gi
+        ],
+        'AUD': [
+          /AU\$\s*([0-9,]+(?:\.\d{1,2})?)/gi,
+          /([0-9,]+(?:\.\d{1,2})?)\s*AUD/gi
+        ],
+        'NZD': [
+          /NZ\$\s*([0-9,]+(?:\.\d{1,2})?)/gi,
+          /([0-9,]+(?:\.\d{1,2})?)\s*NZD/gi
+        ],
+        'CHF': [
+          /([0-9,]+(?:\.\d{1,2})?)\s*CHF/gi,
+          /CHF\s*([0-9,]+(?:\.\d{1,2})?)/gi
+        ],
+        'SEK': [
+          /([0-9,]+(?:\.\d{1,2})?)\s*SEK/gi,
+          /SEK\s*([0-9,]+(?:\.\d{1,2})?)/gi
+        ],
+        'NOK': [
+          /([0-9,]+(?:\.\d{1,2})?)\s*NOK/gi,
+          /NOK\s*([0-9,]+(?:\.\d{1,2})?)/gi
+        ],
+        'DKK': [
+          /([0-9,]+(?:\.\d{1,2})?)\s*DKK/gi,
+          /DKK\s*([0-9,]+(?:\.\d{1,2})?)/gi
+        ]
+      }
+
+      // Scan all messages for currency mentions
+      messages.forEach(msg => {
+        Object.entries(currencyPatterns).forEach(([currency, patterns]) => {
+          patterns.forEach(pattern => {
+            // Reset regex lastIndex for global patterns
+            pattern.lastIndex = 0
+            let match
+            while ((match = pattern.exec(msg.body)) !== null) {
+              if (match[1]) {
+                const amountStr = match[1].replace(/,/g, '')
+                const amount = parseFloat(amountStr)
+
+                // Validate amount (positive, reasonable range)
+                if (!isNaN(amount) && amount > 0 && amount < 10_000_000) {
+                  currencyTotals[currency] = (currencyTotals[currency] || 0) + amount
+                }
+              }
+            }
+          })
+        })
+      })
+
+      if (Object.keys(currencyTotals).length === 0) {
+        return "💰 Currency Totals\n\nNo currency amounts found in your messages.\n\nI can detect amounts in:\n• $, €, £, ¥, ₹\n• CA$, AU$, NZ$\n• CHF, SEK, NOK, DKK"
+      }
+
+      // Get currency symbol for display
+      const getCurrencySymbol = (code: string): string => {
+        const symbols: Record<string, string> = {
+          'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'INR': '₹',
+          'CAD': 'CA$', 'AUD': 'AU$', 'NZD': 'NZ$',
+          'CHF': 'CHF ', 'SEK': 'SEK ', 'NOK': 'NOK ', 'DKK': 'DKK '
+        }
+        return symbols[code] || ''
+      }
+
+      // Build formatted response
+      const sortedTotals = Object.entries(currencyTotals).sort((a, b) => b[1] - a[1])
+
+      let response = `💰 Currency Totals\n\nFound amounts in ${sortedTotals.length} currency${sortedTotals.length === 1 ? '' : '/currencies'}:\n\n`
+
+      sortedTotals.forEach(([currency, total]) => {
+        const symbol = getCurrencySymbol(currency)
+        response += `${symbol}${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}\n`
+      })
+
+      response += `\n📊 Scanned ${messages.length} messages`
+
+      return response
+    }
+
     // Delivery tracking
     if (lowerQuery.includes('delivery') || lowerQuery.includes('tracking') || lowerQuery.includes('package')) {
       const deliveryMessages = messages.filter(msg => {
@@ -1364,7 +1475,7 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     }
 
     // Default response with more options
-    return "I can help you analyze your messages! Try asking:\n\n💰 Spending:\n• \"How much did I spend this month?\"\n• \"Amazon spending\" or \"Amazon transactions\"\n• \"Spent at Swiggy this week\"\n• \"List my transactions\"\n• \"Show spending by category\"\n• \"Top merchants\"\n\n📅 Bills & Payments:\n• \"Show my upcoming bills\"\n• \"Any payment due?\"\n• \"Credit card due date\"\n\n💳 Account Info:\n• \"What's my account balance?\"\n• \"Show my bank balance\"\n\n📦 Packages:\n• \"Track my packages\"\n• \"Show delivery updates\"\n\n🔐 OTP Codes:\n• \"Find my OTP codes\"\n• \"Show verification codes\"\n\n📊 Statistics:\n• \"How many messages do I have?\"\n• \"Who do I text most?\""
+    return "I can help you analyze your messages! Try asking:\n\n💰 Spending:\n• \"How much did I spend this month?\"\n• \"Amazon spending\" or \"Amazon transactions\"\n• \"Spent at Swiggy this week\"\n• \"List my transactions\"\n• \"Show spending by category\"\n• \"Top merchants\"\n• \"Show money totals\" or \"Currency totals\"\n\n📅 Bills & Payments:\n• \"Show my upcoming bills\"\n• \"Any payment due?\"\n• \"Credit card due date\"\n\n💳 Account Info:\n• \"What's my account balance?\"\n• \"Show my bank balance\"\n\n📦 Packages:\n• \"Track my packages\"\n• \"Show delivery updates\"\n\n🔐 OTP Codes:\n• \"Find my OTP codes\"\n• \"Show verification codes\"\n\n📊 Statistics:\n• \"How many messages do I have?\"\n• \"Who do I text most?\""
   }
 
   /**

@@ -10,6 +10,7 @@ type StoredKeyPair = {
 }
 
 const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
 
 const base64ToBytes = (base64: string) => {
   const binary = atob(base64)
@@ -72,6 +73,41 @@ export const getOrCreateKeyPair = async () => {
   return keyPair
 }
 
+export const getStoredKeyPairJwk = (): StoredKeyPair | null => {
+  if (typeof window === 'undefined') return null
+  const existing = localStorage.getItem(E2EE_KEYPAIR_KEY)
+  if (!existing) return null
+  try {
+    return JSON.parse(existing) as StoredKeyPair
+  } catch {
+    return null
+  }
+}
+
+export const importKeyPairFromJwk = async (payload: StoredKeyPair) => {
+  if (typeof window === 'undefined') return false
+  try {
+    await crypto.subtle.importKey(
+      'jwk',
+      payload.privateKeyJwk,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      ['deriveBits']
+    )
+    await crypto.subtle.importKey(
+      'jwk',
+      payload.publicKeyJwk,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      []
+    )
+    localStorage.setItem(E2EE_KEYPAIR_KEY, JSON.stringify(payload))
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const getPublicKeyX963Base64 = async () => {
   const keyPair = await getOrCreateKeyPair()
   if (!keyPair) return null
@@ -101,6 +137,55 @@ const deriveAesKey = async (sharedSecret: ArrayBuffer) => {
     ['encrypt', 'decrypt']
   )
 }
+
+export const encryptDataForDevice = async (
+  publicKeyX963Base64: string,
+  data: Uint8Array
+) => {
+  const recipientKeyBytes = base64ToBytes(publicKeyX963Base64)
+  const recipientKey = await crypto.subtle.importKey(
+    'raw',
+    recipientKeyBytes,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    []
+  )
+
+  const ephemeralKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  )
+
+  const sharedSecret = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: recipientKey },
+    ephemeralKeyPair.privateKey,
+    256
+  )
+
+  const aesKey = await deriveAesKey(sharedSecret)
+  const nonce = crypto.getRandomValues(new Uint8Array(12))
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce },
+    aesKey,
+    data
+  )
+
+  const ephemeralPublic = new Uint8Array(
+    await crypto.subtle.exportKey('raw', ephemeralKeyPair.publicKey)
+  )
+  const ciphertextBytes = new Uint8Array(ciphertext)
+  const envelope = new Uint8Array(ephemeralPublic.length + nonce.length + ciphertextBytes.length)
+  envelope.set(ephemeralPublic, 0)
+  envelope.set(nonce, ephemeralPublic.length)
+  envelope.set(ciphertextBytes, ephemeralPublic.length + nonce.length)
+
+  return `v2:${bytesToBase64(envelope)}`
+}
+
+export const decodeUtf8 = (bytes: Uint8Array) => textDecoder.decode(bytes)
+
+export const encodeUtf8 = (value: string) => textEncoder.encode(value)
 
 export const decryptDataKey = async (envelope: string) => {
   const keyPair = await getOrCreateKeyPair()

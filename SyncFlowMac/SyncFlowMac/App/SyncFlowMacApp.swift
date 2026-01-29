@@ -676,6 +676,16 @@ class AppState: ObservableObject {
     @Published var recentConversations: [Conversation] = []
 
     // =========================================================================
+    // MARK: - E2EE Key Status
+    // =========================================================================
+
+    /// Whether this device's E2EE keys mismatch a stored backup
+    @Published var e2eeKeyMismatch: Bool = false
+
+    /// Optional message describing the key mismatch
+    @Published var e2eeKeyMismatchMessage: String?
+
+    // =========================================================================
     // MARK: - Phone Status
     // =========================================================================
 
@@ -1067,6 +1077,9 @@ class AppState: ObservableObject {
         startVoicemailSync(userId: userId)
         startDeviceStatusListener(userId: userId)
 
+        // Check E2EE key status after pairing
+        refreshE2eeKeyStatus()
+
         // Start background activity to keep Firebase listeners active when minimized
         startBackgroundActivity()
     }
@@ -1104,6 +1117,8 @@ class AppState: ObservableObject {
         self.activeCalls = []
         self.incomingCall = nil
         self.phoneStatus = PhoneStatus()
+        self.e2eeKeyMismatch = false
+        self.e2eeKeyMismatchMessage = nil
 
         // Unregister device from Firebase if we have the required info
         print("Unpairing: userId=\(currentUserId ?? "nil"), deviceId=\(deviceId ?? "nil")")
@@ -1122,6 +1137,22 @@ class AppState: ObservableObject {
 
         UserDefaults.standard.removeObject(forKey: "syncflow_user_id")
         UserDefaults.standard.removeObject(forKey: "syncflow_device_id")
+    }
+
+    /// Refresh E2EE key mismatch status and create backup if missing.
+    func refreshE2eeKeyStatus() {
+        guard let userId = userId,
+              let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") else {
+            return
+        }
+
+        Task {
+            let result = await FirebaseService.shared.checkE2eeKeyStatus(userId: userId, deviceId: deviceId)
+            DispatchQueue.main.async {
+                self.e2eeKeyMismatch = result.0
+                self.e2eeKeyMismatchMessage = result.1
+            }
+        }
     }
 
     func dismissContinuitySuggestion() {

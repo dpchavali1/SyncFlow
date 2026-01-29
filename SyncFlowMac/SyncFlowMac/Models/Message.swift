@@ -283,6 +283,10 @@ struct Message: Identifiable, Codable, Hashable {
     /// Common reasons: recipient not enrolled in E2EE, key exchange failed, etc.
     var e2eeFailureReason: String? = nil
 
+    /// Whether this message was encrypted end-to-end when synced.
+    /// Nil when the source didn't provide encryption metadata.
+    var isEncrypted: Bool? = nil
+
     // MARK: - Computed Properties
 
     /// Returns true if this is a received (incoming) message.
@@ -416,6 +420,12 @@ struct Conversation: Identifiable, Hashable {
     /// Hex color code for the avatar background (e.g., "#FF5733").
     /// If nil, a default color is generated based on the contact name or address.
     var avatarColor: String?
+
+    /// Whether the most recent message in this conversation was E2EE encrypted.
+    var lastMessageEncrypted: Bool = false
+
+    /// Whether E2EE encryption failed for the most recent message.
+    var lastMessageE2eeFailed: Bool = false
 
     // MARK: - Computed Properties
 
@@ -589,6 +599,9 @@ struct FirebaseMessage: Codable {
     /// Reason for E2EE encryption failure, if applicable
     let e2eeFailureReason: String?
 
+    /// Whether the message was E2EE encrypted
+    let encrypted: Bool?
+
     /// Converts this Firebase DTO to a native Message model.
     ///
     /// - Parameter id: The message ID (typically the Firebase key for this message)
@@ -605,7 +618,8 @@ struct FirebaseMessage: Codable {
             isMms: isMms ?? false,
             attachments: mmsAttachments,
             e2eeFailed: e2eeFailed ?? false,
-            e2eeFailureReason: e2eeFailureReason
+            e2eeFailureReason: e2eeFailureReason,
+            isEncrypted: encrypted
         )
     }
 }

@@ -9,6 +9,12 @@ import org.json.JSONObject
 class PreferencesManager(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("syncflow_prefs", Context.MODE_PRIVATE)
+    private val defaultE2eeEnabled: Boolean =
+        if (prefs.contains("e2ee_enabled")) {
+            prefs.getBoolean("e2ee_enabled", false)
+        } else {
+            true
+        }
 
     companion object {
         private const val PREFS_NAME = "syncflow_prefs"
@@ -73,7 +79,7 @@ class PreferencesManager(context: Context) {
         private set
 
     // E2EE Settings
-    var e2eeEnabled = mutableStateOf(prefs.getBoolean("e2ee_enabled", false))
+    var e2eeEnabled = mutableStateOf(defaultE2eeEnabled)
         private set
 
     // Spam Filter Settings
@@ -104,6 +110,13 @@ class PreferencesManager(context: Context) {
     // Free tier trial expiry (7 days from first use)
     var freeTrialExpiresAt = mutableStateOf(prefs.getLong("free_trial_expires_at", 0L))
         private set
+
+    init {
+        if (!prefs.contains("e2ee_enabled")) {
+            prefs.edit().putBoolean("e2ee_enabled", true).apply()
+            e2eeEnabled.value = true
+        }
+    }
 
     // Helper to check if user is on paid plan
     fun isPaidUser(): Boolean {

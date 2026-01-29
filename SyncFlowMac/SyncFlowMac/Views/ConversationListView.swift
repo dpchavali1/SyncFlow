@@ -943,6 +943,20 @@ struct ConversationRow: View {
         preferences.getLabels(for: conversation.address)
     }
 
+    private var encryptionIconName: String {
+        conversation.lastMessageEncrypted ? "lock.fill" : "lock.open"
+    }
+
+    private var encryptionIconColor: Color {
+        if conversation.lastMessageEncrypted {
+            return .green
+        }
+        if conversation.lastMessageE2eeFailed {
+            return .orange
+        }
+        return .secondary
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -1018,6 +1032,11 @@ struct ConversationRow: View {
                     }
 
                     Spacer()
+
+                    Image(systemName: encryptionIconName)
+                        .font(.caption2)
+                        .foregroundColor(encryptionIconColor)
+                        .help(conversation.lastMessageEncrypted ? "Encrypted" : "Not encrypted")
 
                     if conversation.unreadCount > 0 {
                         ZStack {

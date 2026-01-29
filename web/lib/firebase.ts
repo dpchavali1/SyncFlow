@@ -54,7 +54,17 @@ import {
 } from 'firebase/database'
 import { getFunctions, httpsCallable } from 'firebase/functions'
 import { getStorage } from 'firebase/storage'
-import { decryptDataKey, decryptMessageBody, getOrCreateDeviceId, getPublicKeyX963Base64 } from './e2ee'
+import {
+  decryptDataKey,
+  decryptMessageBody,
+  encodeUtf8,
+  encryptDataForDevice,
+  getOrCreateDeviceId,
+  getPublicKeyX963Base64,
+  getStoredKeyPairJwk,
+  importKeyPairFromJwk,
+  decodeUtf8,
+} from './e2ee'
 import { PhoneNumberNormalizer } from './phoneNumberNormalizer'
 
 /**
@@ -115,7 +125,7 @@ const firebaseConfig = {
  * Firebase app instance - singleton pattern
  * Reuses existing app if already initialized (important for Next.js hot reloading)
  */
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
+export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
 
 /** Firebase Authentication instance */
 const auth = getAuth(app)
@@ -908,25 +918,25 @@ export const listenToMessages = (userId: string, callback: (messages: any[]) => 
                     message.body = decrypted
                   } else {
                     message.decryptionFailed = true
-                    message.body = '[🔒 Encrypted message - re-pair device to decrypt]'
+                    message.body = '[🔒 Encrypted message - sync keys to decrypt]'
                   }
                 } else {
                   message.decryptionFailed = true
-                  message.body = '[🔒 Encrypted message - re-pair device to decrypt]'
+                  message.body = '[🔒 Encrypted message - sync keys to decrypt]'
                 }
               } catch {
                 message.decryptionFailed = true
-                message.body = '[🔒 Encrypted message - re-pair device to decrypt]'
+                message.body = '[🔒 Encrypted message - sync keys to decrypt]'
               }
             } else if (message.encrypted) {
               // Encrypted but no key for this device
               message.decryptionFailed = true
-              message.body = '[🔒 Encrypted message - re-pair device to decrypt]'
+              message.body = '[🔒 Encrypted message - sync keys to decrypt]'
             }
           } else if (message.encrypted && !message.keyMap) {
             // Legacy encrypted message without key map
             message.decryptionFailed = true
-            message.body = '[🔒 Encrypted message - re-pair device to decrypt]'
+            message.body = '[🔒 Encrypted message - sync keys to decrypt]'
           }
 
           return message
@@ -1457,6 +1467,150 @@ export const ensureWebE2EEKeyPublished = async (userId: string) => {
     keyVersion: 2,
     platform: 'web',
     timestamp: serverTimestamp(),
+  })
+}
+
+const getAndroidDeviceId = async (userId: string) => {
+  const devicesRef = ref(database, `${USERS_PATH}/${userId}/${DEVICES_PATH}`)
+  const snapshot = await get(devicesRef)
+  const data = snapshot.val() as Record<string, any> | null
+  if (!data) return null
+  const entry = Object.entries(data).find(([, value]) => {
+    const platform = value?.platform || value?.type
+    return platform === 'android'
+  })
+  return entry ? entry[0] : null
+}
+
+export const ensureWebE2EEKeyBackup = async (userId: string) => {
+  const deviceId = getOrCreateDeviceId()
+  if (!deviceId) return
+
+  const backupRef = ref(database, `users/${userId}/e2ee_key_backups/${deviceId}`)
+  const backupSnapshot = await get(backupRef)
+  if (backupSnapshot.exists()) return
+
+  const keyPairJwk = getStoredKeyPairJwk()
+  if (!keyPairJwk) return
+
+  const androidDeviceId = await getAndroidDeviceId(userId)
+  if (!androidDeviceId) return
+
+  const androidKeyRef = ref(database, `e2ee_keys/${userId}/${androidDeviceId}/publicKeyX963`)
+  const androidKeySnapshot = await get(androidKeyRef)
+  const androidPublicKeyX963 = androidKeySnapshot.val() as string | null
+  if (!androidPublicKeyX963) return
+
+  const publicKeyX963 = await getPublicKeyX963Base64()
+  if (!publicKeyX963) return
+
+  const payload = JSON.stringify(keyPairJwk)
+  const envelope = await encryptDataForDevice(androidPublicKeyX963, encodeUtf8(payload))
+
+  await set(backupRef, {
+    publicKeyX963,
+    encryptedPrivateKeyEnvelope: envelope,
+    platform: 'web',
+    keyVersion: 2,
+    createdAt: serverTimestamp(),
+  })
+}
+
+export const requestWebE2EEKeySync = async (userId: string) => {
+  const deviceId = getOrCreateDeviceId()
+  if (!deviceId) throw new Error('Device not registered')
+  const publicKeyX963 = await getPublicKeyX963Base64()
+  if (!publicKeyX963) throw new Error('E2EE not initialized')
+
+  const requestRef = ref(database, `users/${userId}/e2ee_key_requests/${deviceId}`)
+  await set(requestRef, {
+    requesterDeviceId: deviceId,
+    requesterPlatform: 'web',
+    requesterPublicKeyX963: publicKeyX963,
+    requestedAt: serverTimestamp(),
+    status: 'pending',
+  })
+}
+
+export const requestWebE2EEKeyBackfill = async (userId: string) => {
+  const deviceId = getOrCreateDeviceId()
+  if (!deviceId) throw new Error('Device not registered')
+  const publicKeyX963 = await getPublicKeyX963Base64()
+  if (!publicKeyX963) throw new Error('E2EE not initialized')
+
+  const requestRef = ref(database, `users/${userId}/e2ee_key_backfill_requests/${deviceId}`)
+  await set(requestRef, {
+    requesterDeviceId: deviceId,
+    requesterPlatform: 'web',
+    requesterPublicKeyX963: publicKeyX963,
+    requestedAt: serverTimestamp(),
+    status: 'pending',
+  })
+}
+
+export const waitForWebE2EEKeySyncResponse = async (
+  userId: string,
+  timeoutMs = 60000
+) => {
+  const deviceId = getOrCreateDeviceId()
+  if (!deviceId) throw new Error('Device not registered')
+
+  const responseRef = ref(database, `users/${userId}/e2ee_key_responses/${deviceId}`)
+
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false
+
+    const unsubscribe = onValue(
+      responseRef,
+      async (snapshot) => {
+        if (!snapshot.exists()) return
+        const data = snapshot.val() as Record<string, any> | null
+        const status = data?.status as string | undefined
+
+        if (status === 'ready') {
+          try {
+            const envelope = data?.encryptedPrivateKeyEnvelope as string | undefined
+            if (!envelope) throw new Error('Missing encrypted key data')
+            const decrypted = await decryptDataKey(envelope)
+            if (!decrypted) throw new Error('Failed to decrypt key data')
+            const payload = JSON.parse(decodeUtf8(decrypted))
+            const imported = await importKeyPairFromJwk(payload)
+            if (!imported) throw new Error('Failed to import key pair')
+
+            await ensureWebE2EEKeyPublished(userId)
+            await ensureWebE2EEKeyBackup(userId)
+            await remove(responseRef)
+            settled = true
+            unsubscribe()
+            resolve(true)
+          } catch (err) {
+            await remove(responseRef)
+            settled = true
+            unsubscribe()
+            reject(err)
+          }
+        } else if (status === 'error') {
+          const errorMessage = data?.error || 'Key sync failed'
+          await remove(responseRef)
+          settled = true
+          unsubscribe()
+          reject(new Error(errorMessage))
+        }
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        unsubscribe()
+        reject(error)
+      }
+    )
+
+    setTimeout(() => {
+      if (settled) return
+      settled = true
+      unsubscribe()
+      reject(new Error('Key sync timed out'))
+    }, timeoutMs)
   })
 }
 
