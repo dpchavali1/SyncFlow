@@ -76,7 +76,6 @@ import android.util.Base64
 import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.*
-import com.google.firebase.storage.FirebaseStorage
 import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.auth.AuthManager
 import com.phoneintegration.app.MmsHelper
@@ -133,9 +132,6 @@ class DesktopSyncService(context: Context) {
     /** Firebase Realtime Database for message storage and real-time sync */
     private val database = FirebaseDatabase.getInstance()
 
-    /** Firebase Storage (legacy, R2 preferred for attachments) */
-    private val storage = FirebaseStorage.getInstance()
-
     /** Firebase Cloud Functions for secure server-side operations */
     private val functions = FirebaseFunctions.getInstance()
 
@@ -150,6 +146,9 @@ class DesktopSyncService(context: Context) {
 
     /** Manages SIM card information for phone number detection */
     private val simManager = SimManager(this.context)
+
+    /** Prevent concurrent E2EE backfill runs */
+    @Volatile private var isE2eeBackfillRunning = false
 
     /**
      * Cache of user's own phone numbers (normalized to last 10 digits).
@@ -192,6 +191,10 @@ class DesktopSyncService(context: Context) {
         private const val MESSAGE_REACTIONS_PATH = "message_reactions"
         private const val SPAM_MESSAGES_PATH = "spam_messages"
         private const val SYNC_REQUESTS_PATH = "sync_requests"
+        private const val E2EE_KEY_BACKUPS_PATH = "e2ee_key_backups"
+        private const val E2EE_KEY_REQUESTS_PATH = "e2ee_key_requests"
+        private const val E2EE_KEY_RESPONSES_PATH = "e2ee_key_responses"
+        private const val E2EE_KEY_BACKFILL_REQUESTS_PATH = "e2ee_key_backfill_requests"
 
         // SharedPreferences keys for cached paired device status
         // This avoids hitting Firebase on every sync check
@@ -516,7 +519,7 @@ class DesktopSyncService(context: Context) {
      *
      * ## Error Handling
      *
-     * - If E2EE encryption fails, message is synced as plaintext with e2eeFailed flag
+     * - If E2EE encryption fails, message is stored with a redacted body and e2eeFailed flag
      * - If Cloud Function fails, error is logged but doesn't throw (prevents crashes)
      * - Attachment upload failures are logged and skipped (message still syncs)
      *
@@ -572,61 +575,14 @@ class DesktopSyncService(context: Context) {
                 "timestamp" to ServerValue.TIMESTAMP
             )
 
-            // Check if E2EE is enabled in settings
             val isE2eeEnabled = preferencesManager.e2eeEnabled.value
-
-            if (isE2eeEnabled) {
-                val deviceId = e2eeManager.getDeviceId() ?: "android"
-                val deviceKeys = e2eeManager.getDevicePublicKeys(userId)
-                val dataKey = ByteArray(32).apply { java.security.SecureRandom().nextBytes(this) }
-
-                val bodyToEncrypt = message.body.ifBlank { "[MMS]" }
-                val encryptedBodyResult = e2eeManager.encryptMessageBody(dataKey, bodyToEncrypt)
-                val keyMap = mutableMapOf<String, String>()
-
-                if (encryptedBodyResult != null && deviceKeys.isNotEmpty()) {
-                    for ((targetDeviceId, publicKey) in deviceKeys) {
-                        val envelope = e2eeManager.encryptDataKeyForDevice(publicKey, dataKey)
-                        if (!envelope.isNullOrBlank()) {
-                            keyMap[targetDeviceId] = envelope
-                        }
-                    }
-                }
-
-                if (encryptedBodyResult != null && keyMap.isNotEmpty()) {
-                    val (ciphertext, nonce) = encryptedBodyResult
-                    messageData["body"] = android.util.Base64.encodeToString(ciphertext, android.util.Base64.NO_WRAP)
-                    messageData["nonce"] = android.util.Base64.encodeToString(nonce, android.util.Base64.NO_WRAP)
-                    messageData["keyMap"] = keyMap
-                    messageData["keyVersion"] = 2
-                    messageData["senderDeviceId"] = deviceId
-                    messageData["encrypted"] = true
-                    Log.d(TAG, "Message encrypted with per-device key map")
-                } else {
-                    // E2EE encryption failed - fall back to plaintext with warning
-                    // This ensures messages are never silently dropped
-                    val failureReason = when {
-                        encryptedBodyResult == null && keyMap.isEmpty() -> "encryption and key exchange both failed"
-                        encryptedBodyResult == null -> "encryption failed"
-                        keyMap.isEmpty() -> "no device keys available"
-                        else -> "unknown error"
-                    }
-                    Log.w(TAG, "E2EE enabled but $failureReason - syncing as plaintext with warning flag")
-                    messageData["body"] = message.body
-                    messageData["encrypted"] = false
-                    messageData["e2eeFailed"] = true
-                    messageData["e2eeFailureReason"] = failureReason
-                }
-            } else {
-                // E2EE disabled - store plaintext
-                messageData["body"] = message.body
-                messageData["encrypted"] = false
-                Log.d(TAG, "E2EE disabled, storing plaintext message")
-            }
+            messageData.applyEncryptionPayload(userId, message.body)
 
             // Add contact name if available
-            message.contactName?.let {
-                messageData["contactName"] = it
+            if (!isE2eeEnabled) {
+                message.contactName?.let {
+                    messageData["contactName"] = it
+                }
             }
 
             Log.d(TAG, "Syncing message: id=${message.id}, type=${message.type}, address=$conversationAddress")
@@ -647,11 +603,11 @@ class DesktopSyncService(context: Context) {
                     }
                     Log.d(TAG, "Found ${attachments.size} MMS attachments")
                     if (attachments.isNotEmpty()) {
-                        val attachmentUrls = uploadMmsAttachments(userId, message.id, attachments)
-                        Log.d(TAG, "Uploaded ${attachmentUrls.size} MMS attachment URLs")
-                        if (attachmentUrls.isNotEmpty()) {
-                            messageData["attachments"] = attachmentUrls
-                        }
+                    val attachmentUrls = uploadMmsAttachments(userId, message.id, attachments)
+                    Log.d(TAG, "Uploaded ${attachmentUrls.size} MMS attachment URLs")
+                    if (attachmentUrls.isNotEmpty()) {
+                        messageData["attachments"] = attachmentUrls
+                    }
                     }
                 }
             }
@@ -1133,6 +1089,7 @@ class DesktopSyncService(context: Context) {
         attachments: List<MmsAttachment>
     ): List<Map<String, Any?>> {
         val uploadedAttachments = mutableListOf<Map<String, Any?>>()
+        val isE2eeEnabled = preferencesManager.e2eeEnabled.value
 
         for (attachment in attachments) {
             try {
@@ -1142,7 +1099,7 @@ class DesktopSyncService(context: Context) {
                     uploadedAttachments.add(mapOf(
                         "id" to attachment.id,
                         "contentType" to attachment.contentType,
-                        "fileName" to (attachment.fileName ?: "attachment"),
+                        "fileName" to if (isE2eeEnabled) "attachment" else (attachment.fileName ?: "attachment"),
                         "type" to getAttachmentType(attachment),
                         "encrypted" to false
                     ))
@@ -1202,15 +1159,39 @@ class DesktopSyncService(context: Context) {
                 var isEncrypted = false
 
                 // Encrypt attachment data using E2EE
-                try {
-                    val encryptedBytes = e2eeManager.encryptBytes(userId, bytes)
-                    if (encryptedBytes != null) {
-                        bytesToUpload = encryptedBytes
-                        isEncrypted = true
-                        Log.d(TAG, "Attachment encrypted: ${attachment.id} (${bytes.size} -> ${encryptedBytes.size} bytes)")
+                if (isE2eeEnabled) {
+                    try {
+                        val encryptedBytes = e2eeManager.encryptBytes(userId, bytes)
+                        if (encryptedBytes != null) {
+                            bytesToUpload = encryptedBytes
+                            isEncrypted = true
+                            Log.d(TAG, "Attachment encrypted: ${attachment.id} (${bytes.size} -> ${encryptedBytes.size} bytes)")
+                        } else {
+                            Log.w(TAG, "Attachment encryption failed (null result), skipping upload for ${attachment.id}")
+                            uploadedAttachments.add(mapOf(
+                                "id" to attachment.id,
+                                "contentType" to attachment.contentType,
+                                "fileName" to "attachment",
+                                "type" to getAttachmentType(attachment),
+                                "encrypted" to false,
+                                "syncStatus" to "skipped",
+                                "reason" to "encryption_failed"
+                            ))
+                            continue
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Attachment encryption failed, skipping upload for ${attachment.id}: ${e.message}")
+                        uploadedAttachments.add(mapOf(
+                            "id" to attachment.id,
+                            "contentType" to attachment.contentType,
+                            "fileName" to "attachment",
+                            "type" to getAttachmentType(attachment),
+                            "encrypted" to false,
+                            "syncStatus" to "skipped",
+                            "reason" to "encryption_failed"
+                        ))
+                        continue
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to encrypt attachment, uploading unencrypted: ${e.message}")
                 }
 
                 val usageCheck = runCatching {
@@ -1298,7 +1279,7 @@ class DesktopSyncService(context: Context) {
                 val metadata = mutableMapOf<String, Any?>(
                     "id" to attachment.id,
                     "contentType" to attachment.contentType,
-                    "fileName" to (attachment.fileName ?: "attachment.$extension"),
+                    "fileName" to if (isE2eeEnabled) "attachment.$extension" else (attachment.fileName ?: "attachment.$extension"),
                     "type" to getAttachmentType(attachment),
                     "encrypted" to isEncrypted,
                     "originalSize" to bytes.size
@@ -1494,7 +1475,11 @@ class DesktopSyncService(context: Context) {
      *
      * @param messages List of SMS/MMS messages to sync
      */
-    suspend fun syncMessages(messages: List<SmsMessage>) {
+    suspend fun syncMessages(
+        messages: List<SmsMessage>,
+        skipAttachments: Boolean = false,
+        onProgress: ((syncedCount: Int, totalCount: Int) -> Unit)? = null
+    ) {
         // Early exit if no network - avoid looping through messages
         if (!NetworkUtils.isNetworkAvailable(context)) {
             Log.w(TAG, "No network available, skipping batch sync of ${messages.size} messages")
@@ -1504,7 +1489,7 @@ class DesktopSyncService(context: Context) {
         if (messages.isEmpty()) return
 
         val startTime = System.currentTimeMillis()
-        Log.d(TAG, "Starting batched sync of ${messages.size} messages")
+        Log.d(TAG, "Starting batched sync of ${messages.size} messages (skipAttachments=$skipAttachments)")
 
         // Filter out RCS/RBM messages upfront
         val filteredMessages = messages.filter { msg ->
@@ -1512,35 +1497,144 @@ class DesktopSyncService(context: Context) {
         }
 
         Log.d(TAG, "After filtering: ${filteredMessages.size} messages to sync")
+        if (filteredMessages.isEmpty()) return
 
-        // Process in parallel with limited concurrency (50 at a time)
-        val chunkSize = 50
-        val chunks = filteredMessages.chunked(chunkSize)
+        val totalCount = filteredMessages.size
+        var syncedCount = 0
+
+        val userId = getCurrentUserId()
+        val isE2eeEnabled = preferencesManager.e2eeEnabled.value
+        val cachedDeviceId = if (isE2eeEnabled) e2eeManager.getDeviceId() ?: "android" else "android"
+        val cachedDeviceKeys = if (isE2eeEnabled) e2eeManager.getDevicePublicKeys(userId) else emptyMap()
+
+        val batchCandidates = mutableListOf<SmsMessage>()
+        val individualMessages = mutableListOf<SmsMessage>()
+
+        for (message in filteredMessages) {
+            if (message.isMms && !skipAttachments) {
+                individualMessages.add(message)
+            } else {
+                batchCandidates.add(message)
+            }
+        }
+
+        val chunkSize = 100
+        val chunks = batchCandidates.chunked(chunkSize)
+        val batchCallable = functions.getHttpsCallable("syncMessageBatch")
 
         for ((index, chunk) in chunks.withIndex()) {
-            Log.d(TAG, "Processing chunk ${index + 1}/${chunks.size} (${chunk.size} messages)")
+            Log.d(TAG, "Processing batch ${index + 1}/${chunks.size} (${chunk.size} messages)")
 
-            // Process each chunk in parallel using coroutines
-            coroutineScope {
-                chunk.map { message: SmsMessage ->
-                    async(Dispatchers.IO) {
-                        try {
-                            syncMessage(message)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error syncing message ${message.id}: ${e.message}")
-                        }
-                    }
-                }.awaitAll()
+            val payloads = mutableListOf<Map<String, Any?>>()
+            for (message in chunk) {
+                val payload = buildMessagePayload(
+                    message = message,
+                    userId = userId,
+                    skipAttachments = true,
+                    cachedDeviceId = cachedDeviceId,
+                    cachedDeviceKeys = cachedDeviceKeys
+                )
+                if (payload != null) {
+                    payloads.add(payload)
+                }
             }
 
-            // Small delay between chunks to avoid overwhelming Firebase
+            if (payloads.isEmpty()) {
+                continue
+            }
+
+            try {
+                val result = batchCallable.call(mapOf("messages" to payloads)).await()
+                val data = result.data as? Map<*, *>
+                val count = (data?.get("count") as? Number)?.toInt() ?: payloads.size
+                syncedCount += count
+                onProgress?.invoke(syncedCount, totalCount)
+            } catch (e: Exception) {
+                Log.e(TAG, "Batch sync failed, falling back to individual sync", e)
+                for (message in chunk) {
+                    try {
+                        syncMessage(message, skipAttachments = true)
+                        syncedCount++
+                        onProgress?.invoke(syncedCount, totalCount)
+                    } catch (inner: Exception) {
+                        Log.e(TAG, "Error syncing message ${message.id}: ${inner.message}")
+                    }
+                }
+            }
+
             if (index < chunks.size - 1) {
-                delay(100)
+                delay(50)
+            }
+        }
+
+        for (message in individualMessages) {
+            try {
+                syncMessage(message, skipAttachments = false)
+                syncedCount++
+                onProgress?.invoke(syncedCount, totalCount)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error syncing message ${message.id}: ${e.message}")
             }
         }
 
         val duration = System.currentTimeMillis() - startTime
         Log.d(TAG, "Batched sync completed: ${filteredMessages.size} messages in ${duration}ms")
+    }
+
+    private suspend fun buildMessagePayload(
+        message: SmsMessage,
+        userId: String,
+        skipAttachments: Boolean,
+        cachedDeviceId: String,
+        cachedDeviceKeys: Map<String, String>
+    ): Map<String, Any?>? {
+        val isE2eeEnabled = preferencesManager.e2eeEnabled.value
+        val messageKey = getFirebaseMessageKey(message)
+        val conversationAddress = getConversationAddress(message) ?: return null
+
+        val messageData = mutableMapOf<String, Any?>(
+            "id" to messageKey,
+            "sourceId" to message.id,
+            "sourceType" to if (message.isMms) "mms" else "sms",
+            "address" to conversationAddress,
+            "date" to message.date,
+            "type" to message.type,
+            "timestamp" to ServerValue.TIMESTAMP
+        )
+
+        messageData.applyEncryptionPayload(
+            userId = userId,
+            body = message.body,
+            cachedDeviceId = cachedDeviceId,
+            cachedDeviceKeys = cachedDeviceKeys
+        )
+
+        if (!isE2eeEnabled) {
+            message.contactName?.let { messageData["contactName"] = it }
+        }
+        message.subId?.let { messageData["subId"] = it }
+
+        if (message.isMms) {
+            messageData["isMms"] = true
+            if (!skipAttachments) {
+                val attachments = if (message.mmsAttachments.isNotEmpty()) {
+                    message.mmsAttachments
+                } else {
+                    loadMmsAttachmentsFromProvider(message.id)
+                }
+                if (attachments.isNotEmpty()) {
+                    val attachmentUrls = uploadMmsAttachments(userId, message.id, attachments)
+                    if (attachmentUrls.isNotEmpty()) {
+                        messageData["attachments"] = attachmentUrls
+                    }
+                }
+            }
+        }
+
+        return mapOf(
+            "messageId" to messageKey,
+            "message" to messageData
+        )
     }
 
     /**
@@ -1566,7 +1660,12 @@ class DesktopSyncService(context: Context) {
         }
     }
 
-    private suspend fun MutableMap<String, Any?>.applyEncryptionPayload(userId: String, body: String?): MutableMap<String, Any?> {
+    private suspend fun MutableMap<String, Any?>.applyEncryptionPayload(
+        userId: String,
+        body: String?,
+        cachedDeviceId: String? = null,
+        cachedDeviceKeys: Map<String, String>? = null
+    ): MutableMap<String, Any?> {
         val safeBody = body ?: ""
         val isE2eeEnabled = preferencesManager.e2eeEnabled.value
         if (!isE2eeEnabled) {
@@ -1575,8 +1674,8 @@ class DesktopSyncService(context: Context) {
             return this
         }
 
-        val deviceId = e2eeManager.getDeviceId() ?: "android"
-        val deviceKeys = e2eeManager.getDevicePublicKeys(userId)
+        val deviceId = cachedDeviceId ?: (e2eeManager.getDeviceId() ?: "android")
+        val deviceKeys = cachedDeviceKeys ?: e2eeManager.getDevicePublicKeys(userId)
         val dataKey = ByteArray(32).apply { SecureRandom().nextBytes(this) }
         val bodyToEncrypt = safeBody.ifBlank { "[MMS]" }
         val encryptedBodyResult = e2eeManager.encryptMessageBody(dataKey, bodyToEncrypt)
@@ -1607,10 +1706,11 @@ class DesktopSyncService(context: Context) {
                 else -> "unknown error"
             }
 
-            this["body"] = safeBody
+            this["body"] = "[Encrypted]"
             this["encrypted"] = false
             this["e2eeFailed"] = true
             this["e2eeFailureReason"] = failureReason
+            this["redacted"] = true
         }
 
         return this
@@ -2528,6 +2628,253 @@ class DesktopSyncService(context: Context) {
             } catch (updateError: Exception) {
                 Log.e(TAG, "Failed to update request status", updateError)
             }
+        }
+    }
+
+    /**
+     * Process an E2EE key sync request for a specific device.
+     * Re-encrypts the stored key backup to the requester's current public key.
+     */
+    suspend fun processE2eeKeySyncRequest(requesterDeviceId: String, requesterPublicKeyX963: String) {
+        val userId = getCurrentUserId()
+        val requestRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(E2EE_KEY_REQUESTS_PATH)
+            .child(requesterDeviceId)
+        val responseRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(E2EE_KEY_RESPONSES_PATH)
+            .child(requesterDeviceId)
+        val backupRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(E2EE_KEY_BACKUPS_PATH)
+            .child(requesterDeviceId)
+
+        try {
+            requestRef.updateChildren(mapOf("status" to "processing")).await()
+
+            // Ensure E2EE keys are available (loads existing if already initialized)
+            e2eeManager.initializeKeys()
+
+            val backupSnapshot = backupRef.get().await()
+            if (!backupSnapshot.exists()) {
+                responseRef.setValue(mapOf(
+                    "status" to "error",
+                    "error" to "No key backup found",
+                    "respondedAt" to ServerValue.TIMESTAMP
+                )).await()
+                requestRef.updateChildren(mapOf("status" to "error")).await()
+                return
+            }
+
+            val encryptedEnvelope = backupSnapshot.child("encryptedPrivateKeyEnvelope").getValue(String::class.java)
+            if (encryptedEnvelope.isNullOrBlank()) {
+                responseRef.setValue(mapOf(
+                    "status" to "error",
+                    "error" to "Key backup is missing encrypted data",
+                    "respondedAt" to ServerValue.TIMESTAMP
+                )).await()
+                requestRef.updateChildren(mapOf("status" to "error")).await()
+                return
+            }
+
+            val rawKey = e2eeManager.decryptDataKeyFromEnvelope(encryptedEnvelope)
+            if (rawKey == null) {
+                responseRef.setValue(mapOf(
+                    "status" to "error",
+                    "error" to "Failed to decrypt key backup",
+                    "respondedAt" to ServerValue.TIMESTAMP
+                )).await()
+                requestRef.updateChildren(mapOf("status" to "error")).await()
+                return
+            }
+
+            val encryptedForRequester = e2eeManager.encryptDataKeyForDevice(requesterPublicKeyX963, rawKey)
+            if (encryptedForRequester.isNullOrBlank()) {
+                responseRef.setValue(mapOf(
+                    "status" to "error",
+                    "error" to "Failed to encrypt key for device",
+                    "respondedAt" to ServerValue.TIMESTAMP
+                )).await()
+                requestRef.updateChildren(mapOf("status" to "error")).await()
+                return
+            }
+
+            responseRef.setValue(mapOf(
+                "status" to "ready",
+                "encryptedPrivateKeyEnvelope" to encryptedForRequester,
+                "respondedAt" to ServerValue.TIMESTAMP
+            )).await()
+
+            requestRef.updateChildren(mapOf(
+                "status" to "completed",
+                "completedAt" to ServerValue.TIMESTAMP
+            )).await()
+
+            Log.i(TAG, "E2EE key sync completed for device: $requesterDeviceId")
+        } catch (e: Exception) {
+            Log.e(TAG, "E2EE key sync failed for device $requesterDeviceId", e)
+            responseRef.setValue(mapOf(
+                "status" to "error",
+                "error" to (e.message ?: "Key sync failed"),
+                "respondedAt" to ServerValue.TIMESTAMP
+            )).await()
+            requestRef.updateChildren(mapOf("status" to "error")).await()
+        }
+    }
+
+    /**
+     * Backfill keyMap entries for a newly paired device.
+     * Adds per-device envelopes so older encrypted messages can decrypt without full resync.
+     */
+    suspend fun processE2eeKeyBackfillRequest(requesterDeviceId: String, requesterPublicKeyX963: String) {
+        if (isE2eeBackfillRunning) {
+            Log.w(TAG, "E2EE backfill already running, skipping request for $requesterDeviceId")
+            return
+        }
+
+        isE2eeBackfillRunning = true
+
+        val userId = getCurrentUserId()
+        val requestRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(E2EE_KEY_BACKFILL_REQUESTS_PATH)
+            .child(requesterDeviceId)
+
+        try {
+            requestRef.updateChildren(mapOf(
+                "status" to "processing",
+                "startedAt" to ServerValue.TIMESTAMP
+            )).await()
+
+            e2eeManager.initializeKeys()
+            val androidDeviceId = e2eeManager.getDeviceId()
+            if (androidDeviceId.isNullOrBlank()) {
+                requestRef.updateChildren(mapOf(
+                    "status" to "error",
+                    "error" to "Android device ID not available",
+                    "completedAt" to ServerValue.TIMESTAMP
+                )).await()
+                return
+            }
+
+            val messagesRef = database.reference
+                .child(USERS_PATH)
+                .child(userId)
+                .child(MESSAGES_PATH)
+
+            val pageSize = 400
+            var lastKey: String? = null
+            var scanned = 0
+            var updated = 0
+            var skipped = 0
+            var pageCount = 0
+
+            while (true) {
+                val query = if (lastKey == null) {
+                    messagesRef.orderByKey().limitToFirst(pageSize)
+                } else {
+                    messagesRef.orderByKey().startAt(lastKey).limitToFirst(pageSize + 1)
+                }
+
+                val snapshot = query.get().await()
+                if (!snapshot.exists()) break
+
+                val children = snapshot.children.toList()
+                val page = if (lastKey == null) children else children.drop(1)
+                if (page.isEmpty()) break
+
+                val updates = mutableMapOf<String, Any?>()
+
+                for (child in page) {
+                    val messageId = child.key ?: continue
+                    val isEncrypted = child.child("encrypted").getValue(Boolean::class.java) == true
+                    if (!isEncrypted) {
+                        skipped++
+                        scanned++
+                        continue
+                    }
+
+                    val keyMapAny = child.child("keyMap").value
+                    @Suppress("UNCHECKED_CAST")
+                    val keyMap = keyMapAny as? Map<String, Any?>
+                    if (keyMap == null || keyMap.containsKey(requesterDeviceId)) {
+                        skipped++
+                        scanned++
+                        continue
+                    }
+
+                    val envelopeForAndroid = keyMap[androidDeviceId] as? String
+                    if (envelopeForAndroid.isNullOrBlank()) {
+                        skipped++
+                        scanned++
+                        continue
+                    }
+
+                    val dataKey = e2eeManager.decryptDataKeyFromEnvelope(envelopeForAndroid)
+                    if (dataKey == null) {
+                        skipped++
+                        scanned++
+                        continue
+                    }
+
+                    val newEnvelope = e2eeManager.encryptDataKeyForDevice(requesterPublicKeyX963, dataKey)
+                    if (newEnvelope.isNullOrBlank()) {
+                        skipped++
+                        scanned++
+                        continue
+                    }
+
+                    updates["$USERS_PATH/$userId/$MESSAGES_PATH/$messageId/keyMap/$requesterDeviceId"] = newEnvelope
+                    updated++
+                    scanned++
+                }
+
+                if (updates.isNotEmpty()) {
+                    database.reference.updateChildren(updates).await()
+                }
+
+                lastKey = page.last().key
+                pageCount++
+
+                requestRef.updateChildren(mapOf(
+                    "status" to "processing",
+                    "scanned" to scanned,
+                    "updated" to updated,
+                    "skipped" to skipped,
+                    "lastKey" to lastKey,
+                    "updatedAt" to ServerValue.TIMESTAMP
+                )).await()
+
+                if (page.size < pageSize) break
+
+                if (pageCount % 10 == 0) {
+                    delay(50)
+                }
+            }
+
+            requestRef.updateChildren(mapOf(
+                "status" to "completed",
+                "scanned" to scanned,
+                "updated" to updated,
+                "skipped" to skipped,
+                "completedAt" to ServerValue.TIMESTAMP
+            )).await()
+
+            Log.i(TAG, "E2EE key backfill completed for device: $requesterDeviceId (updated=$updated, scanned=$scanned)")
+        } catch (e: Exception) {
+            Log.e(TAG, "E2EE key backfill failed for device $requesterDeviceId", e)
+            requestRef.updateChildren(mapOf(
+                "status" to "error",
+                "error" to (e.message ?: "Key backfill failed"),
+                "completedAt" to ServerValue.TIMESTAMP
+            )).await()
+        } finally {
+            isE2eeBackfillRunning = false
         }
     }
 
