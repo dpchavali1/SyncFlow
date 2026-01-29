@@ -5487,13 +5487,27 @@ exports.getDeviceInfoV2 = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// MESSAGE SYNCHRONIZATION FUNCTIONS
+// =============================================================================
+//
+// These functions allow Android to sync messages via HTTP calls instead of
+// Firebase Realtime Database writes, which helps prevent OOM issues.
+// =============================================================================
+
 /**
- * Sync a message from Android to Firebase
- * This allows Android to stay in Firebase offline mode to prevent OOM
+ * Syncs a single message from Android to Firebase.
+ * Allows Android to stay in Firebase offline mode to prevent OOM.
  *
- * @param {Object} data - Message data
+ * @function syncMessage
+ * @param {Object} data - Request data
  * @param {string} data.messageId - Unique message ID
- * @param {Object} data.message - Message content
+ * @param {Object} data.message - Message content object
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, messageId: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated or missing data
+ *
+ * @side-effects Writes message to /users/{uid}/messages/{messageId}
  */
 exports.syncMessage = functions.https.onCall(async (data, context) => {
     try {
@@ -5524,11 +5538,19 @@ exports.syncMessage = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Batch sync multiple messages from Android
- * More efficient than syncing one at a time
+ * Batch syncs multiple messages from Android in a single atomic update.
+ * More efficient than syncing one at a time; reduces function invocations.
  *
- * @param {Object} data - Batch data
- * @param {Array} data.messages - Array of {messageId, message} objects
+ * @function syncMessageBatch
+ * @param {Object} data - Request data
+ * @param {Array<{messageId: string, message: Object}>} data.messages - Messages to sync
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, count: number}>}
+ * @throws {functions.https.HttpsError} If not authenticated, missing data, or batch exceeds 100
+ *
+ * @side-effects Atomically writes all messages to /users/{uid}/messages/
+ *
+ * @limits Maximum 100 messages per batch to prevent timeout
  */
 exports.syncMessageBatch = functions.https.onCall(async (data, context) => {
     try {
@@ -5572,13 +5594,29 @@ exports.syncMessageBatch = functions.https.onCall(async (data, context) => {
     }
 });
 
+// =============================================================================
+// SPAM MESSAGE MANAGEMENT FUNCTIONS
+// =============================================================================
+
 /**
- * Sync a spam message from Android to Firebase
- * Uses admin privileges to bypass security rules
+ * Syncs a spam message from Android to Firebase.
+ * Uses Cloud Function privileges to write to spam_messages path.
  *
- * @param {Object} data - Spam message data
+ * @function syncSpamMessage
+ * @param {Object} data - Request data
  * @param {string} data.messageId - Unique message ID
  * @param {Object} data.spamMessage - Spam message content
+ * @param {string} data.spamMessage.address - Sender phone number
+ * @param {string} data.spamMessage.body - Message text
+ * @param {number} data.spamMessage.date - Message timestamp
+ * @param {string} [data.spamMessage.contactName] - Contact name
+ * @param {number} [data.spamMessage.spamConfidence] - Confidence score 0-1
+ * @param {string} [data.spamMessage.spamReasons] - Detection reasons
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, messageId: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated or missing required fields
+ *
+ * @side-effects Writes to /users/{uid}/spam_messages/{messageId}
  */
 exports.syncSpamMessage = functions.https.onCall(async (data, context) => {
     try {
@@ -5624,10 +5662,16 @@ exports.syncSpamMessage = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Delete a spam message from Firebase
+ * Deletes a spam message from Firebase.
  *
+ * @function deleteSpamMessage
  * @param {Object} data - Request data
  * @param {string} data.messageId - Message ID to delete
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, messageId: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated or messageId missing
+ *
+ * @side-effects Removes /users/{uid}/spam_messages/{messageId}
  */
 exports.deleteSpamMessage = functions.https.onCall(async (data, context) => {
     try {
@@ -5655,7 +5699,15 @@ exports.deleteSpamMessage = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Clear all spam messages for a user
+ * Clears all spam messages for the authenticated user.
+ *
+ * @function clearAllSpamMessages
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean}>}
+ * @throws {functions.https.HttpsError} If not authenticated
+ *
+ * @side-effects Removes entire /users/{uid}/spam_messages/ node
  */
 exports.clearAllSpamMessages = functions.https.onCall(async (data, context) => {
     try {
@@ -5677,8 +5729,14 @@ exports.clearAllSpamMessages = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Cleanup expired V2 pairing requests
- * Runs every 5 minutes
+ * Cleans up expired V2 pairing requests.
+ * Removes expired or completed requests older than 10 minutes.
+ *
+ * @function cleanupExpiredPairingRequestsV2
+ * @schedule Every 5 minutes
+ * @returns {Promise<null>}
+ *
+ * @side-effects Deletes expired entries from /pairing_requests/
  */
 exports.cleanupExpiredPairingRequestsV2 = functions.pubsub
     .schedule("every 5 minutes")
@@ -5721,14 +5779,38 @@ exports.cleanupExpiredPairingRequestsV2 = functions.pubsub
         }
     });
 
-// ============================================
-// ACCOUNT DELETION (Soft Delete with 30-day grace period)
-// ============================================
+// =============================================================================
+// ACCOUNT DELETION (Soft Delete with 30-day Grace Period)
+// =============================================================================
+//
+// Account deletion follows a soft-delete pattern:
+// 1. User requests deletion via requestAccountDeletion()
+// 2. Account is marked for deletion in 30 days
+// 3. Recovery code is immediately disabled
+// 4. User can cancel anytime within 30 days
+// 5. After 30 days, processScheduledDeletions() permanently deletes data
+//
+// DELETION DATA FLOW:
+// - Request stored at /users/{userId}/deletion_scheduled
+// - Copy stored at /scheduled_deletions/{userId} (survives if user data corrupted)
+// - After deletion: record moved to /deleted_accounts/{userId}
+// =============================================================================
 
 /**
- * Request account deletion (soft delete)
- * Marks account for deletion in 30 days
- * Stores identifying info for admin recovery assistance
+ * Requests account deletion with 30-day grace period.
+ * Immediately disables recovery code but preserves data for 30 days.
+ *
+ * @function requestAccountDeletion
+ * @param {Object} data - Request data
+ * @param {string} [data.reason] - Optional reason for deletion
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, scheduledDeletionAt: number, message: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated
+ *
+ * @side-effects
+ * - Writes deletion schedule to /users/{userId}/deletion_scheduled
+ * - Writes to /scheduled_deletions/{userId} with identifying info
+ * - Sends notification email to admin
  */
 exports.requestAccountDeletion = functions.https.onCall(async (data, context) => {
     try {
@@ -5782,7 +5864,18 @@ exports.requestAccountDeletion = functions.https.onCall(async (data, context) =>
 });
 
 /**
- * Cancel account deletion request
+ * Cancels a pending account deletion request.
+ * User can continue using their account normally after cancellation.
+ *
+ * @function cancelAccountDeletion
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<{success: boolean, message: string}>}
+ * @throws {functions.https.HttpsError} If not authenticated or no deletion scheduled
+ *
+ * @side-effects
+ * - Removes /users/{userId}/deletion_scheduled
+ * - Removes /scheduled_deletions/{userId}
  */
 exports.cancelAccountDeletion = functions.https.onCall(async (data, context) => {
     try {
@@ -5816,7 +5909,18 @@ exports.cancelAccountDeletion = functions.https.onCall(async (data, context) => 
 });
 
 /**
- * Check account deletion status
+ * Checks if user's account is scheduled for deletion and returns details.
+ *
+ * @function getAccountDeletionStatus
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (must be authenticated)
+ * @returns {Promise<Object>} Deletion status
+ * @returns {boolean} .isScheduledForDeletion
+ * @returns {number} [.requestedAt] - When deletion was requested
+ * @returns {number} [.scheduledDeletionAt] - When deletion will occur
+ * @returns {number} [.daysRemaining] - Days until deletion
+ * @returns {string} [.reason] - User-provided reason
+ * @throws {functions.https.HttpsError} If not authenticated
  */
 exports.getAccountDeletionStatus = functions.https.onCall(async (data, context) => {
     try {
@@ -5853,7 +5957,17 @@ exports.getAccountDeletionStatus = functions.https.onCall(async (data, context) 
 });
 
 /**
- * Scheduled job to process account deletions (runs daily at 4 AM UTC)
+ * Processes scheduled account deletions that have reached their deletion date.
+ * Runs daily at 4 AM UTC, after the cleanup job at 3 AM.
+ *
+ * @function processScheduledDeletions
+ * @schedule 4 AM UTC daily (cron: "0 4 * * *")
+ * @returns {Promise<{deletedCount: number, errorCount: number}|null>}
+ *
+ * @side-effects
+ * - Permanently deletes user data for accounts past their deletion date
+ * - Creates records in /deleted_accounts/ for audit trail
+ * - Sends summary email to admin
  */
 exports.processScheduledDeletions = functions.pubsub
     .schedule("0 4 * * *") // 4 AM UTC daily
@@ -5909,8 +6023,21 @@ exports.processScheduledDeletions = functions.pubsub
     });
 
 /**
- * Perform actual account deletion
- * Preserves identifying info in deleted_accounts for admin recovery
+ * Performs actual permanent deletion of a user account.
+ * Preserves identifying info in /deleted_accounts/ for admin reference.
+ *
+ * @param {string} userId - User ID to delete
+ * @param {string} [reason] - Reason for deletion
+ * @returns {Promise<void>}
+ *
+ * @side-effects
+ * - Creates record at /deleted_accounts/{userId} with identifying info
+ * - Deletes /users/{userId}
+ * - Deletes /scheduled_deletions/{userId}
+ * - Deletes /subscription_records/{userId}
+ * - Deletes /fcm_tokens/{userId}
+ * - Deletes data_export_requests for user
+ * - Deletes /recovery_codes/{hash} mapping
  */
 async function performAccountDeletion(userId, reason) {
     console.log(`[AccountDeletion] Deleting account: ${userId}`);
@@ -5976,7 +6103,14 @@ async function performAccountDeletion(userId, reason) {
 }
 
 /**
- * Send email when user requests deletion (includes identifying info for recovery)
+ * Sends notification email to admin when user requests account deletion.
+ * Includes identifying information to assist with recovery if user contacts support.
+ *
+ * @param {string} userId - User ID requesting deletion
+ * @param {string} reason - User-provided reason
+ * @param {number} deletionDate - Scheduled deletion timestamp
+ * @param {Object|null} identifyingInfo - User identifying info from getUserIdentifyingInfo()
+ * @returns {Promise<boolean>} True if email sent successfully
  */
 const sendAccountDeletionRequestEmail = async (userId, reason, deletionDate, identifyingInfo = null) => {
     const resend = getResend();
@@ -6059,7 +6193,11 @@ Account Deletion Notice
 };
 
 /**
- * Send summary email after processing deletions
+ * Sends daily summary email after processing scheduled deletions.
+ *
+ * @param {number} deletedCount - Number of accounts successfully deleted
+ * @param {number} errorCount - Number of deletion failures
+ * @returns {Promise<boolean>} True if email sent successfully
  */
 const sendDeletionSummaryEmail = async (deletedCount, errorCount) => {
     const resend = getResend();
@@ -6099,14 +6237,38 @@ Automated Deletion Summary
     }
 };
 
-// ============================================
+// =============================================================================
 // AI SUPPORT CHAT
-// Handles user-specific queries about their own data
-// ============================================
+// =============================================================================
+//
+// The support chat is a rule-based chatbot (not AI/ML) that helps users with
+// common account queries. It detects query intent using keyword matching and
+// returns appropriate responses with data from the user's account.
+//
+// SUPPORTED QUERY TYPES:
+// - Account info: user ID, recovery code, account summary
+// - Sync status: last sync, sync errors, message counts
+// - Subscription: plan details, billing history, cancellation
+// - Devices: device list, unpair device
+// - Data: usage stats, export data, delete account
+// - Spam: settings, statistics
+//
+// Note: "AI" in the name is aspirational; current implementation is keyword-based.
+// =============================================================================
 
 /**
- * AI Support Chat - helps users with their own account queries
- * Users can ask about: recovery code, user ID, data usage, subscription, etc.
+ * AI Support Chat - provides self-service support for user account queries.
+ * Detects query type from message and returns relevant account information.
+ *
+ * @function supportChat
+ * @param {Object} data - Request data
+ * @param {string} data.message - User's message/question
+ * @param {string} [data.syncGroupUserId] - Sync group user ID (for Mac/Web)
+ * @param {Array} [data.conversationHistory] - Previous messages (unused currently)
+ * @param {functions.https.CallableContext} context - Firebase context
+ * @returns {Promise<{success: boolean, response: string}>}
+ *
+ * @note Uses syncGroupUserId if provided (Mac/Web), falls back to context.auth.uid
  */
 exports.supportChat = functions.https.onCall(async (data, context) => {
     try {
@@ -6203,7 +6365,10 @@ exports.supportChat = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Detect what type of user-specific query this is
+ * Detects the query type from user message using keyword matching.
+ *
+ * @param {string} message - User's message (already lowercased)
+ * @returns {string} Query type identifier
  */
 function detectUserQueryType(message) {
     const msg = message.toLowerCase();
@@ -6349,8 +6514,15 @@ function detectUserQueryType(message) {
     return "general";
 }
 
+// -----------------------------------------------------------------------------
+// SUPPORT CHAT QUERY HANDLERS
+// Each handler retrieves relevant data and formats a user-friendly response
+// -----------------------------------------------------------------------------
+
 /**
- * Handle recovery code query
+ * Handles recovery code query - retrieves and displays user's recovery code.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleRecoveryCodeQuery(userId) {
     if (!userId) {
@@ -6380,7 +6552,9 @@ async function handleRecoveryCodeQuery(userId) {
 }
 
 /**
- * Handle user ID query
+ * Handles user ID query - displays user's Firebase UID.
+ * @param {string|null} userId - User ID
+ * @returns {string} Formatted response
  */
 function handleUserIdQuery(userId) {
     if (!userId) {
@@ -6391,7 +6565,9 @@ function handleUserIdQuery(userId) {
 }
 
 /**
- * Handle data usage query
+ * Handles data usage query - displays storage and sync statistics.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleDataUsageQuery(userId) {
     if (!userId) {
@@ -6439,7 +6615,9 @@ async function handleDataUsageQuery(userId) {
 }
 
 /**
- * Handle subscription query
+ * Handles subscription query - displays plan details and expiration.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleSubscriptionQuery(userId) {
     if (!userId) {
@@ -6498,7 +6676,9 @@ async function handleSubscriptionQuery(userId) {
 }
 
 /**
- * Handle account info query (combines multiple pieces of info)
+ * Handles account info query - displays combined account summary.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleAccountInfoQuery(userId) {
     if (!userId) {
@@ -6539,7 +6719,9 @@ async function handleAccountInfoQuery(userId) {
 }
 
 /**
- * Handle device info query
+ * Handles device info query - lists connected devices with details.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleDeviceInfoQuery(userId) {
     if (!userId) {
@@ -6581,14 +6763,17 @@ async function handleDeviceInfoQuery(userId) {
 }
 
 /**
- * Get help response listing available queries
+ * Returns help message listing all available support chat queries.
+ * @returns {string} Formatted help response
  */
 function getHelpResponse() {
     return `**Hi! I'm the SyncFlow AI Assistant.**\n\nI can help you with your account. Here's what you can ask:\n\n**Account & Security:**\n- "What's my user ID?"\n- "What's my recovery code?"\n- "Show my login history"\n- "Sign out all devices"\n- "Regenerate recovery code"\n\n**Sync & Messages:**\n- "What's my sync status?"\n- "How many messages synced?"\n- "Reset my sync"\n\n**Devices:**\n- "Show my devices"\n- "Unpair a device"\n\n**Subscription & Billing:**\n- "What's my plan?"\n- "Show billing history"\n- "Cancel subscription"\n\n**Data & Privacy:**\n- "How much data have I used?"\n- "Download my data"\n- "Delete my account"\n\n**Spam:**\n- "Show spam settings"\n- "How many spam blocked?"\n\n**General Help:**\n- "How do I pair devices?"\n- "Messages not syncing"\n\nJust type your question!`;
 }
 
 /**
- * Get general response for non-specific queries
+ * Returns response for general/unrecognized queries with helpful information.
+ * @param {string} message - User's original message
+ * @returns {string} Formatted general help response
  */
 function getGeneralResponse(message) {
     const msg = message.toLowerCase();
@@ -6653,7 +6838,9 @@ function getGeneralResponse(message) {
 }
 
 /**
- * Handle sync status query
+ * Handles sync status query - displays last sync times and recent errors.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleSyncStatusQuery(userId) {
     if (!userId) {
@@ -6711,7 +6898,9 @@ async function handleSyncStatusQuery(userId) {
 }
 
 /**
- * Handle message stats query
+ * Handles message stats query - displays message counts and sync statistics.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleMessageStatsQuery(userId) {
     if (!userId) {
@@ -6761,7 +6950,11 @@ async function handleMessageStatsQuery(userId) {
 }
 
 /**
- * Handle unpair device query
+ * Handles unpair device query - removes a device or prompts for selection.
+ * @param {string|null} userId - User ID
+ * @param {string} originalMessage - User's original message (to extract device name)
+ * @returns {Promise<string>} Formatted response
+ * @side-effects May remove device from /users/{userId}/devices/
  */
 async function handleUnpairDeviceQuery(userId, originalMessage) {
     if (!userId) {
@@ -6815,7 +7008,10 @@ async function handleUnpairDeviceQuery(userId, originalMessage) {
 }
 
 /**
- * Handle reset sync query
+ * Handles reset sync query - clears sync state for fresh re-sync.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
+ * @side-effects Clears sync_state, sync_errors, sets needsFullSync on devices
  */
 async function handleResetSyncQuery(userId) {
     if (!userId) {
@@ -6857,7 +7053,10 @@ async function handleResetSyncQuery(userId) {
 }
 
 /**
- * Handle delete account query
+ * Handles delete account query - provides instructions or status info.
+ * Does NOT actually delete; only provides guidance.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleDeleteAccountQuery(userId) {
     if (!userId) {
@@ -6889,14 +7088,18 @@ async function handleDeleteAccountQuery(userId) {
 }
 
 /**
- * Handle regenerate recovery code query
+ * Handles regenerate recovery code query - provides instructions.
+ * Recovery code regeneration must be done from Android app for security.
+ * @returns {string} Formatted instructions
  */
 function handleRegenerateRecoveryQuery() {
     return `**Regenerate Recovery Code**\n\nTo generate a new recovery code:\n\n1. Open SyncFlow on your Android device\n2. Go to Settings > Account > Recovery Code\n3. Tap "Regenerate Code"\n4. Save your new code securely\n\n**Important:**\n- Your old recovery code will stop working immediately\n- Make sure to save the new code before closing the screen\n- Store it somewhere safe (password manager, written down, etc.)\n\n*For security, recovery codes can only be regenerated from the Android app.*`;
 }
 
 /**
- * Handle billing history query
+ * Handles billing history query - displays payment history and plan changes.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleBillingHistoryQuery(userId) {
     if (!userId) {
@@ -6956,7 +7159,11 @@ async function handleBillingHistoryQuery(userId) {
 }
 
 /**
- * Handle cancel subscription query
+ * Handles cancel subscription query - provides cancellation instructions.
+ * Subscriptions are managed through app stores, not directly.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted instructions
+ * @side-effects Sends churn alert email to admin
  */
 async function handleCancelSubscriptionQuery(userId) {
     // Send churn alert email to admin
@@ -6970,7 +7177,9 @@ async function handleCancelSubscriptionQuery(userId) {
 }
 
 /**
- * Handle login history query
+ * Handles login history query - displays active sessions and recent logins.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleLoginHistoryQuery(userId) {
     if (!userId) {
@@ -7022,7 +7231,14 @@ async function handleLoginHistoryQuery(userId) {
 }
 
 /**
- * Handle sign out all devices query
+ * Handles sign out all devices query - revokes all sessions.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
+ * @side-effects
+ * - Clears /users/{userId}/sessions
+ * - Sets forceReauth flag
+ * - Revokes Firebase Auth refresh tokens
+ * - Sends security alert email to admin
  */
 async function handleSignOutAllQuery(userId) {
     if (!userId) {
@@ -7062,7 +7278,13 @@ async function handleSignOutAllQuery(userId) {
 }
 
 /**
- * Handle download data query (GDPR)
+ * Handles download data query (GDPR data export request).
+ * Creates an export request record for admin processing.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response with request ID
+ * @side-effects
+ * - Creates record in /data_export_requests/
+ * - Sends notification email to admin
  */
 async function handleDownloadDataQuery(userId) {
     if (!userId) {
@@ -7094,7 +7316,9 @@ async function handleDownloadDataQuery(userId) {
 }
 
 /**
- * Handle spam settings query
+ * Handles spam settings query - displays current spam filter configuration.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response
  */
 async function handleSpamSettingsQuery(userId) {
     if (!userId) {
@@ -7126,7 +7350,9 @@ async function handleSpamSettingsQuery(userId) {
 }
 
 /**
- * Handle spam stats query
+ * Handles spam stats query - displays spam blocking statistics.
+ * @param {string|null} userId - User ID
+ * @returns {Promise<string>} Formatted response with spam counts by category
  */
 async function handleSpamStatsQuery(userId) {
     if (!userId) {
@@ -7185,12 +7411,25 @@ async function handleSpamStatsQuery(userId) {
     }
 }
 
-// ============================================
+// =============================================================================
 // ADMIN - ACCOUNT RECOVERY MANAGEMENT
-// ============================================
+// =============================================================================
+//
+// These admin functions help with account recovery scenarios:
+// - Users who deleted their account but want to cancel
+// - Users who lost access and need identification
+// - Admin oversight of deletion pipeline
+// =============================================================================
 
 /**
- * Admin: List all accounts scheduled for deletion
+ * Lists all accounts currently scheduled for deletion.
+ * Admin function for managing pending deletions.
+ *
+ * @function adminListScheduledDeletions
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, scheduledDeletions: Array}>}
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.adminListScheduledDeletions = functions.https.onCall(async (data, context) => {
     try {
@@ -7238,7 +7477,14 @@ exports.adminListScheduledDeletions = functions.https.onCall(async (data, contex
 });
 
 /**
- * Admin: List all permanently deleted accounts
+ * Lists all permanently deleted accounts for audit/compliance.
+ *
+ * @function adminListDeletedAccounts
+ * @param {Object} data - Request data
+ * @param {number} [data.limit=100] - Max accounts to return
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, deletedAccounts: Array}>}
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.adminListDeletedAccounts = functions.https.onCall(async (data, context) => {
     try {
@@ -7287,7 +7533,16 @@ exports.adminListDeletedAccounts = functions.https.onCall(async (data, context) 
 });
 
 /**
- * Admin: Search accounts by phone number, device name, or user ID
+ * Searches accounts by phone number, device name, or user ID.
+ * Helps admin find accounts for users who lost access and can only remember
+ * their device name or a phone number they messaged.
+ *
+ * @function adminSearchAccounts
+ * @param {Object} data - Request data
+ * @param {string} data.query - Search query (min 3 characters)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, scheduledDeletions: Array, deletedAccounts: Array}>}
+ * @throws {functions.https.HttpsError} If not admin or query too short
  */
 exports.adminSearchAccounts = functions.https.onCall(async (data, context) => {
     try {
@@ -7383,7 +7638,19 @@ exports.adminSearchAccounts = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Admin: Cancel a user's scheduled deletion
+ * Cancels a user's scheduled account deletion (admin override).
+ * Use when user contacts support asking to recover their account.
+ *
+ * @function adminCancelDeletion
+ * @param {Object} data - Request data
+ * @param {string} data.userId - User ID to cancel deletion for
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, message: string}>}
+ * @throws {functions.https.HttpsError} If not admin or no deletion scheduled
+ *
+ * @side-effects
+ * - Removes /users/{userId}/deletion_scheduled
+ * - Removes /scheduled_deletions/{userId}
  */
 exports.adminCancelDeletion = functions.https.onCall(async (data, context) => {
     try {
@@ -7422,8 +7689,19 @@ exports.adminCancelDeletion = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Admin: Mark deleted account as acknowledged/handled
- * Note: We cannot actually restore data once deleted, but we can update the status
+ * Updates status of a deleted account record for admin tracking.
+ * Note: Data cannot be restored once deleted; this is for audit/tracking only.
+ *
+ * @function adminUpdateDeletedAccountStatus
+ * @param {Object} data - Request data
+ * @param {string} data.userId - Deleted account user ID
+ * @param {string} [data.status="acknowledged"] - New status
+ * @param {string} [data.notes=""] - Admin notes
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<{success: boolean, message: string, note: string}>}
+ * @throws {functions.https.HttpsError} If not admin or account not found
+ *
+ * @side-effects Updates /deleted_accounts/{userId} with new status and notes
  */
 exports.adminUpdateDeletedAccountStatus = functions.https.onCall(async (data, context) => {
     try {
@@ -7468,7 +7746,18 @@ exports.adminUpdateDeletedAccountStatus = functions.https.onCall(async (data, co
 });
 
 /**
- * Admin: Get account recovery stats
+ * Retrieves account recovery/deletion statistics for admin dashboard.
+ *
+ * @function adminGetRecoveryStats
+ * @param {Object} data - Request data (unused)
+ * @param {functions.https.CallableContext} context - Firebase context (requires admin)
+ * @returns {Promise<Object>} Statistics object
+ * @returns {number} stats.totalScheduled - Total scheduled deletions
+ * @returns {number} stats.urgentDeletions - Deletions within 7 days
+ * @returns {number} stats.totalDeleted - Total permanently deleted
+ * @returns {number} stats.recentDeletions - Deleted in last 30 days
+ * @returns {Object} stats.reasonBreakdown - Counts by deletion reason
+ * @throws {functions.https.HttpsError} If not admin
  */
 exports.adminGetRecoveryStats = functions.https.onCall(async (data, context) => {
     try {
