@@ -1,0 +1,53 @@
+{
+  "version": "2026.01.27",
+  "lastUpdated": 1737993600000,
+  "components": {
+    "url_blocklist": {
+      "version": "2026.01.27",
+      "url": "https://raw.githubusercontent.com/user/syncflow-filters/main/url_blocklist.json",
+      "size": 512000,
+      "checksum": "",
+      "description": "Malicious URL database from URLhaus"
+    },
+    "spam_patterns": {
+      "version": "2026.01.27",
+      "url": "https://raw.githubusercontent.com/user/syncflow-filters/main/spam_patterns.json",
+      "size": 15000,
+      "checksum": "",
+      "description": "Spam detection patterns and rules"
+    },
+    "domain_blocklist": {
+      "version": "2026.01.27",
+      "url": "https://raw.githubusercontent.com/user/syncflow-filters/main/domain_blocklist.txt",
+      "size": 50000,
+      "checksum": "",
+      "description": "Known phishing and scam domains"
+    },
+    "ml_model": {
+      "version": "1.0.0",
+      "url": "https://raw.githubusercontent.com/user/syncflow-filters/main/spam_model.tflite",
+      "size": 1500000,
+      "checksum": "",
+      "minAppVersion": "1.5.0",
+      "description": "TensorFlow Lite spam classification model"
+    }
+  },
+  "sources": {
+    "urlhaus": {
+      "name": "URLhaus by abuse.ch",
+      "url": "https://urlhaus.abuse.ch/",
+      "license": "CC0"
+    },
+    "phishtank": {
+      "name": "PhishTank",
+      "url": "https://phishtank.org/",
+      "license": "Free for non-commercial"
+    }
+  },
+  "updateInstructions": {
+    "autoUpdate": true,
+    "updateInterval": 86400000,
+    "wifiOnly": true,
+    "notifyUser": true
+  }
+}

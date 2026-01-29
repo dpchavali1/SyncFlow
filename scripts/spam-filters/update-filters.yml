@@ -1,0 +1,198 @@
+# GitHub Actions workflow to update spam filter data daily
+# Place this in .github/workflows/update-filters.yml
+
+name: Update Spam Filters
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  update-filters:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create filters directory
+        run: mkdir -p filters
+
+      - name: Download URLhaus Recent Malware URLs
+        run: |
+          echo "Downloading URLhaus data..."
+          curl -s "https://urlhaus.abuse.ch/downloads/json_recent/" -o urlhaus_raw.json
+
+          # Process and extract URLs
+          node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('urlhaus_raw.json', 'utf8'));
+            const urls = data.urls || [];
+
+            const processed = urls.slice(0, 50000).map(u => ({
+              url: u.url,
+              threat: u.threat || 'malware',
+              date: u.date_added
+            }));
+
+            fs.writeFileSync('filters/url_blocklist.json', JSON.stringify(processed, null, 2));
+            console.log('Processed ' + processed.length + ' URLs');
+          "
+
+          rm urlhaus_raw.json
+
+      - name: Download PhishTank Data (if API key available)
+        if: ${{ secrets.PHISHTANK_API_KEY != '' }}
+        run: |
+          echo "Downloading PhishTank data..."
+          curl -s "http://data.phishtank.com/data/${{ secrets.PHISHTANK_API_KEY }}/online-valid.json" -o phishtank_raw.json || true
+
+          if [ -f phishtank_raw.json ]; then
+            node -e "
+              const fs = require('fs');
+              try {
+                const data = JSON.parse(fs.readFileSync('phishtank_raw.json', 'utf8'));
+                const urls = data.slice(0, 10000).map(p => ({
+                  url: p.url,
+                  threat: 'phishing',
+                  date: p.submission_time
+                }));
+
+                // Merge with existing
+                const existing = JSON.parse(fs.readFileSync('filters/url_blocklist.json', 'utf8'));
+                const merged = [...existing, ...urls];
+
+                // Deduplicate
+                const unique = [...new Map(merged.map(u => [u.url, u])).values()];
+
+                fs.writeFileSync('filters/url_blocklist.json', JSON.stringify(unique, null, 2));
+                console.log('Merged PhishTank data. Total: ' + unique.length);
+              } catch(e) {
+                console.log('PhishTank processing skipped:', e.message);
+              }
+            "
+            rm -f phishtank_raw.json
+          fi
+
+      - name: Update domain blocklist
+        run: |
+          echo "Updating domain blocklist..."
+
+          # Download from multiple sources
+          curl -s "https://raw.githubusercontent.com/mitchellkrogza/Phishing.Database/master/phishing-domains-ACTIVE.txt" -o phishing_domains.txt || true
+
+          # Combine and deduplicate
+          cat phishing_domains.txt 2>/dev/null | head -20000 > filters/domain_blocklist.txt || echo "" > filters/domain_blocklist.txt
+
+          # Add header
+          sed -i '1i# Domain Blocklist - Updated: '"$(date -u +%Y-%m-%d)"'\n# Sources: Phishing.Database, Community\n' filters/domain_blocklist.txt
+
+          rm -f phishing_domains.txt
+
+          echo "Domain blocklist updated with $(wc -l < filters/domain_blocklist.txt) entries"
+
+      - name: Copy spam patterns
+        run: |
+          # Copy the latest spam patterns from the app
+          if [ -f "app/src/main/assets/spam_patterns.json" ]; then
+            cp app/src/main/assets/spam_patterns.json filters/spam_patterns.json
+          fi
+
+      - name: Calculate checksums
+        run: |
+          cd filters
+          sha256sum url_blocklist.json | cut -d' ' -f1 > url_blocklist.sha256
+          sha256sum domain_blocklist.txt | cut -d' ' -f1 > domain_blocklist.sha256
+          sha256sum spam_patterns.json | cut -d' ' -f1 > spam_patterns.sha256 2>/dev/null || true
+
+      - name: Update manifest
+        run: |
+          node -e "
+            const fs = require('fs');
+            const now = new Date();
+            const version = now.toISOString().split('T')[0].replace(/-/g, '.');
+
+            // Read checksums
+            const urlChecksum = fs.readFileSync('filters/url_blocklist.sha256', 'utf8').trim();
+            const domainChecksum = fs.readFileSync('filters/domain_blocklist.sha256', 'utf8').trim();
+            let patternChecksum = '';
+            try {
+              patternChecksum = fs.readFileSync('filters/spam_patterns.sha256', 'utf8').trim();
+            } catch(e) {}
+
+            // Get file sizes
+            const urlSize = fs.statSync('filters/url_blocklist.json').size;
+            const domainSize = fs.statSync('filters/domain_blocklist.txt').size;
+            let patternSize = 0;
+            try {
+              patternSize = fs.statSync('filters/spam_patterns.json').size;
+            } catch(e) {}
+
+            const manifest = {
+              version: version,
+              lastUpdated: now.getTime(),
+              components: {
+                url_blocklist: {
+                  version: version,
+                  url: 'https://raw.githubusercontent.com/\${{ github.repository }}/main/filters/url_blocklist.json',
+                  size: urlSize,
+                  checksum: 'sha256:' + urlChecksum,
+                  description: 'Malicious URL database from URLhaus'
+                },
+                domain_blocklist: {
+                  version: version,
+                  url: 'https://raw.githubusercontent.com/\${{ github.repository }}/main/filters/domain_blocklist.txt',
+                  size: domainSize,
+                  checksum: 'sha256:' + domainChecksum,
+                  description: 'Known phishing and scam domains'
+                },
+                spam_patterns: {
+                  version: version,
+                  url: 'https://raw.githubusercontent.com/\${{ github.repository }}/main/filters/spam_patterns.json',
+                  size: patternSize,
+                  checksum: patternSize > 0 ? 'sha256:' + patternChecksum : '',
+                  description: 'Spam detection patterns and rules'
+                }
+              },
+              sources: {
+                urlhaus: { name: 'URLhaus by abuse.ch', url: 'https://urlhaus.abuse.ch/', license: 'CC0' },
+                phishing_database: { name: 'Phishing.Database', url: 'https://github.com/mitchellkrogza/Phishing.Database', license: 'MIT' }
+              }
+            };
+
+            fs.writeFileSync('filters/manifest.json', JSON.stringify(manifest, null, 2));
+            console.log('Manifest updated to version', version);
+          "
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add filters/
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🔄 Update spam filters - $(date -u +%Y-%m-%d)"
+            git push
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Filter Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL Blocklist**: $(jq length filters/url_blocklist.json) entries" >> $GITHUB_STEP_SUMMARY
+          echo "- **Domain Blocklist**: $(wc -l < filters/domain_blocklist.txt) entries" >> $GITHUB_STEP_SUMMARY
+          echo "- **Spam Patterns**: $(jq length filters/spam_patterns.json 2>/dev/null || echo 'N/A') rules" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Updated: $(date -u)" >> $GITHUB_STEP_SUMMARY
