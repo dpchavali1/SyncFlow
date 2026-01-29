@@ -7818,3 +7818,167 @@ exports.adminGetRecoveryStats = functions.https.onCall(async (data, context) => 
         throw new functions.https.HttpsError("internal", "Failed to get recovery stats");
     }
 });
+
+// =============================================================================
+// SUPPORT EMAIL FUNCTION
+// =============================================================================
+
+/**
+ * Sends a support email from the web contact form to the admin email address.
+ *
+ * This function is called from the /support page when users submit support requests.
+ * It validates input, formats the email, and sends it via Resend.
+ *
+ * @function sendSupportEmail
+ * @param {Object} data - Support request data
+ * @param {string} data.name - User's name
+ * @param {string} data.email - User's email address for replies
+ * @param {string} data.subject - Support ticket subject/category
+ * @param {string} data.message - Detailed support message
+ * @param {functions.https.CallableContext} context - Function context
+ *
+ * @returns {Promise<Object>} Result object with success status
+ * @returns {boolean} result.success - Whether email was sent successfully
+ * @returns {string} [result.error] - Error message if failed
+ *
+ * @throws {functions.https.HttpsError} invalid-argument if required fields missing
+ * @throws {functions.https.HttpsError} internal if email sending fails
+ *
+ * @example
+ * const sendSupportEmail = httpsCallable(functions, 'sendSupportEmail')
+ * await sendSupportEmail({
+ *   name: 'John Doe',
+ *   email: 'john@example.com',
+ *   subject: 'Technical Issue',
+ *   message: 'I cannot pair my device...'
+ * })
+ */
+exports.sendSupportEmail = functions.https.onCall(async (data, context) => {
+    try {
+        const { name, email, subject, message } = data;
+
+        // Validate required fields
+        if (!name || !email || !subject || !message) {
+            throw new functions.https.HttpsError(
+                "invalid-argument",
+                "Missing required fields: name, email, subject, message"
+            );
+        }
+
+        // Basic email validation
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            throw new functions.https.HttpsError(
+                "invalid-argument",
+                "Invalid email address format"
+            );
+        }
+
+        // Get Resend client
+        const resend = getResend();
+        if (!resend) {
+            console.error("[Support] Resend API key not configured");
+            throw new functions.https.HttpsError(
+                "failed-precondition",
+                "Email service not configured. Please contact admin."
+            );
+        }
+
+        // Format email content
+        const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }
+        .content { background: #f7fafc; padding: 30px; border-radius: 0 0 8px 8px; }
+        .field { margin-bottom: 20px; }
+        .label { font-weight: bold; color: #4a5568; margin-bottom: 5px; }
+        .value { background: white; padding: 12px; border-radius: 4px; border: 1px solid #e2e8f0; }
+        .message-box { background: white; padding: 20px; border-radius: 4px; border: 1px solid #e2e8f0; white-space: pre-wrap; }
+        .footer { margin-top: 20px; padding-top: 20px; border-top: 2px solid #e2e8f0; font-size: 12px; color: #718096; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 style="margin: 0;">🎫 Support Ticket from Web</h1>
+        </div>
+        <div class="content">
+            <div class="field">
+                <div class="label">From:</div>
+                <div class="value">${name}</div>
+            </div>
+
+            <div class="field">
+                <div class="label">Email:</div>
+                <div class="value"><a href="mailto:${email}">${email}</a></div>
+            </div>
+
+            <div class="field">
+                <div class="label">Subject:</div>
+                <div class="value">${subject}</div>
+            </div>
+
+            <div class="field">
+                <div class="label">Message:</div>
+                <div class="message-box">${message}</div>
+            </div>
+
+            <div class="footer">
+                <p><strong>Received:</strong> ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC</p>
+                <p><strong>Source:</strong> SyncFlow Web Support Form (sfweb.app/support)</p>
+                <p><em>Reply directly to ${email} to respond to this ticket.</em></p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+        `.trim();
+
+        // Send email via Resend
+        const result = await resend.emails.send({
+            from: "SyncFlow Support <noreply@resend.dev>",
+            replyTo: email,
+            to: ADMIN_EMAIL,
+            subject: `Support Ticket from Web: ${subject}`,
+            html: emailHtml,
+        });
+
+        console.log("[Support] Email sent successfully:", {
+            messageId: result.id,
+            from: email,
+            subject: subject,
+        });
+
+        return {
+            success: true,
+            messageId: result.id,
+        };
+
+    } catch (error) {
+        console.error("[Support] Failed to send email:", error);
+
+        // If already an HttpsError, rethrow it
+        if (error instanceof functions.https.HttpsError) {
+            throw error;
+        }
+
+        // Handle Resend API errors
+        if (error.message && error.message.includes("API")) {
+            throw new functions.https.HttpsError(
+                "internal",
+                "Failed to send email. Please try again later."
+            );
+        }
+
+        // Generic error
+        throw new functions.https.HttpsError(
+            "internal",
+            "An unexpected error occurred while sending your message."
+        );
+    }
+});
