@@ -129,6 +129,103 @@ struct MessageView: View {
     @State private var totalMessageCount: Int = 0
     /// Preferred phone number to send from (for multi-SIM contacts)
     @State private var preferredSendAddress: String? = nil
+    /// E2EE key sync state
+    @State private var isKeySyncInProgress: Bool = false
+    @State private var keySyncStatusMessage: String? = nil
+
+    // MARK: - E2EE Actions
+
+    private func startKeySync(userId: String, deviceId: String) {
+        isKeySyncInProgress = true
+        keySyncStatusMessage = nil
+
+        Task {
+            do {
+                try await FirebaseService.shared.requestE2eeKeySync(userId: userId, deviceId: deviceId)
+                _ = try await FirebaseService.shared.waitForE2eeKeySyncResponse(userId: userId, deviceId: deviceId)
+                await MainActor.run {
+                    keySyncStatusMessage = "Keys synced. You may need to resync messages."
+                    appState.e2eeKeyMismatch = false
+                }
+                appState.refreshE2eeKeyStatus()
+            } catch {
+                await MainActor.run {
+                    keySyncStatusMessage = "Key sync failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run {
+                isKeySyncInProgress = false
+            }
+        }
+    }
+
+    private func requestResync(userId: String) {
+        Task {
+            do {
+                try await FirebaseService.shared.requestHistorySync(userId: userId)
+                await MainActor.run {
+                    keySyncStatusMessage = "Resync requested from phone."
+                }
+            } catch {
+                await MainActor.run {
+                    keySyncStatusMessage = "Resync request failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var e2eeKeyMismatchBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundColor(.orange)
+                Text("Encryption keys changed")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+            }
+            Text(appState.e2eeKeyMismatchMessage ?? "Sync keys to restore encrypted message history.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 8) {
+                Button(isKeySyncInProgress ? "Syncing..." : "Sync Keys") {
+                    guard let userId = appState.userId,
+                          let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") else {
+                        return
+                    }
+                    startKeySync(userId: userId, deviceId: deviceId)
+                }
+                .disabled(isKeySyncInProgress)
+
+                Button("Resync Messages") {
+                    guard let userId = appState.userId else { return }
+                    requestResync(userId: userId)
+                }
+
+                Button("Dismiss") {
+                    appState.e2eeKeyMismatch = false
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+
+            if let status = keySyncStatusMessage {
+                Text(status)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(
+            Rectangle()
+                .fill(Color.orange)
+                .frame(width: 3),
+            alignment: .leading
+        )
+    }
 
     // MARK: - Constants
 
@@ -288,6 +385,14 @@ struct MessageView: View {
             Rectangle()
                 .fill(SyncFlowColors.divider)
                 .frame(height: 1)
+
+            if appState.e2eeKeyMismatch {
+                e2eeKeyMismatchBanner
+
+                Rectangle()
+                    .fill(SyncFlowColors.divider)
+                    .frame(height: 1)
+            }
 
             // Search bar
             if showSearch {
@@ -637,6 +742,7 @@ struct MessageView: View {
                 draft: messageText
             )
             applyContinuityDraftIfNeeded()
+            appState.refreshE2eeKeyStatus()
         }
         .onChange(of: conversation.address) { _ in
             appState.continuityService.publishConversation(
@@ -1859,7 +1965,7 @@ struct MessageBubble: View {
 
                         // Link previews
                         ForEach(linkPreviews) { preview in
-                            LinkPreviewCard(preview: preview)
+                            LinkPreviewCard(preview: preview, isSent: !message.isReceived)
                         }
                     } else {
                         // Use simple text for performance - only format if searching
@@ -4023,6 +4129,7 @@ struct NewMessageView: View {
 
 struct LinkPreviewCard: View {
     let preview: LinkPreview
+    let isSent: Bool
 
     @State private var previewImage: NSImage?
 
@@ -4039,11 +4146,11 @@ struct LinkPreviewCard: View {
                         .cornerRadius(8)
                 } else {
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.gray.opacity(0.2))
+                        .fill(isSent ? Color.white.opacity(0.2) : Color.gray.opacity(0.2))
                         .frame(width: 60, height: 60)
                         .overlay(
                             Image(systemName: "link")
-                                .foregroundColor(.gray)
+                                .foregroundColor(isSent ? .white.opacity(0.7) : .gray)
                         )
                 }
 
@@ -4053,7 +4160,7 @@ struct LinkPreviewCard: View {
                         Text(siteName.uppercased())
                             .font(.caption2)
                             .fontWeight(.medium)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(isSent ? .white.opacity(0.8) : .secondary)
                     }
 
                     // Title
@@ -4061,7 +4168,7 @@ struct LinkPreviewCard: View {
                         Text(title)
                             .font(.caption)
                             .fontWeight(.semibold)
-                            .foregroundColor(.primary)
+                            .foregroundColor(isSent ? .white : .primary)
                             .lineLimit(2)
                     }
 
@@ -4069,7 +4176,7 @@ struct LinkPreviewCard: View {
                     if let description = preview.description {
                         Text(description)
                             .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(isSent ? .white.opacity(0.8) : .secondary)
                             .lineLimit(2)
                     }
                 }
@@ -4077,11 +4184,11 @@ struct LinkPreviewCard: View {
                 Spacer()
             }
             .padding(10)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(isSent ? Color.white.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
             .cornerRadius(12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    .stroke(isSent ? Color.white.opacity(0.3) : Color.gray.opacity(0.2), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
