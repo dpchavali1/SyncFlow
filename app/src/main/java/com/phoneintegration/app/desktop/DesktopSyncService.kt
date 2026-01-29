@@ -258,26 +258,30 @@ class DesktopSyncService(context: Context) {
     /**
      * Get current user ID.
      *
-     * Uses the simple approach of returning currentUser.uid directly.
-     * Validation is only done during pairing to avoid hitting Firebase rate limits.
+     * Priority: Recovery Code (unified identity) > Firebase Auth
+     * This ensures contacts and data sync to the correct unified user account
+     * instead of creating data under a new Firebase anonymous auth UID.
      *
      * NOTE: ensureDeviceKeysPublished() is NOT called here anymore because it can hang
      * due to Android Keystore operations. It should only be called when needed for E2EE,
      * not on every user ID request.
      */
     suspend fun getCurrentUserId(): String {
-        // Priority 1: Use current Firebase Auth user (this is the source of truth)
-        FirebaseAuth.getInstance().currentUser?.let { return it.uid }
-
-        // Priority 2: Try AuthManager
-        authManager.getCurrentUserId()?.let { return it }
-
-        // Priority 3: Check RecoveryCodeManager (only as fallback when not signed in)
+        // Priority 1: Check RecoveryCodeManager (unified identity - consistent across devices)
         val recoveryManager = com.phoneintegration.app.auth.RecoveryCodeManager.getInstance(context)
         recoveryManager.getEffectiveUserId()?.let { recoveredUserId ->
-            FirebaseAuth.getInstance().signInAnonymously().await()
+            // Ensure Firebase auth session exists
+            if (FirebaseAuth.getInstance().currentUser == null) {
+                FirebaseAuth.getInstance().signInAnonymously().await()
+            }
             return recoveredUserId
         }
+
+        // Priority 2: Use current Firebase Auth user (fallback for non-unified accounts)
+        FirebaseAuth.getInstance().currentUser?.let { return it.uid }
+
+        // Priority 3: Try AuthManager
+        authManager.getCurrentUserId()?.let { return it }
 
         // Last resort: sign in anonymously
         val result = authManager.signInAnonymously()
