@@ -863,52 +863,52 @@ class AIAssistantService: ObservableObject {
         let currencyPatterns: [String: [NSRegularExpression]] = [
             "USD": [
                 try! NSRegularExpression(pattern: #"\$\s*([0-9,]+(?:\.\d{1,2})?)"#),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*USD"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*USD"#, options: .caseInsensitive)
             ],
             "EUR": [
                 try! NSRegularExpression(pattern: #"€\s*([0-9,]+(?:\.\d{1,2})?)"#),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*EUR"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*EUR"#, options: .caseInsensitive)
             ],
             "GBP": [
                 try! NSRegularExpression(pattern: #"£\s*([0-9,]+(?:\.\d{1,2})?)"#),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*GBP"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*GBP"#, options: .caseInsensitive)
             ],
             "JPY": [
                 try! NSRegularExpression(pattern: #"¥\s*([0-9,]+(?:\.\d{1,2})?)"#),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*JPY"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*JPY"#, options: .caseInsensitive)
             ],
             "INR": [
                 try! NSRegularExpression(pattern: #"₹\s*([0-9,]+(?:\.\d{1,2})?)"#),
-                try! NSRegularExpression(pattern: #"(?:Rs\.?|INR)\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*(?:Rs\.?|INR)"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"(?:Rs\.?|INR)\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*(?:Rs\.?|INR)"#, options: .caseInsensitive)
             ],
             "CAD": [
-                try! NSRegularExpression(pattern: #"CA\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*CAD"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"CA\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*CAD"#, options: .caseInsensitive)
             ],
             "AUD": [
-                try! NSRegularExpression(pattern: #"AU\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*AUD"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"AU\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*AUD"#, options: .caseInsensitive)
             ],
             "NZD": [
-                try! NSRegularExpression(pattern: #"NZ\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*NZD"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"NZ\$\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*NZD"#, options: .caseInsensitive)
             ],
             "CHF": [
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*CHF"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"CHF\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*CHF"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"CHF\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive)
             ],
             "SEK": [
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*SEK"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"SEK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*SEK"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"SEK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive)
             ],
             "NOK": [
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*NOK"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"NOK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*NOK"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"NOK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive)
             ],
             "DKK": [
-                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*DKK"#, options: String.CompareOptions.caseInsensitive),
-                try! NSRegularExpression(pattern: #"DKK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: String.CompareOptions.caseInsensitive)
+                try! NSRegularExpression(pattern: #"([0-9,]+(?:\.\d{1,2})?)\s*DKK"#, options: .caseInsensitive),
+                try! NSRegularExpression(pattern: #"DKK\s*([0-9,]+(?:\.\d{1,2})?)"#, options: .caseInsensitive)
             ]
         ]
 
