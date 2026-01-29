@@ -246,28 +246,18 @@ struct FeaturedDealCard: View {
     }
 
     private func openDeal() {
+        NSLog("🔵 [FeaturedDealCard] Button clicked! Deal: \(deal.title)")
+
         guard let url = deal.dealURL else {
-            print("[FeaturedDealCard] Invalid deal URL for: \(deal.title)")
+            NSLog("❌ [FeaturedDealCard] Invalid deal URL for: \(deal.title)")
             return
         }
 
-        print("[FeaturedDealCard] Opening URL: \(url.absoluteString)")
+        NSLog("🔵 [FeaturedDealCard] Opening URL: \(url.absoluteString)")
 
-        // Use the configuration-based open for better reliability
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-
-        NSWorkspace.shared.open(url, configuration: configuration) { app, error in
-            if let error = error {
-                print("[FeaturedDealCard] Failed to open URL: \(error.localizedDescription)")
-                // Fallback: try with default browser
-                DispatchQueue.main.async {
-                    NSWorkspace.shared.open(url)
-                }
-            } else {
-                print("[FeaturedDealCard] Successfully opened URL")
-            }
-        }
+        // Try simple open first
+        let success = NSWorkspace.shared.open(url)
+        NSLog("🔵 [FeaturedDealCard] Open result: \(success)")
     }
 }
 
@@ -595,28 +585,18 @@ struct DealCard: View {
     }
 
     private func openDeal() {
+        NSLog("🟢 [DealCard] Button clicked! Deal: \(deal.title)")
+
         guard let url = deal.dealURL else {
-            print("[DealCard] Invalid deal URL for: \(deal.title)")
+            NSLog("❌ [DealCard] Invalid deal URL for: \(deal.title)")
             return
         }
 
-        print("[DealCard] Opening URL: \(url.absoluteString)")
+        NSLog("🟢 [DealCard] Opening URL: \(url.absoluteString)")
 
-        // Use the configuration-based open for better reliability
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-
-        NSWorkspace.shared.open(url, configuration: configuration) { app, error in
-            if let error = error {
-                print("[DealCard] Failed to open URL: \(error.localizedDescription)")
-                // Fallback: try with default browser
-                DispatchQueue.main.async {
-                    NSWorkspace.shared.open(url)
-                }
-            } else {
-                print("[DealCard] Successfully opened URL")
-            }
-        }
+        // Try simple open first
+        let success = NSWorkspace.shared.open(url)
+        NSLog("🟢 [DealCard] Open result: \(success)")
     }
 }
 
