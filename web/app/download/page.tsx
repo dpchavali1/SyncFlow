@@ -36,84 +36,150 @@ export default function DownloadPage() {
         {/* Hero Section */}
         <div className="text-center mb-16">
           <h1 className="text-5xl font-bold mb-4 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-            Download SyncFlow for Mac
+            Download SyncFlow
           </h1>
           <p className="text-xl text-slate-600 dark:text-slate-300">
             Seamlessly sync your Android phone with your Mac
           </p>
         </div>
 
-        {/* Download Card */}
-        <div className="bg-gradient-to-br from-blue-500 to-purple-600 rounded-3xl p-1 mb-12 shadow-2xl">
-          <div className="bg-white dark:bg-slate-900 rounded-3xl p-8">
-            <div className="flex items-start gap-6">
-              {/* App Icon Placeholder */}
-              <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
-                <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-                </svg>
+        {/* Download Cards */}
+        <div className="grid md:grid-cols-2 gap-8 mb-12">
+          {/* macOS Download Card */}
+          <div className="bg-gradient-to-br from-blue-500 to-purple-600 rounded-3xl p-1 shadow-2xl">
+            <div className="bg-white dark:bg-slate-900 rounded-3xl p-8">
+              <div className="flex items-start gap-4 mb-6">
+                {/* App Icon */}
+                <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+                  <svg className="w-8 h-8 text-white" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h2 className="text-2xl font-bold mb-1 dark:text-white">macOS</h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-300">
+                    {minMacOS}
+                  </p>
+                  <p className="text-sm text-slate-600 dark:text-slate-300">
+                    Apple Silicon & Intel • {fileSize}
+                  </p>
+                </div>
               </div>
 
-              <div className="flex-1">
-                <h2 className="text-3xl font-bold mb-2 dark:text-white">SyncFlow {version}</h2>
-                <p className="text-slate-600 dark:text-slate-300 mb-6">
-                  {minMacOS} • Apple Silicon & Intel • {fileSize}
-                </p>
+              {/* Download Button */}
+              <a
+                href={`/downloads/SyncFlow-${version}.dmg`}
+                className="flex items-center justify-center gap-2 w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all duration-200"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+                </svg>
+                Download DMG
+              </a>
 
-                {/* Download Button */}
-                <a
-                  href={`/downloads/SyncFlow-${version}.dmg`}
-                  className="inline-flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl font-semibold text-lg hover:shadow-lg hover:scale-105 transition-all duration-200"
-                >
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+              {/* Checksum */}
+              <div className="mt-4 p-3 bg-slate-100 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">SHA-256:</p>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs font-mono text-slate-700 dark:text-slate-300 flex-1 truncate">
+                    {sha256}
+                  </code>
+                  <button
+                    onClick={copyChecksum}
+                    className="text-xs px-2 py-1 bg-white dark:bg-slate-700 rounded hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                  >
+                    {copied ? '✓' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Trust Badges */}
+              <div className="flex flex-wrap gap-3 mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                <div className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-400">
+                  <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                   </svg>
-                  Download for Mac
-                </a>
-
-                {/* Checksum */}
-                <div className="mt-6 p-4 bg-slate-100 dark:bg-slate-800 rounded-lg">
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">SHA-256 Checksum:</p>
-                  <div className="flex items-center gap-2">
-                    <code className="text-xs font-mono text-slate-700 dark:text-slate-300 flex-1 truncate">
-                      {sha256}
-                    </code>
-                    <button
-                      onClick={copyChecksum}
-                      className="text-xs px-3 py-1 bg-white dark:bg-slate-700 rounded hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-                    >
-                      {copied ? '✓ Copied' : 'Copy'}
-                    </button>
-                  </div>
+                  Notarized
+                </div>
+                <div className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-400">
+                  <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  Code Signed
                 </div>
               </div>
             </div>
+          </div>
 
-            {/* Trust Badges */}
-            <div className="flex flex-wrap gap-4 mt-8 pt-6 border-t border-slate-200 dark:border-slate-700">
-              <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
-                <svg className="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                </svg>
-                Notarized by Apple
+          {/* Android Download Card */}
+          <div className="bg-gradient-to-br from-green-500 to-teal-600 rounded-3xl p-1 shadow-2xl">
+            <div className="bg-white dark:bg-slate-900 rounded-3xl p-8">
+              <div className="flex items-start gap-4 mb-6">
+                {/* App Icon */}
+                <div className="w-16 h-16 bg-gradient-to-br from-green-500 to-teal-600 rounded-2xl flex items-center justify-center flex-shrink-0">
+                  <svg className="w-8 h-8 text-white" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4483-.9993.9993-.9993c.5511 0 .9993.4483.9993.9993.0001.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4483.9993.9993 0 .5511-.4483.9997-.9993.9997m11.4045-6.02l1.9973-3.4592a.416.416 0 00-.1521-.5676.416.416 0 00-.5676.1521l-2.0223 3.503C15.5902 8.2439 13.8533 7.8508 12 7.8508s-3.5902.3931-5.1367 1.0989L4.841 5.4467a.4161.4161 0 00-.5677-.1521.4157.4157 0 00-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3435-4.1021-2.6892-7.5743-6.1185-9.4396"/>
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h2 className="text-2xl font-bold mb-1 dark:text-white">Android</h2>
+                  <p className="text-sm text-slate-600 dark:text-slate-300">
+                    Android 8.0 or later
+                  </p>
+                  <p className="text-sm text-slate-600 dark:text-slate-300">
+                    All devices • {fileSize}
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
-                <svg className="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+
+              {/* Download Button */}
+              <a
+                href={`/downloads/SyncFlow-${version}.apk`}
+                className="flex items-center justify-center gap-2 w-full px-6 py-3 bg-gradient-to-r from-green-600 to-teal-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all duration-200"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
                 </svg>
-                Code Signed
+                Download APK
+              </a>
+
+              {/* Checksum */}
+              <div className="mt-4 p-3 bg-slate-100 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">SHA-256:</p>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs font-mono text-slate-700 dark:text-slate-300 flex-1 truncate">
+                    {sha256}
+                  </code>
+                  <button
+                    onClick={copyChecksum}
+                    className="text-xs px-2 py-1 bg-white dark:bg-slate-700 rounded hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                  >
+                    {copied ? '✓' : 'Copy'}
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
-                <svg className="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                </svg>
-                Privacy Focused
+
+              {/* Trust Badges */}
+              <div className="flex flex-wrap gap-3 mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                <div className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-400">
+                  <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  Code Signed
+                </div>
+                <div className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-400">
+                  <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  Privacy Focused
+                </div>
               </div>
-              <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
-                <svg className="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                </svg>
-                No Malware
+
+              {/* Installation Note */}
+              <div className="mt-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+                <p className="text-xs text-yellow-800 dark:text-yellow-300">
+                  <strong>Note:</strong> Enable "Install from unknown sources" in Android settings to install APK files.
+                </p>
               </div>
             </div>
           </div>

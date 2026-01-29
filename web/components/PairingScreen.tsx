@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { Smartphone, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
+import { Smartphone, CheckCircle, AlertCircle, RefreshCw, Download } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useAppStore } from '@/lib/store'
 import {
@@ -15,6 +15,7 @@ import {
   PairingSession,
 } from '@/lib/firebase'
 import { getDeviceId } from '@/lib/deviceId'
+import Link from 'next/link'
 
 export default function PairingScreen() {
   const router = useRouter()
@@ -290,6 +291,33 @@ export default function PairingScreen() {
               Waiting for phone approval...
             </p>
           )}
+        </div>
+
+        {/* Download Apps Section */}
+        <div className="mt-6 bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl p-1 shadow-lg">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                  <Download className="w-5 h-5 text-white" />
+                </div>
+                <div className="text-left">
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+                    Need the apps?
+                  </h3>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    Download for Mac & Android
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/download"
+                className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white text-sm font-medium rounded-lg transition-all hover:scale-105"
+              >
+                Download
+              </Link>
+            </div>
+          </div>
         </div>
       </div>
     </div>
