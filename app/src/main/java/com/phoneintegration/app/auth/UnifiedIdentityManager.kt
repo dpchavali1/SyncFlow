@@ -9,6 +9,8 @@ import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.PhoneNumberUtils
 import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.SmsRepository
+import com.phoneintegration.app.data.PreferencesManager
+import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.security.SecurityEvent
 import com.phoneintegration.app.security.SecurityEventType
 import com.phoneintegration.app.security.SecurityMonitor
@@ -32,6 +34,9 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
         private const val TAG = "UnifiedIdentityManager"
         private const val PAIRING_TOKEN_EXPIRY_MINUTES = 5L
         private const val DEVICE_HEARTBEAT_INTERVAL_MINUTES = 5L
+        private const val E2EE_KEY_WAIT_TIMEOUT_MS = 60_000L
+        private const val E2EE_KEY_RETRY_DELAY_MS = 30_000L
+        private const val E2EE_KEY_MAX_RETRIES = 5
 
         @Volatile
         private var instance: UnifiedIdentityManager? = null
@@ -405,13 +410,30 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
      * Sync recent messages to a newly paired device (optimized for performance)
      * Limits to recent conversations with reasonable message counts
      */
-    private suspend fun syncLast30DaysMessages(userId: String, deviceId: String, deviceName: String) {
+    private suspend fun syncLast30DaysMessages(userId: String, deviceId: String, deviceName: String, attempt: Int = 0) {
         try {
             Log.d(TAG, "Starting optimized message sync to device: $deviceId ($deviceName)")
 
             val context = this@UnifiedIdentityManager.context
             val smsRepository = SmsRepository(context)
             val database = FirebaseDatabase.getInstance()
+            val preferencesManager = PreferencesManager(context)
+            val e2eeEnabled = preferencesManager.e2eeEnabled.value
+
+            if (e2eeEnabled) {
+                val keysReady = waitForDeviceKey(userId, deviceId, E2EE_KEY_WAIT_TIMEOUT_MS)
+                if (!keysReady) {
+                    Log.w(TAG, "E2EE key not available for device $deviceId, delaying initial sync (attempt ${attempt + 1})")
+                    updateSyncStatus(userId, deviceId, "waiting_for_keys", 0, 0)
+                    if (attempt < E2EE_KEY_MAX_RETRIES - 1) {
+                        scope.launch {
+                            delay(E2EE_KEY_RETRY_DELAY_MS)
+                            syncLast30DaysMessages(userId, deviceId, deviceName, attempt + 1)
+                        }
+                    }
+                    return
+                }
+            }
 
             // Update sync status
             updateSyncStatus(userId, deviceId, "starting", 0, 0)
@@ -451,8 +473,10 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
 
             val totalConversations = topConversations.size
             var processedConversations = 0
+            val allMessagesToSync = mutableListOf<SmsMessage>()
 
             // Sync each conversation (limit messages per conversation)
+            val desktopSyncService = DesktopSyncService(context)
             for ((conversationKey, conversationMessages) in topConversations) {
                 try {
                     processedConversations++
@@ -462,67 +486,28 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
                         .sortedBy { it.date }
                         .takeLast(50) // Keep most recent 50 messages per conversation
 
-                    // Create/update conversation document
+                    val firstMessage = sortedMessages.firstOrNull()
+                    val lastMessage = sortedMessages.lastOrNull()
+
+                    // Create/update conversation document (metadata only if E2EE enabled)
+                    val conversationData = mapOf(
+                        "id" to conversationKey,
+                        "displayName" to (firstMessage?.address ?: conversationKey),
+                        "lastMessage" to if (e2eeEnabled) "[Encrypted]" else (lastMessage?.body ?: ""),
+                        "lastMessageTime" to (lastMessage?.date ?: System.currentTimeMillis()),
+                        "messageCount" to sortedMessages.size,
+                        "updatedAt" to System.currentTimeMillis(),
+                        "syncedAt" to System.currentTimeMillis(),
+                        "lastMessageEncrypted" to e2eeEnabled
+                    )
+
                     val conversationRef = database.getReference("users")
                         .child(userId)
                         .child("conversations")
                         .child(conversationKey)
-
-                    val firstMessage = sortedMessages.firstOrNull()
-                    val lastMessage = sortedMessages.lastOrNull()
-
-                    val conversationData = mapOf(
-                        "id" to conversationKey,
-                        "displayName" to (firstMessage?.address ?: conversationKey),
-                        "lastMessage" to (lastMessage?.body ?: ""),
-                        "lastMessageTime" to (lastMessage?.date ?: System.currentTimeMillis()),
-                        "messageCount" to sortedMessages.size,
-                        "updatedAt" to System.currentTimeMillis(),
-                        "syncedAt" to System.currentTimeMillis()
-                    )
-
                     conversationRef.setValue(conversationData).await()
 
-                    // Sync individual messages in batches to avoid overwhelming Firebase
-                    val batchSize = 10
-                    for (batch in sortedMessages.chunked(batchSize)) {
-                        val batchPromises = batch.map { message ->
-                            try {
-                                val messageData = mapOf(
-                                    "id" to message.id.toString(),
-                                    "address" to message.address,
-                                    "body" to (message.body ?: ""),
-                                    "date" to message.date,
-                                    "type" to message.type,
-                                    "timestamp" to ServerValue.TIMESTAMP,
-                                    "conversationId" to conversationKey,
-                                    "isMms" to false,
-                                    "read" to true,
-                                    "syncedAt" to System.currentTimeMillis()
-                                )
-
-                                val messageRef = database.getReference("users")
-                                    .child(userId)
-                                    .child("messages")
-                                    .child(message.id.toString())
-
-                                messageRef.setValue(messageData).await()
-                                syncedCount++
-                                updateSyncStatus(userId, deviceId, "syncing",
-                                    syncedCount, totalConversations * 50) // Estimate
-
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to sync message ${message.id}", e)
-                                errorCount++
-                            }
-                        }
-
-                        // Wait for batch to complete
-                        batchPromises.forEach { it }
-
-                        // Small delay between batches to prevent overwhelming
-                        kotlinx.coroutines.delay(100)
-                    }
+                    allMessagesToSync.addAll(sortedMessages)
 
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to sync conversation $conversationKey", e)
@@ -530,8 +515,38 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
                 }
             }
 
+            if (allMessagesToSync.isEmpty()) {
+                Log.d(TAG, "No messages to sync after filtering")
+                updateSyncStatus(userId, deviceId, "completed", 0, 0)
+                return
+            }
+
+            var totalCount = allMessagesToSync.size
+
+            desktopSyncService.syncMessages(
+                messages = allMessagesToSync,
+                skipAttachments = false
+            ) { synced, total ->
+                syncedCount = synced
+                totalCount = total
+                scope.launch {
+                    updateSyncStatus(
+                        userId,
+                        deviceId,
+                        "syncing",
+                        synced,
+                        total
+                    )
+                }
+            }
+
+            if (totalCount == 0) {
+                totalCount = syncedCount
+            }
+            errorCount += (totalCount - syncedCount).coerceAtLeast(0)
+
             // Mark sync as completed
-            updateSyncStatus(userId, deviceId, "completed", syncedCount, syncedCount)
+            updateSyncStatus(userId, deviceId, "completed", syncedCount, totalCount)
 
             Log.d(TAG, "Message sync completed for device: $deviceId - Synced: $syncedCount, Errors: $errorCount, Conversations: $processedConversations")
 
@@ -543,6 +558,28 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
                 Log.e(TAG, "Failed to update sync status after error", e2)
             }
         }
+    }
+
+    private suspend fun waitForDeviceKey(userId: String, deviceId: String, timeoutMs: Long): Boolean {
+        val keyRef = database.getReference("e2ee_keys")
+            .child(userId)
+            .child(deviceId)
+            .child("publicKeyX963")
+
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            try {
+                val snapshot = keyRef.get().await()
+                val key = snapshot.getValue(String::class.java)
+                if (!key.isNullOrBlank()) {
+                    return true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error checking device key for $deviceId: ${e.message}")
+            }
+            delay(2000)
+        }
+        return false
     }
 
     /**

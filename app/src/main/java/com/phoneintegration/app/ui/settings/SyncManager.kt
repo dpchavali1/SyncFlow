@@ -6,15 +6,12 @@ import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.desktop.DesktopSyncService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 
 /**
  * Singleton manager for message history sync.
@@ -22,7 +19,9 @@ import kotlinx.coroutines.withTimeout
  */
 object SyncManager {
     private const val TAG = "SyncManager"
-    private const val SYNC_TIMEOUT_MS = 15_000L // 15 seconds per message
+    private const val ESTIMATE_OVERHEAD_BYTES = 220L
+    private const val ESTIMATE_MIN_MSGS_PER_MIN = 250.0
+    private const val ESTIMATE_MAX_MSGS_PER_MIN = 500.0
 
     data class SyncState(
         val isSyncing: Boolean = false,
@@ -32,6 +31,14 @@ object SyncManager {
         val totalCount: Int = 0,
         val isComplete: Boolean = false,
         val error: String? = null
+    )
+
+    data class SyncEstimate(
+        val days: Int,
+        val totalMessages: Int,
+        val estimatedBytes: Long,
+        val minMinutes: Int,
+        val maxMinutes: Int
     )
 
     private val _syncState = MutableStateFlow(SyncState())
@@ -94,50 +101,26 @@ object SyncManager {
                     totalCount = totalCount
                 )
 
-                // Sync all messages (SMS and MMS)
+                Log.d(TAG, "Starting sync: $totalCount total messages (including MMS attachments)")
+
                 var syncedCount = 0
-                var errorCount = 0
-                val smsCount = messages.count { !it.isMms }
-                val mmsCount = messages.count { it.isMms }
 
-                Log.d(TAG, "Starting sync: $smsCount SMS + $mmsCount MMS = $totalCount total")
-
-                for ((index, message) in messages.withIndex()) {
-                    try {
-                        // Use NonCancellable to ensure sync completes
-                        withContext(NonCancellable + Dispatchers.IO) {
-                            withTimeout(SYNC_TIMEOUT_MS) {
-                                desktopSyncService!!.syncMessage(
-                                    message = message,
-                                    skipAttachments = true // Skip attachments for history sync
-                                )
-                            }
-                        }
-                        syncedCount++
-                    } catch (e: TimeoutCancellationException) {
-                        errorCount++
-                        Log.w(TAG, "Timeout syncing message ${message.id} (${if (message.isMms) "MMS" else "SMS"})")
-                    } catch (e: Exception) {
-                        errorCount++
-                        Log.w(TAG, "Failed to sync message ${message.id}: ${e.message}")
-                    }
-
-                    // Update UI every 10 messages or on last message
-                    if ((index + 1) % 10 == 0 || index == messages.lastIndex) {
-                        _syncState.value = _syncState.value.copy(
-                            syncedCount = syncedCount,
-                            progress = (index + 1).toFloat() / totalCount.toFloat(),
-                            status = "Syncing... ${index + 1} / $totalCount"
-                        )
-                        Log.d(TAG, "Progress: ${index + 1}/$totalCount (synced: $syncedCount, errors: $errorCount)")
-                    }
+                desktopSyncService!!.syncMessages(
+                    messages = messages,
+                    skipAttachments = false
+                ) { synced, total ->
+                    syncedCount = synced
+                    val progress = if (total > 0) synced.toFloat() / total.toFloat() else 0f
+                    _syncState.value = _syncState.value.copy(
+                        syncedCount = synced,
+                        totalCount = total,
+                        progress = progress,
+                        status = "Syncing... $synced / $total"
+                    )
                 }
 
-                Log.i(TAG, "Sync completed: $syncedCount messages synced, $errorCount errors")
-                val statusMsg = buildString {
-                    append("Completed! Synced $syncedCount messages")
-                    if (errorCount > 0) append(" ($errorCount failed)")
-                }
+                Log.i(TAG, "Sync completed: $syncedCount messages synced")
+                val statusMsg = "Completed! Synced $syncedCount messages"
                 _syncState.value = _syncState.value.copy(
                     isSyncing = false,
                     syncedCount = syncedCount,
@@ -155,6 +138,31 @@ object SyncManager {
                 )
             }
         }
+    }
+
+    suspend fun estimateSync(context: Context, days: Int): SyncEstimate = withContext(Dispatchers.IO) {
+        ensureInitialized(context)
+        val daysToLoad = if (days <= 0) 3650 else days
+        val messages = smsRepository!!.getMessagesFromLastDays(daysToLoad)
+        val totalMessages = messages.size
+
+        var bodyBytes = 0L
+        for (message in messages) {
+            bodyBytes += message.body.toByteArray(Charsets.UTF_8).size.toLong()
+        }
+
+        val estimatedBytes = bodyBytes + (totalMessages * ESTIMATE_OVERHEAD_BYTES)
+
+        val minMinutes = if (totalMessages == 0) 0 else kotlin.math.ceil(totalMessages / ESTIMATE_MAX_MSGS_PER_MIN).toInt()
+        val maxMinutes = if (totalMessages == 0) 0 else kotlin.math.ceil(totalMessages / ESTIMATE_MIN_MSGS_PER_MIN).toInt()
+
+        SyncEstimate(
+            days = days,
+            totalMessages = totalMessages,
+            estimatedBytes = estimatedBytes,
+            minMinutes = minMinutes,
+            maxMinutes = maxMinutes
+        )
     }
 
     /**
