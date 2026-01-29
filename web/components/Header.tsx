@@ -34,10 +34,11 @@ export default function Header() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => router.push('/download')}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium transition-all hover:scale-105 shadow-sm"
             title="Download Apps"
           >
-            <Download className="w-5 h-5" />
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline text-sm">Download</span>
           </button>
 
           <button

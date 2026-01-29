@@ -186,25 +186,84 @@ export default function PairingScreen() {
           )}
 
           {step === 'waiting' && (
-            <div className="text-center">
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-1">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-1 text-center">
                 Scan to Pair
               </h2>
-              <p className="text-gray-600 dark:text-gray-400 text-sm mb-4">
+              <p className="text-gray-600 dark:text-gray-400 text-sm mb-4 text-center">
                 Scan this QR code with your Android device and approve pairing
               </p>
 
-              {pairingSession?.qrPayload && (
-                <div
-                  id="qr-code-section"
-                  className="bg-white p-5 rounded-xl inline-block mb-4 shadow-inner border border-gray-200"
-                >
-                  {/* Larger QR (220px) with high error correction for better scanning */}
-                  <QRCodeSVG value={pairingSession.qrPayload} size={220} level="H" includeMargin={true} />
-                  <p className="text-xs text-green-600 mt-2 font-medium">Ready to scan</p>
-                </div>
-              )}
+              {/* QR Code and Download Section Side by Side */}
+              <div className="flex flex-col md:flex-row gap-4 items-start justify-center mb-4">
+                {/* QR Code */}
+                {pairingSession?.qrPayload && (
+                  <div className="flex-shrink-0 mx-auto md:mx-0">
+                    <div
+                      id="qr-code-section"
+                      className="bg-white p-5 rounded-xl shadow-inner border border-gray-200"
+                    >
+                      {/* Larger QR (220px) with high error correction for better scanning */}
+                      <QRCodeSVG value={pairingSession.qrPayload} size={220} level="H" includeMargin={true} />
+                      <p className="text-xs text-green-600 mt-2 font-medium text-center">Ready to scan</p>
+                    </div>
+                  </div>
+                )}
 
+                {/* Download Apps Section */}
+                <div className="flex-1 max-w-sm mx-auto md:mx-0">
+                  <div className="bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl p-1 shadow-lg h-full">
+                    <div className="bg-white dark:bg-gray-800 rounded-lg p-4 h-full flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-start gap-3 mb-3">
+                          <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center flex-shrink-0">
+                            <Download className="w-6 h-6 text-white" />
+                          </div>
+                          <div>
+                            <h3 className="text-base font-bold text-gray-900 dark:text-white mb-1">
+                              Download Apps
+                            </h3>
+                            <p className="text-xs text-gray-600 dark:text-gray-400">
+                              Get SyncFlow for Mac & Android
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 mb-4">
+                          <div className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+                            <svg className="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                            </svg>
+                            macOS 13+ (Apple Silicon & Intel)
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+                            <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                            </svg>
+                            Android 8.0+ (All devices)
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+                            <svg className="w-4 h-4 text-purple-500" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                            </svg>
+                            Code signed & secure
+                          </div>
+                        </div>
+                      </div>
+
+                      <Link
+                        href="/download"
+                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white text-sm font-semibold rounded-lg transition-all hover:scale-105 shadow-md"
+                      >
+                        <Download className="w-4 h-4" />
+                        Download Now
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Device Info and Refresh Button */}
               <div className="space-y-3">
                 <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3">
                   <p className="text-sm text-gray-700 dark:text-gray-300">
@@ -291,33 +350,6 @@ export default function PairingScreen() {
               Waiting for phone approval...
             </p>
           )}
-        </div>
-
-        {/* Download Apps Section */}
-        <div className="mt-6 bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl p-1 shadow-lg">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
-                  <Download className="w-5 h-5 text-white" />
-                </div>
-                <div className="text-left">
-                  <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
-                    Need the apps?
-                  </h3>
-                  <p className="text-xs text-gray-600 dark:text-gray-400">
-                    Download for Mac & Android
-                  </p>
-                </div>
-              </div>
-              <Link
-                href="/download"
-                className="px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white text-sm font-medium rounded-lg transition-all hover:scale-105"
-              >
-                Download
-              </Link>
-            </div>
-          </div>
         </div>
       </div>
     </div>
