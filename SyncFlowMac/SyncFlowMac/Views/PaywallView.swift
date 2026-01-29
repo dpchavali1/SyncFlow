@@ -80,7 +80,7 @@ struct PaywallView: View {
                 .font(.system(size: 40))
                 .foregroundStyle(
                     LinearGradient(
-                        colors: [.blue, .purple],
+                        colors: [SyncFlowColors.adaptiveBlue, SyncFlowColors.adaptivePurple],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -93,18 +93,18 @@ struct PaywallView: View {
             if case .trial(let days) = subscriptionService.subscriptionStatus {
                 Text("\(days) days left in your free trial")
                     .font(.subheadline)
-                    .foregroundColor(.orange)
+                    .foregroundColor(SyncFlowColors.adaptiveOrange)
             } else if case .expired = subscriptionService.subscriptionStatus {
                 Text("Your trial has expired")
                     .font(.subheadline)
-                    .foregroundColor(.red)
+                    .foregroundColor(SyncFlowColors.adaptiveRed)
             }
         }
         .padding(.bottom, 20)
         .frame(maxWidth: .infinity)
         .background(
             LinearGradient(
-                colors: [Color.blue.opacity(0.1), Color.purple.opacity(0.1)],
+                colors: [SyncFlowColors.adaptiveBlue.opacity(0.1), SyncFlowColors.adaptivePurple.opacity(0.1)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -175,7 +175,7 @@ struct PaywallView: View {
             .padding(.vertical, 14)
             .background(
                 LinearGradient(
-                    colors: [.blue, .purple],
+                    colors: [SyncFlowColors.adaptiveBlue, SyncFlowColors.adaptivePurple],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
@@ -247,7 +247,7 @@ struct FeatureRow: View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 14))
-                .foregroundColor(.blue)
+                .foregroundColor(SyncFlowColors.adaptiveBlue)
                 .frame(width: 24)
 
             Text(text)
@@ -256,7 +256,7 @@ struct FeatureRow: View {
             Spacer()
 
             Image(systemName: "checkmark.circle.fill")
-                .foregroundColor(.green)
+                .foregroundColor(SyncFlowColors.adaptiveGreen)
                 .font(.system(size: 14))
         }
     }
@@ -303,12 +303,12 @@ struct PricingOptionCard: View {
                 // Selection indicator
                 ZStack {
                     Circle()
-                        .stroke(isSelected ? Color.blue : Color.gray.opacity(0.3), lineWidth: 2)
+                        .stroke(isSelected ? SyncFlowColors.adaptiveBlue : SyncFlowColors.adaptiveGray.opacity(0.3), lineWidth: 2)
                         .frame(width: 22, height: 22)
 
                     if isSelected {
                         Circle()
-                            .fill(Color.blue)
+                            .fill(SyncFlowColors.adaptiveBlue)
                             .frame(width: 14, height: 14)
                     }
                 }
@@ -327,7 +327,7 @@ struct PricingOptionCard: View {
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 2)
                                 .background(
-                                    isBestValue ? Color.orange : Color.green
+                                    isBestValue ? SyncFlowColors.adaptiveOrange : SyncFlowColors.adaptiveGreen
                                 )
                                 .cornerRadius(4)
                         }
@@ -344,16 +344,16 @@ struct PricingOptionCard: View {
                 Text(product.displayPrice)
                     .font(.title2)
                     .fontWeight(.bold)
-                    .foregroundColor(isSelected ? .blue : .primary)
+                    .foregroundColor(isSelected ? SyncFlowColors.adaptiveBlue : .primary)
             }
             .padding(16)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(isSelected ? Color.blue.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
+                    .fill(isSelected ? SyncFlowColors.adaptiveBlue.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 2)
+                    .stroke(isSelected ? SyncFlowColors.adaptiveBlue : Color.clear, lineWidth: 2)
             )
         }
         .buttonStyle(.plain)
@@ -387,7 +387,7 @@ struct SubscriptionStatusBanner: View {
     private func trialBanner(daysRemaining: Int) -> some View {
         HStack {
             Image(systemName: "clock.fill")
-                .foregroundColor(.orange)
+                .foregroundColor(SyncFlowColors.adaptiveOrange)
 
             Text("\(daysRemaining) days left in trial")
                 .font(.subheadline)
@@ -401,14 +401,14 @@ struct SubscriptionStatusBanner: View {
             .controlSize(.small)
         }
         .padding(12)
-        .background(Color.orange.opacity(0.1))
+        .background(SyncFlowColors.adaptiveOrange.opacity(0.1))
         .cornerRadius(8)
     }
 
     private var expiredBanner: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.red)
+                .foregroundColor(SyncFlowColors.adaptiveRed)
 
             Text("Trial expired - Subscribe to continue")
                 .font(.subheadline)
@@ -422,14 +422,14 @@ struct SubscriptionStatusBanner: View {
             .controlSize(.small)
         }
         .padding(12)
-        .background(Color.red.opacity(0.1))
+        .background(SyncFlowColors.adaptiveRed.opacity(0.1))
         .cornerRadius(8)
     }
 
     private var notSubscribedBanner: some View {
         HStack {
             Image(systemName: "sparkles")
-                .foregroundColor(.blue)
+                .foregroundColor(SyncFlowColors.adaptiveBlue)
 
             Text("Start your free 7-day trial")
                 .font(.subheadline)
@@ -443,7 +443,7 @@ struct SubscriptionStatusBanner: View {
             .controlSize(.small)
         }
         .padding(12)
-        .background(Color.blue.opacity(0.1))
+        .background(SyncFlowColors.adaptiveBlue.opacity(0.1))
         .cornerRadius(8)
     }
 }

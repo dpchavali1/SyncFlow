@@ -12,6 +12,13 @@ import AppKit
 
 struct SyncFlowColors {
 
+    /// Gets the current color scheme dynamically
+    /// This ensures we always check the latest appearance state
+    private static var currentColorScheme: ColorScheme {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark ? .dark : .light
+    }
+
     // ============================================
     // Brand Colors - Modern Tech Palette
     // ============================================
@@ -164,19 +171,19 @@ struct SyncFlowColors {
 
     // Special Message Types
     static var otpBubble: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "1E3A5F")
             : Color(hex: "E3F2FD")
     }
 
     static var transactionBubble: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "1B3D1E")
             : Color(hex: "E8F5E9")
     }
 
     static var alertBubble: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "3D2E1B")
             : Color(hex: "FFF3E0")
     }
@@ -190,31 +197,31 @@ struct SyncFlowColors {
     // ============================================
 
     static var background: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "0B141A")
             : Color(nsColor: .windowBackgroundColor)
     }
 
     static var surface: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "111B21")
             : Color(nsColor: .controlBackgroundColor)
     }
 
     static var surfaceSecondary: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "202C33")
             : Color(hex: "F8FAFC")
     }
 
     static var surfaceTertiary: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "1F2C34")
             : Color(hex: "F1F5F9")
     }
 
     static var surfaceElevated: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "1F2C34")
             : Color(hex: "FFFFFF")
     }
@@ -225,31 +232,31 @@ struct SyncFlowColors {
             return Color(hex: hex)
         }
         // Return theme-appropriate default instead of system windowBackgroundColor
-        return colorScheme == .dark
+        return currentColorScheme == .dark
             ? Color(hex: "070E13")
             : Color(hex: "F8FAFC")
     }
 
     static var sidebarBackground: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "111B21")
             : Color(hex: "FFFFFF")
     }
 
     static var sidebarRailBackground: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "0B141A")
             : Color(hex: "F2F4F7")
     }
 
     static var chatHeaderBackground: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "202C33")
             : Color(hex: "F2F4F7")
     }
 
     static var divider: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "26353D")
             : Color(hex: "E5E7EB")
     }
@@ -279,7 +286,7 @@ struct SyncFlowColors {
     // ============================================
 
     static var border: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color(hex: "3C4E60")
             : Color(hex: "D0D4D8")
     }
@@ -293,13 +300,13 @@ struct SyncFlowColors {
     // ============================================
 
     static var hover: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color.white.opacity(0.08)
             : Color.black.opacity(0.04)
     }
 
     static var pressed: Color {
-        colorScheme == .dark
+        currentColorScheme == .dark
             ? Color.white.opacity(0.12)
             : Color.black.opacity(0.08)
     }
@@ -327,6 +334,89 @@ struct SyncFlowColors {
     static let callMuted = Color(hex: "F59E0B")    // Modern amber
     static let callBackground = Color(hex: "0F0F23") // Deep dark blue
     static let callRecording = Color(hex: "F97316") // Modern orange
+
+    // ============================================
+    // Additional Semantic Colors (Dark/Light Adaptive)
+    // ============================================
+
+    // Promotion badge color
+    static let promotionAccent = Color(hex: "7B1FA2") // Purple
+
+    // SIM badge colors - work well in both modes
+    static let simSlot1 = Color(hex: "1976D2")  // Blue
+    static let simSlot2 = Color(hex: "7B1FA2")  // Purple
+    static let simSlot3 = Color(hex: "00796B")  // Teal
+
+    // Error variants for button states
+    static let errorDark = Color(hex: "B91C1C") // Darker red for hover
+
+    // ============================================
+    // Adaptive Standard Colors (Replace hardcoded)
+    // These provide proper dark/light mode support
+    // ============================================
+
+    /// Blue color that adapts to dark/light mode
+    static var adaptiveBlue: Color {
+        currentColorScheme == .dark ? Color(hex: "60A5FA") : Color(hex: "2563EB")
+    }
+
+    /// Green color that adapts to dark/light mode
+    static var adaptiveGreen: Color {
+        currentColorScheme == .dark ? Color(hex: "34D399") : Color(hex: "059669")
+    }
+
+    /// Red color that adapts to dark/light mode
+    static var adaptiveRed: Color {
+        currentColorScheme == .dark ? Color(hex: "F87171") : Color(hex: "DC2626")
+    }
+
+    /// Orange color that adapts to dark/light mode
+    static var adaptiveOrange: Color {
+        currentColorScheme == .dark ? Color(hex: "FBBF24") : Color(hex: "D97706")
+    }
+
+    /// Purple color that adapts to dark/light mode
+    static var adaptivePurple: Color {
+        currentColorScheme == .dark ? Color(hex: "A78BFA") : Color(hex: "7C3AED")
+    }
+
+    /// Indigo color that adapts to dark/light mode
+    static var adaptiveIndigo: Color {
+        currentColorScheme == .dark ? Color(hex: "818CF8") : Color(hex: "4F46E5")
+    }
+
+    /// Cyan color that adapts to dark/light mode
+    static var adaptiveCyan: Color {
+        currentColorScheme == .dark ? Color(hex: "22D3EE") : Color(hex: "0891B2")
+    }
+
+    /// Teal color that adapts to dark/light mode
+    static var adaptiveTeal: Color {
+        currentColorScheme == .dark ? Color(hex: "2DD4BF") : Color(hex: "0D9488")
+    }
+
+    /// Gray color that adapts to dark/light mode
+    static var adaptiveGray: Color {
+        currentColorScheme == .dark ? Color(hex: "9CA3AF") : Color(hex: "6B7280")
+    }
+
+    // ============================================
+    // Featured/Banner Gradient Colors
+    // ============================================
+
+    /// Dark gradient start for featured banners
+    static var featuredGradientStart: Color {
+        currentColorScheme == .dark
+            ? Color(hex: "1E1B4B")  // Dark purple
+            : Color(hex: "312E81")  // Indigo
+    }
+
+    /// Dark gradient end for featured banners
+    static var featuredGradientEnd: Color {
+        currentColorScheme == .dark
+            ? Color(hex: "3D1E36")  // Dark rose
+            : Color(hex: "4C1D95")  // Purple
+    }
 
     // ============================================
     // Helper

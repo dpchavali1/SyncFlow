@@ -151,7 +151,7 @@ struct AIAssistantView: View {
             ZStack {
                 Circle()
                     .fill(LinearGradient(
-                        colors: [.blue, .purple],
+                        colors: [SyncFlowColors.adaptiveBlue, SyncFlowColors.adaptivePurple],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ))
@@ -185,9 +185,9 @@ struct AIAssistantView: View {
                 } label: {
                     Image(systemName: "plus.message")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.blue)
+                        .foregroundColor(SyncFlowColors.adaptiveBlue)
                         .frame(width: 28, height: 28)
-                        .background(Color.blue.opacity(0.1))
+                        .background(SyncFlowColors.adaptiveBlue.opacity(0.1))
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -220,7 +220,7 @@ struct AIAssistantView: View {
             HStack {
                 HStack(spacing: 8) {
                     Image(systemName: "chart.line.uptrend.xyaxis")
-                        .foregroundColor(.blue)
+                        .foregroundColor(SyncFlowColors.adaptiveBlue)
                     Text("This Month")
                         .font(.headline)
                 }
@@ -261,7 +261,7 @@ struct AIAssistantView: View {
                                 Text("\(String(format: "%.0f", abs(digest.spendingChange)))% vs last month")
                                     .font(.caption)
                             }
-                            .foregroundColor(digest.spendingChange > 0 ? .red : .green)
+                            .foregroundColor(digest.spendingChange > 0 ? SyncFlowColors.adaptiveRed : SyncFlowColors.adaptiveGreen)
                         } else {
                             Text("\(digest.transactionCount) transactions")
                                 .font(.caption)
@@ -308,7 +308,7 @@ struct AIAssistantView: View {
         .padding()
         .background(
             LinearGradient(
-                colors: [Color.blue.opacity(0.1), Color.purple.opacity(0.1)],
+                colors: [SyncFlowColors.adaptiveBlue.opacity(0.1), SyncFlowColors.adaptivePurple.opacity(0.1)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -316,7 +316,7 @@ struct AIAssistantView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.blue.opacity(0.2), lineWidth: 1)
+                .stroke(SyncFlowColors.adaptiveBlue.opacity(0.2), lineWidth: 1)
         )
         .padding(.horizontal)
         .onAppear {
@@ -353,7 +353,7 @@ struct AIAssistantView: View {
             ZStack {
                 Circle()
                     .fill(LinearGradient(
-                        colors: [.blue.opacity(0.2), .purple.opacity(0.2)],
+                        colors: [SyncFlowColors.adaptiveBlue.opacity(0.2), SyncFlowColors.adaptivePurple.opacity(0.2)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ))
@@ -361,7 +361,7 @@ struct AIAssistantView: View {
 
                 Text("AI")
                     .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(.blue)
+                    .foregroundColor(SyncFlowColors.adaptiveBlue)
             }
 
             Text("How can I help you?")
@@ -473,7 +473,7 @@ struct AIAssistantView: View {
         ZStack {
             Circle()
                 .fill(LinearGradient(
-                    colors: [.blue, .purple],
+                    colors: [SyncFlowColors.adaptiveBlue, SyncFlowColors.adaptivePurple],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 ))
@@ -489,12 +489,12 @@ struct AIAssistantView: View {
     private var userAvatar: some View {
         ZStack {
             Circle()
-                .fill(Color.gray.opacity(0.3))
+                .fill(SyncFlowColors.adaptiveGray.opacity(0.3))
                 .frame(width: 28, height: 28)
 
             Image(systemName: "person.fill")
                 .font(.system(size: 12))
-                .foregroundColor(.gray)
+                .foregroundColor(SyncFlowColors.adaptiveGray)
         }
     }
 
@@ -506,7 +506,7 @@ struct AIAssistantView: View {
             .font(.body)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(isUser ? Color.blue : Color(NSColor.controlBackgroundColor))
+            .background(isUser ? SyncFlowColors.primary : Color(NSColor.controlBackgroundColor))
             .foregroundColor(isUser ? .white : .primary)
             .clipShape(RoundedRectangle(cornerRadius: 16))
     }
@@ -528,7 +528,7 @@ struct AIAssistantView: View {
                 } label: {
                     Image(systemName: copiedResponse ? "checkmark" : "doc.on.doc")
                         .font(.caption)
-                        .foregroundColor(copiedResponse ? .green : .secondary)
+                        .foregroundColor(copiedResponse ? SyncFlowColors.adaptiveGreen : .secondary)
                 }
                 .buttonStyle(.plain)
                 .help("Copy to clipboard")
@@ -594,7 +594,7 @@ struct AIAssistantView: View {
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.1))
+                    .background(SyncFlowColors.adaptiveBlue.opacity(0.1))
                     .clipShape(Capsule())
             }
 
@@ -635,7 +635,7 @@ struct AIAssistantView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Image(systemName: bill.billType.icon)
-                            .foregroundColor(bill.isOverdue ? .red : bill.isDueSoon ? .orange : .blue)
+                            .foregroundColor(bill.isOverdue ? SyncFlowColors.adaptiveRed : bill.isDueSoon ? SyncFlowColors.adaptiveOrange : SyncFlowColors.adaptiveBlue)
                             .frame(width: 24)
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -647,7 +647,7 @@ struct AIAssistantView: View {
                                 if let dueDate = bill.formattedDueDate {
                                     Text("Due: \(dueDate)")
                                         .font(.caption)
-                                        .foregroundColor(bill.isOverdue ? .red : .secondary)
+                                        .foregroundColor(bill.isOverdue ? SyncFlowColors.adaptiveRed : .secondary)
                                 }
 
                                 Text(formatRelativeDate(bill.messageDate))
@@ -727,7 +727,7 @@ struct AIAssistantView: View {
                                 .fontDesign(.monospaced)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.gray.opacity(0.1))
+                                .background(SyncFlowColors.adaptiveGray.opacity(0.1))
                                 .clipShape(Capsule())
                         }
                     }
@@ -759,7 +759,7 @@ struct AIAssistantView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Image(systemName: "creditcard.fill")
-                            .foregroundColor(.blue)
+                            .foregroundColor(SyncFlowColors.adaptiveBlue)
                             .frame(width: 24)
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -782,7 +782,7 @@ struct AIAssistantView: View {
                             Text(balance.formattedBalance ?? "")
                                 .font(.title3)
                                 .fontWeight(.semibold)
-                                .foregroundColor(.green)
+                                .foregroundColor(SyncFlowColors.adaptiveGreen)
                         } else {
                             Text("--")
                                 .font(.subheadline)
@@ -807,7 +807,7 @@ struct AIAssistantView: View {
             if withAmounts.isEmpty && !balances.isEmpty {
                 Text("Could not extract exact balance amounts from messages")
                     .font(.caption)
-                    .foregroundColor(.orange)
+                    .foregroundColor(SyncFlowColors.adaptiveOrange)
                     .padding(.top, 4)
             }
         }
@@ -838,10 +838,10 @@ struct AIAssistantView: View {
                     if otp.isExpired {
                         Text("Expired")
                             .font(.caption2)
-                            .foregroundColor(.red)
+                            .foregroundColor(SyncFlowColors.adaptiveRed)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.red.opacity(0.1))
+                            .background(SyncFlowColors.adaptiveRed.opacity(0.1))
                             .clipShape(Capsule())
                     }
 
@@ -871,7 +871,7 @@ struct AIAssistantView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Image(systemName: txn.category.icon)
-                            .foregroundColor(.blue)
+                            .foregroundColor(SyncFlowColors.adaptiveBlue)
                             .frame(width: 24)
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -889,7 +889,7 @@ struct AIAssistantView: View {
                         Text(txn.formattedAmount)
                             .font(.subheadline)
                             .fontWeight(.medium)
-                            .foregroundColor(.red)
+                            .foregroundColor(SyncFlowColors.adaptiveRed)
                     }
 
                     // Show message preview when merchant is unknown
@@ -935,7 +935,7 @@ struct AIAssistantView: View {
                 Spacer()
                 Image(systemName: "repeat")
                     .font(.title2)
-                    .foregroundColor(.indigo)
+                    .foregroundColor(SyncFlowColors.adaptiveIndigo)
             }
 
             Divider()
@@ -943,7 +943,7 @@ struct AIAssistantView: View {
             ForEach(recurring.prefix(6)) { expense in
                 HStack {
                     Image(systemName: "repeat")
-                        .foregroundColor(.indigo)
+                        .foregroundColor(SyncFlowColors.adaptiveIndigo)
                         .frame(width: 24)
 
                     VStack(alignment: .leading, spacing: 2) {
@@ -991,10 +991,10 @@ struct AIAssistantView: View {
                         Text("\(String(format: "%.1f", abs(digest.spendingChange)))%")
                     }
                     .font(.caption)
-                    .foregroundColor(digest.spendingChange > 0 ? .red : .green)
+                    .foregroundColor(digest.spendingChange > 0 ? SyncFlowColors.adaptiveRed : SyncFlowColors.adaptiveGreen)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background((digest.spendingChange > 0 ? Color.red : Color.green).opacity(0.1))
+                    .background((digest.spendingChange > 0 ? SyncFlowColors.adaptiveRed : SyncFlowColors.adaptiveGreen).opacity(0.1))
                     .clipShape(Capsule())
                 }
             }
@@ -1058,7 +1058,7 @@ struct AIAssistantView: View {
 
             HStack {
                 Image(systemName: diff > 0 ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
-                    .foregroundColor(diff > 0 ? .red : .green)
+                    .foregroundColor(diff > 0 ? SyncFlowColors.adaptiveRed : SyncFlowColors.adaptiveGreen)
 
                 Text(diff > 0 ? "Spending increased" : "Spending decreased")
                     .font(.subheadline)
@@ -1068,10 +1068,10 @@ struct AIAssistantView: View {
                 Text("\(String(format: "%.1f", abs(percentChange)))%")
                     .font(.subheadline)
                     .fontWeight(.semibold)
-                    .foregroundColor(diff > 0 ? .red : .green)
+                    .foregroundColor(diff > 0 ? SyncFlowColors.adaptiveRed : SyncFlowColors.adaptiveGreen)
             }
             .padding(8)
-            .background(Color.gray.opacity(0.1))
+            .background(SyncFlowColors.adaptiveGray.opacity(0.1))
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
@@ -1096,7 +1096,7 @@ struct AIAssistantView: View {
             }
         }
         .padding(8)
-        .background(Color.gray.opacity(0.05))
+        .background(SyncFlowColors.adaptiveGray.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -1122,10 +1122,10 @@ struct AIAssistantView: View {
     private func errorCard(_ message: String) -> some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.red)
+                .foregroundColor(SyncFlowColors.adaptiveRed)
             Text(message)
                 .font(.subheadline)
-                .foregroundColor(.red)
+                .foregroundColor(SyncFlowColors.adaptiveRed)
         }
     }
 
@@ -1145,8 +1145,8 @@ struct AIAssistantView: View {
                             .font(.caption)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.1))
-                            .foregroundColor(.blue)
+                            .background(SyncFlowColors.adaptiveBlue.opacity(0.1))
+                            .foregroundColor(SyncFlowColors.adaptiveBlue)
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -1165,7 +1165,7 @@ struct AIAssistantView: View {
             HStack(spacing: 4) {
                 ForEach(0..<3) { index in
                     Circle()
-                        .fill(Color.gray)
+                        .fill(SyncFlowColors.adaptiveGray)
                         .frame(width: 8, height: 8)
                         .opacity(0.5)
                 }
@@ -1202,7 +1202,7 @@ struct AIAssistantView: View {
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 28))
-                    .foregroundColor(inputText.isEmpty || isProcessing ? .gray : .blue)
+                    .foregroundColor(inputText.isEmpty || isProcessing ? SyncFlowColors.adaptiveGray : SyncFlowColors.adaptiveBlue)
             }
             .buttonStyle(.plain)
             .disabled(inputText.isEmpty || isProcessing)
@@ -1330,31 +1330,31 @@ struct AIAssistantView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.gray.opacity(0.1))
+        .background(SyncFlowColors.adaptiveGray.opacity(0.1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    /// Converts color name string to SwiftUI Color
+    /// Converts color name string to SwiftUI Color with dark/light mode support
     private func colorForString(_ color: String) -> Color {
         switch color {
-        case "blue": return .blue
-        case "orange": return .orange
-        case "green": return .green
-        case "purple": return .purple
-        case "red": return .red
-        case "teal": return .teal
-        case "indigo": return .indigo
-        case "cyan": return .cyan
-        default: return .blue
+        case "blue": return SyncFlowColors.adaptiveBlue
+        case "orange": return SyncFlowColors.adaptiveOrange
+        case "green": return SyncFlowColors.adaptiveGreen
+        case "purple": return SyncFlowColors.adaptivePurple
+        case "red": return SyncFlowColors.adaptiveRed
+        case "teal": return SyncFlowColors.adaptiveTeal
+        case "indigo": return SyncFlowColors.adaptiveIndigo
+        case "cyan": return SyncFlowColors.adaptiveCyan
+        default: return SyncFlowColors.adaptiveBlue
         }
     }
 
     /// Returns appropriate color for package delivery status
     private func colorForDeliveryStatus(_ status: DeliveryStatus) -> Color {
         switch status {
-        case .delivered, .outForDelivery: return .green
-        case .exception: return .red
-        default: return .orange
+        case .delivered, .outForDelivery: return SyncFlowColors.adaptiveGreen
+        case .exception: return SyncFlowColors.adaptiveRed
+        default: return SyncFlowColors.adaptiveOrange
         }
     }
 }

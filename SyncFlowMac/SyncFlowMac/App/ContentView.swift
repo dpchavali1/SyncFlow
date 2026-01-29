@@ -74,6 +74,12 @@ struct ContentView: View {
     /// The central application state injected from SyncFlowMacApp
     @EnvironmentObject var appState: AppState
 
+    /// Observes color scheme changes to force view updates
+    @StateObject private var colorObserver = ColorSchemeObserver.shared
+
+    /// SwiftUI environment color scheme
+    @Environment(\.colorScheme) private var colorScheme
+
     // =========================================================================
     // MARK: - View Body
     // =========================================================================
@@ -87,6 +93,7 @@ struct ContentView: View {
                     PairingView()
                 }
             }
+            .id(colorObserver.updateTrigger) // Force re-render when color scheme changes
 
             // Incoming call overlay
             if let incomingCall = appState.incomingCall {
@@ -156,6 +163,10 @@ struct ContentView: View {
         .animation(.spring(), value: appState.lastAnsweredCallId)
         .animation(.easeInOut, value: appState.incomingSyncFlowCall != nil)
         .animation(.easeInOut, value: appState.showSyncFlowCallView)
+        .onChange(of: colorScheme) { _, _ in
+            // When SwiftUI detects appearance change, trigger color observer update
+            colorObserver.checkAppearance()
+        }
         .sheet(isPresented: $appState.showPhotoGallery) {
             PhotoGalleryView(photoService: appState.photoSyncService)
                 .frame(minWidth: 500, minHeight: 400)

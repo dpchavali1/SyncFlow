@@ -250,7 +250,7 @@ struct SFDangerButton: View {
             .foregroundColor(.white)
             .padding(.horizontal, size.horizontalPadding)
             .frame(height: size.height)
-            .background(isDisabled ? SyncFlowColors.error.opacity(0.4) : (isHovered ? Color(hex: "9A1515") : SyncFlowColors.error))
+            .background(isDisabled ? SyncFlowColors.error.opacity(0.4) : (isHovered ? SyncFlowColors.errorDark : SyncFlowColors.error))
             .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm))
         }
         .buttonStyle(.plain)

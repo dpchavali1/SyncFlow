@@ -95,10 +95,10 @@ struct FeaturedDealsBanner: View {
             HStack {
                 HStack(spacing: 8) {
                     Image(systemName: "flame.fill")
-                        .foregroundColor(.orange)
+                        .foregroundColor(SyncFlowColors.adaptiveOrange)
                     Text("HOT DEALS")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.orange)
+                        .foregroundColor(SyncFlowColors.adaptiveOrange)
                 }
 
                 Spacer()
@@ -131,8 +131,8 @@ struct FeaturedDealsBanner: View {
         .background(
             LinearGradient(
                 colors: [
-                    Color(red: 0.15, green: 0.1, blue: 0.25),
-                    Color(red: 0.2, green: 0.1, blue: 0.15)
+                    SyncFlowColors.featuredGradientStart,
+                    SyncFlowColors.featuredGradientEnd
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -195,7 +195,7 @@ struct FeaturedDealCard: View {
                     HStack(spacing: 10) {
                         Text(deal.price)
                             .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(.green)
+                            .foregroundColor(SyncFlowColors.adaptiveGreen)
 
                         if deal.hasDiscount {
                             Text(deal.discountText)
@@ -203,7 +203,7 @@ struct FeaturedDealCard: View {
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.red)
+                                .background(SyncFlowColors.adaptiveRed)
                                 .cornerRadius(4)
                         }
                     }
@@ -466,7 +466,7 @@ struct DealCard: View {
                         .padding(.vertical, 4)
                         .background(
                             LinearGradient(
-                                colors: [Color.red, Color.red.opacity(0.8)],
+                                colors: [SyncFlowColors.adaptiveRed, SyncFlowColors.adaptiveRed.opacity(0.8)],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
@@ -517,7 +517,7 @@ struct DealCard: View {
                         ForEach(0..<5, id: \.self) { index in
                             Image(systemName: index < deal.score ? "star.fill" : "star")
                                 .font(.system(size: 9))
-                                .foregroundColor(index < deal.score ? .orange : SyncFlowColors.textTertiary)
+                                .foregroundColor(index < deal.score ? SyncFlowColors.adaptiveOrange : SyncFlowColors.textTertiary)
                         }
                     }
                 }

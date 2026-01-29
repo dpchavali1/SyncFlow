@@ -126,7 +126,7 @@ enum SFMessageType {
         case .otp: return SyncFlowColors.otpAccent
         case .transaction: return SyncFlowColors.transactionAccent
         case .alert: return SyncFlowColors.alertAccent
-        case .promotion: return Color(hex: "7B1FA2")
+        case .promotion: return SyncFlowColors.promotionAccent
         }
     }
 }
@@ -154,10 +154,10 @@ struct SFSimBadge: View {
 
     private var color: Color {
         switch simSlot {
-        case 1: return Color(hex: "1976D2")  // Blue
-        case 2: return Color(hex: "7B1FA2")  // Purple
-        case 3: return Color(hex: "00796B")  // Teal
-        default: return Color(hex: "1976D2")
+        case 1: return SyncFlowColors.simSlot1
+        case 2: return SyncFlowColors.simSlot2
+        case 3: return SyncFlowColors.simSlot3
+        default: return SyncFlowColors.simSlot1
         }
     }
 
