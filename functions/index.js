@@ -1925,8 +1925,8 @@ exports.getR2UploadUrl = functions.https.onCall(async (data, context) => {
             );
         }
 
-        // Check storage quota
-        const storageLimit = isPaid ? 2 * 1024 * 1024 * 1024 : 100 * 1024 * 1024; // 2GB pro, 100MB free
+        // Check storage quota - increased free tier from 100MB to 500MB with R2 cost savings
+        const storageLimit = isPaid ? 2 * 1024 * 1024 * 1024 : 500 * 1024 * 1024; // 2GB pro, 500MB free
         const currentStorage = usage.storageBytes || 0;
 
         if (currentStorage + fileSize > storageLimit) {
