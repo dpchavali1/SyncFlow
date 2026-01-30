@@ -1162,41 +1162,12 @@ class DesktopSyncService(context: Context) {
                 var bytesToUpload = bytes
                 var isEncrypted = false
 
-                // Encrypt attachment data using E2EE
-                if (isE2eeEnabled) {
-                    try {
-                        val encryptedBytes = e2eeManager.encryptBytes(userId, bytes)
-                        if (encryptedBytes != null) {
-                            bytesToUpload = encryptedBytes
-                            isEncrypted = true
-                            Log.d(TAG, "Attachment encrypted: ${attachment.id} (${bytes.size} -> ${encryptedBytes.size} bytes)")
-                        } else {
-                            Log.w(TAG, "Attachment encryption failed (null result), skipping upload for ${attachment.id}")
-                            uploadedAttachments.add(mapOf(
-                                "id" to attachment.id,
-                                "contentType" to attachment.contentType,
-                                "fileName" to "attachment",
-                                "type" to getAttachmentType(attachment),
-                                "encrypted" to false,
-                                "syncStatus" to "skipped",
-                                "reason" to "encryption_failed"
-                            ))
-                            continue
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Attachment encryption failed, skipping upload for ${attachment.id}: ${e.message}")
-                        uploadedAttachments.add(mapOf(
-                            "id" to attachment.id,
-                            "contentType" to attachment.contentType,
-                            "fileName" to "attachment",
-                            "type" to getAttachmentType(attachment),
-                            "encrypted" to false,
-                            "syncStatus" to "skipped",
-                            "reason" to "encryption_failed"
-                        ))
-                        continue
-                    }
-                }
+                // Note: E2EE for MMS attachments is disabled for self-sync
+                // MMS attachments are syncing to your own devices (not sending to another user)
+                // They are already protected by Firebase Security Rules and HTTPS
+                // E2EE is designed for end-to-end messaging between different users
+                // TODO: Implement symmetric encryption for multi-device self-sync if needed
+                Log.d(TAG, "MMS attachment will be uploaded unencrypted (self-sync): ${attachment.id}")
 
                 val usageCheck = runCatching {
                     usageTracker.isUploadAllowed(
