@@ -524,7 +524,7 @@ class AIAssistantService: ObservableObject {
             }
 
             // Detect currency based on merchant, message content, and sender
-            let currency = detectCurrency(messageBody: body, merchant: merchant, senderAddress: message.phoneNumber)
+            let currency = detectCurrency(messageBody: body, merchant: merchant, senderAddress: message.address)
 
             // Determine category
             let category = guessCategory(message: body, merchant: merchant)
