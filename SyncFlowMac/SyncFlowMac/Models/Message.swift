@@ -54,6 +54,11 @@ struct MmsAttachment: Identifiable, Codable, Hashable {
     /// May be nil if the attachment data is stored inline as Base64.
     let url: String?
 
+    /// Cloudflare R2 storage key for the attachment file.
+    /// When present, use getR2DownloadUrl Cloud Function to get a presigned download URL.
+    /// Format: "mms/{userId}/{messageId}/{fileId}.{ext}"
+    let r2Key: String?
+
     /// Simplified type category for the attachment.
     /// Possible values: "image", "video", "audio", "vcard", "file"
     /// Used for quick type checking without parsing the full MIME type.

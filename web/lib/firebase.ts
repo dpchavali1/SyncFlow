@@ -1548,6 +1548,37 @@ export const requestWebE2EEKeyBackfill = async (userId: string) => {
   })
 }
 
+export type WebE2eeBackfillStatus = {
+  status?: string
+  scanned?: number
+  updated?: number
+  skipped?: number
+  error?: string
+  startedAt?: number
+  updatedAt?: number
+  completedAt?: number
+}
+
+export const listenToWebE2EEBackfillStatus = (
+  userId: string,
+  callback: (status: WebE2eeBackfillStatus | null) => void
+) => {
+  const deviceId = getOrCreateDeviceId()
+  if (!deviceId) {
+    callback(null)
+    return () => {}
+  }
+
+  const statusRef = ref(database, `users/${userId}/e2ee_key_backfill_requests/${deviceId}`)
+  return onValue(statusRef, (snapshot) => {
+    if (!snapshot.exists()) {
+      callback(null)
+      return
+    }
+    callback(snapshot.val() as WebE2eeBackfillStatus)
+  })
+}
+
 export const waitForWebE2EEKeySyncResponse = async (
   userId: string,
   timeoutMs = 60000

@@ -2571,6 +2571,29 @@ class FirebaseService {
         try await requestRef.setValue(payload)
     }
 
+    /// Request a keyMap backfill so older encrypted messages can decrypt on this device.
+    func requestE2eeKeyBackfill(userId: String, deviceId: String) async throws {
+        guard let localPublicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() else {
+            throw NSError(domain: "E2EE", code: 7, userInfo: [NSLocalizedDescriptionKey: "E2EE not initialized"])
+        }
+
+        let requestRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("e2ee_key_backfill_requests")
+            .child(deviceId)
+
+        let payload: [String: Any] = [
+            "requesterDeviceId": deviceId,
+            "requesterPlatform": "macos",
+            "requesterPublicKeyX963": localPublicKeyX963,
+            "requestedAt": ServerValue.timestamp(),
+            "status": "pending"
+        ]
+
+        try await requestRef.setValue(payload)
+    }
+
     /// Wait for key sync response, import keys, and return success.
     func waitForE2eeKeySyncResponse(userId: String, deviceId: String, timeout: TimeInterval = 30) async throws -> Bool {
         let responseRef = database.reference()

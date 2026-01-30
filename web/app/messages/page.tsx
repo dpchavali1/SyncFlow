@@ -10,6 +10,7 @@ import {
   listenToMessages,
   listenToReadReceipts,
   listenToSpamMessages,
+  listenToWebE2EEBackfillStatus,
   requestWebE2EEKeyBackfill,
   requestWebE2EEKeySync,
   waitForAuth,
@@ -42,8 +43,18 @@ export default function MessagesPage() {
   const [keySyncLoading, setKeySyncLoading] = useState(false)
   const [keySyncStatus, setKeySyncStatus] = useState<string | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
+  const [backfillStatus, setBackfillStatus] = useState<{
+    status?: string
+    scanned?: number
+    updated?: number
+    skipped?: number
+    error?: string
+  } | null>(null)
+  const [dismissedAtFailureCount, setDismissedAtFailureCount] = useState<number | null>(null)
 
-  const hasDecryptFailures = messages.some((msg) => msg.decryptionFailed)
+  const failureCount = messages.filter((msg) => msg.decryptionFailed).length
+  const hasDecryptFailures = failureCount > 0
+  const isBannerDismissed = dismissedAtFailureCount === failureCount && failureCount > 0
 
   const handleKeySync = async () => {
     if (!userId || keySyncLoading) return
@@ -61,6 +72,50 @@ export default function MessagesPage() {
       setKeySyncLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (!userId || typeof window === 'undefined') return
+    const key = `syncflow_e2ee_banner_dismissed_${userId}`
+    const stored = localStorage.getItem(key)
+    if (stored) {
+      const parsed = Number(stored)
+      if (!Number.isNaN(parsed)) {
+        setDismissedAtFailureCount(parsed)
+      }
+    }
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId || typeof window === 'undefined') return
+    const key = `syncflow_e2ee_banner_dismissed_${userId}`
+    if (dismissedAtFailureCount == null) {
+      localStorage.removeItem(key)
+      return
+    }
+    localStorage.setItem(key, String(dismissedAtFailureCount))
+  }, [dismissedAtFailureCount, userId])
+
+  useEffect(() => {
+    if (!userId) return
+    const unsubscribe = listenToWebE2EEBackfillStatus(userId, (status) => {
+      setBackfillStatus(status)
+    })
+    return () => {
+      unsubscribe()
+    }
+  }, [userId])
+
+  useEffect(() => {
+    if (!hasDecryptFailures) {
+      setDismissedAtFailureCount(null)
+    }
+  }, [hasDecryptFailures])
+
+  const backfillIsActive =
+    backfillStatus?.status === 'pending' || backfillStatus?.status === 'processing'
+  const backfillErrored = backfillStatus?.status === 'error'
+  const showKeyBanner =
+    !isBannerDismissed && (keySyncLoading || backfillIsActive || backfillErrored || hasDecryptFailures)
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null
@@ -212,11 +267,25 @@ export default function MessagesPage() {
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {isConversationListVisible && <ConversationList />}
         <div className="flex-1 flex flex-col min-w-0">
-          {hasDecryptFailures && (
+          {showKeyBanner && (
             <div className="flex-shrink-0 px-4 pt-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-100">
                 <div className="text-sm">
-                  Some messages are encrypted and can’t be decrypted. Sync keys to unlock them.
+                  {backfillIsActive && (
+                    <>
+                      Processing older messages… {backfillStatus?.updated ?? 0} updated /{' '}
+                      {backfillStatus?.scanned ?? 0} scanned.
+                    </>
+                  )}
+                  {!backfillIsActive && backfillErrored && (
+                    <>Key sync completed, but processing failed. You can try again.</>
+                  )}
+                  {!backfillIsActive && !backfillErrored && hasDecryptFailures && (
+                    <>Some messages are encrypted and can’t be decrypted. Sync keys to unlock them.</>
+                  )}
+                  {!backfillIsActive && !backfillErrored && !hasDecryptFailures && (
+                    <>Keys synced. Messages will update automatically.</>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   <button
@@ -225,6 +294,12 @@ export default function MessagesPage() {
                     className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors text-sm"
                   >
                     {keySyncLoading ? 'Syncing…' : 'Sync Keys'}
+                  </button>
+                  <button
+                    onClick={() => setDismissedAtFailureCount(failureCount)}
+                    className="text-xs text-amber-800 dark:text-amber-200 hover:underline"
+                  >
+                    Dismiss
                   </button>
                   {keySyncStatus && (
                     <span className="text-xs text-amber-800 dark:text-amber-200">

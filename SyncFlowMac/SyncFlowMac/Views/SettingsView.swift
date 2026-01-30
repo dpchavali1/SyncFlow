@@ -433,8 +433,13 @@ struct GeneralSettingsView: View {
                 try await E2EEManager.shared.initializeKeys()
                 try await FirebaseService.shared.requestE2eeKeySync(userId: userId, deviceId: deviceId)
                 let success = try await FirebaseService.shared.waitForE2eeKeySyncResponse(userId: userId, deviceId: deviceId)
+                if success {
+                    try await FirebaseService.shared.requestE2eeKeyBackfill(userId: userId, deviceId: deviceId)
+                }
                 await MainActor.run {
-                    keySyncStatusMessage = success ? "Keys synced successfully." : "Key sync failed."
+                    keySyncStatusMessage = success
+                        ? "Keys synced. Restoring access to older messages..."
+                        : "Key sync failed."
                 }
             } catch {
                 await MainActor.run {

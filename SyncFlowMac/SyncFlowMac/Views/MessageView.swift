@@ -143,8 +143,9 @@ struct MessageView: View {
             do {
                 try await FirebaseService.shared.requestE2eeKeySync(userId: userId, deviceId: deviceId)
                 _ = try await FirebaseService.shared.waitForE2eeKeySyncResponse(userId: userId, deviceId: deviceId)
+                try await FirebaseService.shared.requestE2eeKeyBackfill(userId: userId, deviceId: deviceId)
                 await MainActor.run {
-                    keySyncStatusMessage = "Keys synced. You may need to resync messages."
+                    keySyncStatusMessage = "Keys synced. Restoring access to older messages..."
                     appState.e2eeKeyMismatch = false
                 }
                 appState.refreshE2eeKeyStatus()
@@ -2681,7 +2682,14 @@ struct AttachmentView: View {
 
     private func loadAttachmentData() async throws -> Data {
         let rawData: Data
-        if let urlString = attachment.url {
+
+        // Check if we have an R2 key - if so, get presigned download URL first
+        if let r2Key = attachment.r2Key {
+            print("[AttachmentView] Loading from R2: \(r2Key)")
+            let downloadUrl = try await getR2DownloadUrl(r2Key: r2Key)
+            rawData = try await AttachmentCacheManager.shared.loadData(from: downloadUrl)
+        } else if let urlString = attachment.url {
+            // Legacy Firebase Storage URL or direct URL
             rawData = try await AttachmentCacheManager.shared.loadData(from: urlString)
         } else if let inlineData = attachment.inlineData,
                   let decoded = Data(base64Encoded: inlineData) {
@@ -2698,6 +2706,35 @@ struct AttachmentView: View {
         }
 
         return rawData
+    }
+
+    /// Get presigned download URL from R2 Cloud Function
+    private func getR2DownloadUrl(r2Key: String) async throws -> String {
+        guard let userId = FirebaseService.shared.getCurrentUserId() else {
+            throw NSError(domain: "AttachmentView", code: 3, userInfo: [NSLocalizedDescriptionKey: "Not authenticated"])
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            FirebaseService.shared.functions.httpsCallable("getR2DownloadUrl").call([
+                "fileKey": r2Key,
+                "syncGroupUserId": userId
+            ]) { result, error in
+                if let error = error {
+                    print("[AttachmentView] Error getting R2 download URL: \(error)")
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                guard let data = result?.data as? [String: Any],
+                      let downloadUrl = data["downloadUrl"] as? String else {
+                    continuation.resume(throwing: NSError(domain: "AttachmentView", code: 4, userInfo: [NSLocalizedDescriptionKey: "Invalid response from getR2DownloadUrl"]))
+                    return
+                }
+
+                print("[AttachmentView] Got R2 download URL: \(downloadUrl.prefix(50))...")
+                continuation.resume(returning: downloadUrl)
+            }
+        }
     }
 
     private func loadImage() {
