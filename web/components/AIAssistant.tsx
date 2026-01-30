@@ -169,6 +169,74 @@ const MERCHANT_ALIASES: Record<string, string[]> = {
   'target': ['target'],
   'costco': ['costco'],
   'bestbuy': ['best buy', 'bestbuy'],
+  'xfinity': ['xfinity', 'comcast'],
+  'att': ['at&t', 'att'],
+  'verizon': ['verizon', 'vzw'],
+  'tmobile': ['t-mobile', 'tmobile'],
+  'icici': ['icici', 'icicbank', 'icicibank'],
+  'hdfc': ['hdfc', 'hdfcbank'],
+  'sbi': ['sbi', 'state bank', 'statebank'],
+  'axis': ['axis', 'axisbank'],
+  'kotak': ['kotak', 'kotakbank'],
+}
+
+/**
+ * Maps merchants/banks to their typical currency
+ * Used to correctly identify transaction currency based on merchant context
+ */
+const MERCHANT_CURRENCY_MAP: Record<string, string> = {
+  // Indian banks and services
+  'icici': 'INR',
+  'hdfc': 'INR',
+  'sbi': 'INR',
+  'axis': 'INR',
+  'kotak': 'INR',
+  'paytm': 'INR',
+  'phonepe': 'INR',
+  'gpay': 'INR',
+  'googlepay': 'INR',
+  'google pay': 'INR',
+  'swiggy': 'INR',
+  'zomato': 'INR',
+  'flipkart': 'INR',
+  'myntra': 'INR',
+  'bigbasket': 'INR',
+
+  // US services and banks
+  'xfinity': 'USD',
+  'comcast': 'USD',
+  'at&t': 'USD',
+  'att': 'USD',
+  'verizon': 'USD',
+  'tmobile': 'USD',
+  't-mobile': 'USD',
+  'wells fargo': 'USD',
+  'wellsfargo': 'USD',
+  'chase': 'USD',
+  'bank of america': 'USD',
+  'bofa': 'USD',
+  'boa': 'USD',
+  'citi': 'USD',
+  'citibank': 'USD',
+  'amex': 'USD',
+  'american express': 'USD',
+  'discover': 'USD',
+  'capital one': 'USD',
+  'capitalone': 'USD',
+
+  // International services (default USD)
+  'amazon': 'USD',
+  'uber': 'USD',
+  'netflix': 'USD',
+  'spotify': 'USD',
+  'apple': 'USD',
+  'google': 'USD',
+  'walmart': 'USD',
+  'doordash': 'USD',
+  'starbucks': 'USD',
+  'target': 'USD',
+  'costco': 'USD',
+  'bestbuy': 'USD',
 }
 
 /**
@@ -332,6 +400,81 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
   }
 
   /**
+   * Detects the currency for a transaction based on merchant, message content, and sender
+   *
+   * Detection Strategy (in order of priority):
+   * 1. Check if merchant is in MERCHANT_CURRENCY_MAP
+   * 2. Look for explicit currency symbols/codes in message ($, ₹, INR, USD)
+   * 3. Check sender phone number pattern (Indian numbers start with +91 or are 10 digits)
+   * 4. Default to USD for unrecognized patterns
+   *
+   * @param messageBody - The SMS message text
+   * @param merchant - Extracted merchant name (if any)
+   * @param senderAddress - The phone number/short code of the sender
+   * @returns Currency code (INR, USD, etc.)
+   */
+  const detectCurrency = (messageBody: string, merchant: string | null, senderAddress: string): string => {
+    const bodyLower = messageBody.toLowerCase()
+
+    // 1. Check merchant-specific currency mapping
+    if (merchant) {
+      const merchantLower = merchant.toLowerCase()
+      if (MERCHANT_CURRENCY_MAP[merchantLower]) {
+        return MERCHANT_CURRENCY_MAP[merchantLower]
+      }
+
+      // Also check if any key in the map is contained in merchant name or body
+      for (const [key, currency] of Object.entries(MERCHANT_CURRENCY_MAP)) {
+        if (merchantLower.includes(key) || bodyLower.includes(key)) {
+          return currency
+        }
+      }
+    }
+
+    // 2. Check for explicit currency indicators in message
+    if (bodyLower.includes('₹') || bodyLower.includes('inr') ||
+        bodyLower.includes('rs.') || bodyLower.includes('rs ')) {
+      return 'INR'
+    }
+    if (bodyLower.includes('$') || bodyLower.includes('usd')) {
+      return 'USD'
+    }
+    if (bodyLower.includes('€') || bodyLower.includes('eur')) {
+      return 'EUR'
+    }
+    if (bodyLower.includes('£') || bodyLower.includes('gbp')) {
+      return 'GBP'
+    }
+    if (bodyLower.includes('¥') || bodyLower.includes('jpy')) {
+      return 'JPY'
+    }
+
+    // 3. Check sender pattern for Indian numbers
+    const cleanedSender = senderAddress.replace(/[^0-9+]/g, '')
+    if (cleanedSender.startsWith('+91')) {
+      return 'INR'
+    }
+    if (cleanedSender.startsWith('91') && cleanedSender.length > 10) {
+      return 'INR'
+    }
+    if (cleanedSender.length === 10 && !cleanedSender.startsWith('1')) {
+      return 'INR' // Likely Indian
+    }
+    if (cleanedSender.startsWith('+1') || cleanedSender.startsWith('1')) {
+      return 'USD'
+    }
+
+    // 4. Check for Indian bank keywords
+    if (bodyLower.includes('bank') && (bodyLower.includes('india') ||
+        bodyLower.includes('mumbai') || bodyLower.includes('delhi'))) {
+      return 'INR'
+    }
+
+    // Default to USD for short codes and unknown patterns
+    return 'USD'
+  }
+
+  /**
    * Parses all messages to extract financial transactions
    * Memoized for performance - only recalculates when messages change
    *
@@ -369,9 +512,11 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
         continue
       }
 
+      // Extract merchant first (needed for currency detection)
+      const merchant = extractMerchantFromMessage(msg.body)
+
       // Extract amount
       let amount: number | null = null
-      let currency = 'INR'
 
       for (const pattern of amountPatterns) {
         const match = msg.body.match(pattern)
@@ -379,7 +524,6 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
           const amountStr = match[1].replace(/,/g, '')
           amount = parseFloat(amountStr)
           if (!isNaN(amount)) {
-            currency = (msg.body.includes('$') || bodyLower.includes('usd')) ? 'USD' : 'INR'
             break
           }
         }
@@ -390,7 +534,8 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
         continue
       }
 
-      const merchant = extractMerchantFromMessage(msg.body)
+      // Detect currency based on merchant, message content, and sender
+      const currency = detectCurrency(msg.body, merchant, msg.address)
 
       transactions.push({
         amount,

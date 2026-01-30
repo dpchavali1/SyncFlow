@@ -43,6 +43,64 @@ class AIAssistantService: ObservableObject {
         "Paytm": ["paytm"],
         "PhonePe": ["phonepe"],
         "GPay": ["gpay", "google pay"],
+        "Xfinity": ["xfinity", "comcast"],
+        "AT&T": ["at&t", "att"],
+        "Verizon": ["verizon", "vzw"],
+        "T-Mobile": ["t-mobile", "tmobile"],
+        "ICICI": ["icici", "icicbank", "icicibank"],
+        "HDFC": ["hdfc", "hdfcbank"],
+        "SBI": ["sbi", "state bank", "statebank"],
+        "Axis": ["axis", "axisbank"],
+        "Kotak": ["kotak", "kotakbank"],
+    ]
+
+    private let merchantCurrencyMap: [String: String] = [
+        // Indian banks and services
+        "icici": "INR",
+        "hdfc": "INR",
+        "sbi": "INR",
+        "axis": "INR",
+        "kotak": "INR",
+        "paytm": "INR",
+        "phonepe": "INR",
+        "gpay": "INR",
+        "google pay": "INR",
+        "swiggy": "INR",
+        "zomato": "INR",
+        "flipkart": "INR",
+
+        // US services and banks
+        "xfinity": "USD",
+        "comcast": "USD",
+        "at&t": "USD",
+        "att": "USD",
+        "verizon": "USD",
+        "tmobile": "USD",
+        "t-mobile": "USD",
+        "wells fargo": "USD",
+        "wellsfargo": "USD",
+        "chase": "USD",
+        "bank of america": "USD",
+        "bofa": "USD",
+        "boa": "USD",
+        "citi": "USD",
+        "citibank": "USD",
+        "amex": "USD",
+        "american express": "USD",
+        "discover": "USD",
+        "capital one": "USD",
+        "capitalone": "USD",
+
+        // International services (default USD)
+        "amazon": "USD",
+        "uber": "USD",
+        "netflix": "USD",
+        "spotify": "USD",
+        "apple": "USD",
+        "google": "USD",
+        "walmart": "USD",
+        "doordash": "USD",
+        "starbucks": "USD",
     ]
 
     // MARK: - Transaction Keywords
@@ -345,6 +403,80 @@ class AIAssistantService: ObservableObject {
 
     // MARK: - Transaction Parsing
 
+    /// Detects the currency for a transaction based on merchant, message content, and sender.
+    ///
+    /// Detection Strategy (in order of priority):
+    /// 1. Check if merchant is in merchantCurrencyMap
+    /// 2. Look for explicit currency symbols/codes in message ($, ₹, INR, USD)
+    /// 3. Check sender phone number pattern (Indian numbers start with +91 or are 10 digits)
+    /// 4. Default to USD for unrecognized patterns
+    ///
+    /// - Parameters:
+    ///   - messageBody: The SMS message text
+    ///   - merchant: Extracted merchant name (if any)
+    ///   - senderAddress: The phone number/short code of the sender
+    /// - Returns: Currency code (INR, USD, etc.)
+    private func detectCurrency(messageBody: String, merchant: String?, senderAddress: String) -> String {
+        let bodyLower = messageBody.lowercased()
+
+        // 1. Check merchant-specific currency mapping
+        if let merchant = merchant {
+            let merchantLower = merchant.lowercased()
+            if let currency = merchantCurrencyMap[merchantLower] {
+                return currency
+            }
+
+            // Also check if any key in the map is contained in merchant name or body
+            for (key, currency) in merchantCurrencyMap {
+                if merchantLower.contains(key) || bodyLower.contains(key) {
+                    return currency
+                }
+            }
+        }
+
+        // 2. Check for explicit currency indicators in message
+        if bodyLower.contains("₹") || bodyLower.contains("inr") ||
+           bodyLower.contains("rs.") || bodyLower.contains("rs ") {
+            return "INR"
+        }
+        if bodyLower.contains("$") || bodyLower.contains("usd") {
+            return "USD"
+        }
+        if bodyLower.contains("€") || bodyLower.contains("eur") {
+            return "EUR"
+        }
+        if bodyLower.contains("£") || bodyLower.contains("gbp") {
+            return "GBP"
+        }
+        if bodyLower.contains("¥") || bodyLower.contains("jpy") {
+            return "JPY"
+        }
+
+        // 3. Check sender pattern for Indian numbers
+        let cleanedSender = senderAddress.replacingOccurrences(of: "[^0-9+]", with: "", options: .regularExpression)
+        if cleanedSender.hasPrefix("+91") {
+            return "INR"
+        }
+        if cleanedSender.hasPrefix("91") && cleanedSender.count > 10 {
+            return "INR"
+        }
+        if cleanedSender.count == 10 && !cleanedSender.hasPrefix("1") {
+            return "INR" // Likely Indian
+        }
+        if cleanedSender.hasPrefix("+1") || cleanedSender.hasPrefix("1") {
+            return "USD"
+        }
+
+        // 4. Check for Indian bank keywords
+        if bodyLower.contains("bank") && (bodyLower.contains("india") ||
+           bodyLower.contains("mumbai") || bodyLower.contains("delhi")) {
+            return "INR"
+        }
+
+        // Default to USD for short codes and unknown patterns
+        return "USD"
+    }
+
     private func parseTransactions(from messages: [Message]) -> [ParsedTransaction] {
         var transactions: [ParsedTransaction] = []
 
@@ -366,14 +498,15 @@ class AIAssistantService: ObservableObject {
                 continue
             }
 
+            // Extract merchant first (needed for currency detection)
+            let merchant = extractMerchantFromMessage(body)
+
             // Extract amount
             var amount: Double? = nil
-            var currency = "USD"
 
             if let match = body.range(of: usdPattern, options: String.CompareOptions.regularExpression) {
                 let amountStr = String(body[match]).replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
                 amount = Double(amountStr)
-                currency = "USD"
             } else if let match = body.range(of: inrPattern, options: String.CompareOptions.regularExpression) {
                 var amountStr = String(body[match])
                 amountStr = amountStr.replacingOccurrences(of: "Rs.", with: "")
@@ -383,7 +516,6 @@ class AIAssistantService: ObservableObject {
                     .replacingOccurrences(of: ",", with: "")
                     .trimmingCharacters(in: CharacterSet.whitespaces)
                 amount = Double(amountStr)
-                currency = "INR"
             }
 
             // Skip if no valid amount or unreasonably large
@@ -391,8 +523,8 @@ class AIAssistantService: ObservableObject {
                 continue
             }
 
-            // Extract merchant
-            let merchant = extractMerchantFromMessage(body)
+            // Detect currency based on merchant, message content, and sender
+            let currency = detectCurrency(messageBody: body, merchant: merchant, senderAddress: message.phoneNumber)
 
             // Determine category
             let category = guessCategory(message: body, merchant: merchant)

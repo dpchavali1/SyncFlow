@@ -114,6 +114,66 @@ class AIService(private val context: Context) {
         "paytm" to listOf("paytm"),
         "phonepe" to listOf("phonepe"),
         "gpay" to listOf("gpay", "googlepay", "google pay"),
+        "xfinity" to listOf("xfinity", "comcast"),
+        "att" to listOf("at&t", "att"),
+        "verizon" to listOf("verizon", "vzw"),
+        "tmobile" to listOf("t-mobile", "tmobile"),
+        "icici" to listOf("icici", "icicbank", "icicibank"),
+        "hdfc" to listOf("hdfc", "hdfcbank"),
+        "sbi" to listOf("sbi", "statebank", "state bank"),
+        "axis" to listOf("axis", "axisbank"),
+        "kotak" to listOf("kotak", "kotakbank"),
+    )
+
+    /**
+     * Maps merchants/banks to their typical currency.
+     * Used to correctly identify transaction currency based on merchant/sender.
+     */
+    private val MERCHANT_CURRENCY_MAP = mapOf(
+        // Indian banks and services
+        "icici" to "INR",
+        "hdfc" to "INR",
+        "sbi" to "INR",
+        "axis" to "INR",
+        "kotak" to "INR",
+        "paytm" to "INR",
+        "phonepe" to "INR",
+        "gpay" to "INR",
+        "googlepay" to "INR",
+        "swiggy" to "INR",
+        "zomato" to "INR",
+        "flipkart" to "INR",
+        "myntra" to "INR",
+        "bigbasket" to "INR",
+
+        // US services and banks
+        "xfinity" to "USD",
+        "comcast" to "USD",
+        "att" to "USD",
+        "verizon" to "USD",
+        "tmobile" to "USD",
+        "wellsfargo" to "USD",
+        "wells fargo" to "USD",
+        "chase" to "USD",
+        "bofa" to "USD",
+        "bank of america" to "USD",
+        "citi" to "USD",
+        "citibank" to "USD",
+        "amex" to "USD",
+        "american express" to "USD",
+        "discover" to "USD",
+        "capital one" to "USD",
+
+        // International services (default USD)
+        "amazon" to "USD",
+        "uber" to "USD",
+        "netflix" to "USD",
+        "spotify" to "USD",
+        "apple" to "USD",
+        "google" to "USD",
+        "walmart" to "USD",
+        "doordash" to "USD",
+        "starbucks" to "USD",
     )
 
     /**
@@ -410,6 +470,66 @@ class AIService(private val context: Context) {
     // ==========================================
 
     /**
+     * Detects the currency for a transaction based on merchant, message content, and sender.
+     *
+     * ## Detection Strategy (in order of priority):
+     * 1. Check if merchant is in MERCHANT_CURRENCY_MAP
+     * 2. Look for explicit currency symbols/codes in message ($, ₹, INR, USD)
+     * 3. Check sender phone number pattern (Indian numbers start with +91 or are 10 digits)
+     * 4. Default to USD for unrecognized patterns
+     *
+     * @param messageBody The SMS message text
+     * @param merchant Extracted merchant name (if any)
+     * @param senderAddress The phone number/short code of the sender
+     * @return Currency code (INR, USD, etc.)
+     */
+    private fun detectCurrency(messageBody: String, merchant: String?, senderAddress: String): String {
+        val bodyLower = messageBody.lowercase()
+
+        // 1. Check merchant-specific currency mapping
+        if (merchant != null) {
+            val merchantLower = merchant.lowercase()
+            val currency = MERCHANT_CURRENCY_MAP[merchantLower]
+            if (currency != null) return currency
+
+            // Also check if any key in the map is contained in merchant name
+            for ((key, curr) in MERCHANT_CURRENCY_MAP) {
+                if (merchantLower.contains(key) || bodyLower.contains(key)) {
+                    return curr
+                }
+            }
+        }
+
+        // 2. Check for explicit currency indicators in message
+        when {
+            bodyLower.contains("₹") || bodyLower.contains("inr") ||
+            bodyLower.contains("rs.") || bodyLower.contains("rs ") -> return "INR"
+            bodyLower.contains("$") || bodyLower.contains("usd") -> return "USD"
+            bodyLower.contains("€") || bodyLower.contains("eur") -> return "EUR"
+            bodyLower.contains("£") || bodyLower.contains("gbp") -> return "GBP"
+            bodyLower.contains("¥") || bodyLower.contains("jpy") -> return "JPY"
+        }
+
+        // 3. Check sender pattern for Indian numbers
+        val cleanedSender = senderAddress.replace(Regex("[^0-9+]"), "")
+        when {
+            cleanedSender.startsWith("+91") -> return "INR"
+            cleanedSender.startsWith("91") && cleanedSender.length > 10 -> return "INR"
+            cleanedSender.length == 10 && !cleanedSender.startsWith("1") -> return "INR" // Likely Indian
+            cleanedSender.startsWith("+1") || cleanedSender.startsWith("1") -> return "USD"
+        }
+
+        // 4. Check for Indian bank keywords
+        if (bodyLower.contains("bank") && (bodyLower.contains("india") ||
+            bodyLower.contains("mumbai") || bodyLower.contains("delhi"))) {
+            return "INR"
+        }
+
+        // Default to USD for short codes and unknown patterns
+        return "USD"
+    }
+
+    /**
      * Parses financial transactions from SMS messages using pattern matching.
      *
      * ## Parsing Strategy
@@ -456,9 +576,11 @@ class AIService(private val context: Context) {
                 continue
             }
 
+            // Extract merchant first (needed for currency detection)
+            val merchant = extractMerchantFromMessage(msg.body)
+
             // Extract amount
             var amount: Double? = null
-            var currency = "INR"
 
             for (pattern in amountPatterns) {
                 val match = pattern.find(msg.body)
@@ -466,8 +588,6 @@ class AIService(private val context: Context) {
                     val amountStr = match.groupValues[1].replace(",", "")
                     amount = amountStr.toDoubleOrNull()
                     if (amount != null) {
-                        // Determine currency
-                        currency = if (msg.body.contains("$") || bodyLower.contains("usd")) "USD" else "INR"
                         break
                     }
                 }
@@ -478,8 +598,8 @@ class AIService(private val context: Context) {
                 continue
             }
 
-            // Extract merchant from the message
-            val merchant = extractMerchantFromMessage(msg.body)
+            // Detect currency based on merchant, message content, and sender
+            val currency = detectCurrency(msg.body, merchant, msg.address)
 
             transactions.add(
                 ParsedTransaction(
