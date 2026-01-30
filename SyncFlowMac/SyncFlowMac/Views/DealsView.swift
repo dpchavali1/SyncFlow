@@ -267,24 +267,35 @@ struct FeaturedDealCard: View {
             NSLog("🔵 [FeaturedDealCard] Trying with default browser URL...")
             if let browserURL = NSWorkspace.shared.urlForApplication(toOpen: url) {
                 NSLog("🔵 [FeaturedDealCard] Default browser: \(browserURL.path)")
-                success = NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration())
-                NSLog("🔵 [FeaturedDealCard] Browser open result: \(success)")
+                NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                    if let error {
+                        NSLog("❌ [FeaturedDealCard] Browser open failed: \(error)")
+                        openDealFallback(url)
+                    } else {
+                        NSLog("🔵 [FeaturedDealCard] Browser open succeeded")
+                    }
+                }
+                return
             }
         }
 
         if !success {
-            // Method 3: Try shell command as last resort
-            NSLog("🔵 [FeaturedDealCard] Trying shell command...")
-            let task = Process()
-            task.launchPath = "/usr/bin/open"
-            task.arguments = [url.absoluteString]
-            do {
-                try task.run()
-                task.waitUntilExit()
-                NSLog("🔵 [FeaturedDealCard] Shell command exit code: \(task.terminationStatus)")
-            } catch {
-                NSLog("❌ [FeaturedDealCard] Shell command failed: \(error)")
-            }
+            openDealFallback(url)
+        }
+    }
+
+    private func openDealFallback(_ url: URL) {
+        // Method 3: Try shell command as last resort
+        NSLog("🔵 [FeaturedDealCard] Trying shell command...")
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = [url.absoluteString]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            NSLog("🔵 [FeaturedDealCard] Shell command exit code: \(task.terminationStatus)")
+        } catch {
+            NSLog("❌ [FeaturedDealCard] Shell command failed: \(error)")
         }
     }
 }
@@ -589,6 +600,10 @@ struct DealCard: View {
         .shadow(color: .black.opacity(isHovering ? 0.15 : 0.08), radius: isHovering ? 12 : 6, x: 0, y: isHovering ? 6 : 3)
         .scaleEffect(isHovering ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovering)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            openDeal()
+        }
         .onHover { hovering in
             isHovering = hovering
         }
@@ -634,24 +649,35 @@ struct DealCard: View {
             NSLog("🟢 [DealCard] Trying with default browser URL...")
             if let browserURL = NSWorkspace.shared.urlForApplication(toOpen: url) {
                 NSLog("🟢 [DealCard] Default browser: \(browserURL.path)")
-                success = NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration())
-                NSLog("🟢 [DealCard] Browser open result: \(success)")
+                NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                    if let error {
+                        NSLog("❌ [DealCard] Browser open failed: \(error)")
+                        openDealFallback(url)
+                    } else {
+                        NSLog("🟢 [DealCard] Browser open succeeded")
+                    }
+                }
+                return
             }
         }
 
         if !success {
-            // Method 3: Try shell command as last resort
-            NSLog("🟢 [DealCard] Trying shell command...")
-            let task = Process()
-            task.launchPath = "/usr/bin/open"
-            task.arguments = [url.absoluteString]
-            do {
-                try task.run()
-                task.waitUntilExit()
-                NSLog("🟢 [DealCard] Shell command exit code: \(task.terminationStatus)")
-            } catch {
-                NSLog("❌ [DealCard] Shell command failed: \(error)")
-            }
+            openDealFallback(url)
+        }
+    }
+
+    private func openDealFallback(_ url: URL) {
+        // Method 3: Try shell command as last resort
+        NSLog("🟢 [DealCard] Trying shell command...")
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = [url.absoluteString]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            NSLog("🟢 [DealCard] Shell command exit code: \(task.terminationStatus)")
+        } catch {
+            NSLog("❌ [DealCard] Shell command failed: \(error)")
         }
     }
 }
