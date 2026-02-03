@@ -4464,6 +4464,9 @@ export const bulkDeleteInactiveUsers = async (inactiveDays: number = 90): Promis
 }
 
 // Cost Optimization Recommendations
+// BANDWIDTH OPTIMIZATION: Uses lightweight queries instead of downloading all user data
+// Old approach: Downloaded entire /users tree (10MB+)
+// New approach: Uses cached overview data and server-side counts (~1KB)
 export const getCostOptimizationRecommendations = async (): Promise<Array<{
   type: 'storage' | 'database' | 'cleanup' | 'scaling'
   priority: 'high' | 'medium' | 'low'
@@ -4473,11 +4476,16 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
   action: string
 }>> => {
   try {
-    console.log('Starting cost optimization analysis...')
-    console.log('Current auth state:', await waitForAuth())
+    console.log('Starting cost optimization analysis (bandwidth-optimized)...')
 
-    const overview = await getSystemOverview()
+    // Use lightweight overview queries instead of downloading all user data
+    const [overview, cleanupOverview] = await Promise.all([
+      getSystemOverview(),
+      getSystemCleanupOverviewOptimized()
+    ])
+
     console.log('System overview:', overview)
+    console.log('Cleanup overview:', cleanupOverview)
 
     const recommendations: Array<{
       type: 'storage' | 'database' | 'cleanup' | 'scaling'
@@ -4488,34 +4496,59 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
       action: string
     }> = []
 
+    const totalUsers = overview.totalUsers || cleanupOverview.totalUsers || 0
+
     // User count check
-    if (overview.totalUsers > 1000) {
+    if (totalUsers > 1000) {
       recommendations.push({
         type: 'scaling',
         priority: 'medium',
         title: 'High User Count',
-        description: `${overview.totalUsers} users - consider implementing cleanup policies`,
-        potentialSavings: overview.totalUsers * 0.01,
+        description: `${totalUsers} users - consider implementing cleanup policies`,
+        potentialSavings: totalUsers * 0.01,
         action: 'Review data retention policies and cleanup inactive users'
       })
     }
 
-    // Inactive user cleanup
-    console.log('Checking for inactive users...')
-    const users = await getDetailedUserList()
-    console.log('Users found:', users.length)
-    const inactiveUsers = users.filter(u => !u.isActive).length
-    console.log('Inactive users:', inactiveUsers, 'Total users:', users.length)
+    // Use cleanup overview data for inactive device/session detection
+    // This avoids downloading all user data just to count inactive users
+    const inactiveDevices = cleanupOverview.breakdown?.inactiveDevices || 0
+    const expiredSessions = cleanupOverview.breakdown?.expiredSessions || 0
+    const totalCleanupItems = cleanupOverview.totalCleanupItems || 0
 
-    if (inactiveUsers > users.length * 0.2 && users.length > 0) { // More than 20% inactive
-      console.log('Adding inactive user cleanup recommendation')
+    // Recommend cleanup if there are stale items
+    if (totalCleanupItems > totalUsers * 0.5) {
       recommendations.push({
         type: 'cleanup',
         priority: 'high',
-        title: 'Inactive User Cleanup',
-        description: `${inactiveUsers} inactive users (${Math.round(inactiveUsers / users.length * 100)}% of total)`,
-        potentialSavings: inactiveUsers * 0.25, // Estimated storage savings per user
-        action: 'Delete users inactive for 90+ days from Users tab'
+        title: 'Data Cleanup Recommended',
+        description: `${totalCleanupItems} stale items detected across ${totalUsers} users`,
+        potentialSavings: totalCleanupItems * 0.001, // Estimated savings
+        action: 'Run cleanup operations from the Overview tab'
+      })
+    }
+
+    // Inactive devices recommendation
+    if (inactiveDevices > 10) {
+      recommendations.push({
+        type: 'cleanup',
+        priority: 'medium',
+        title: 'Inactive Devices',
+        description: `${inactiveDevices} devices haven't been active in 30+ days`,
+        potentialSavings: inactiveDevices * 0.05,
+        action: 'Review and cleanup inactive device registrations'
+      })
+    }
+
+    // Expired sessions recommendation
+    if (expiredSessions > 50) {
+      recommendations.push({
+        type: 'cleanup',
+        priority: 'medium',
+        title: 'Expired Sessions',
+        description: `${expiredSessions} expired user sessions to clean up`,
+        potentialSavings: expiredSessions * 0.01,
+        action: 'Run session cleanup from Overview tab'
       })
     }
 
@@ -4529,16 +4562,16 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
         priority: 'low',
         title: 'Regular Data Maintenance',
         description: 'Keep your database optimized and clean',
-        potentialSavings: overview.totalUsers * 0.01, // Small savings per user
+        potentialSavings: totalUsers * 0.01,
         action: 'Run regular cleanup operations and monitor data growth'
       })
 
-      if (overview.totalUsers > 100) {
+      if (totalUsers > 100) {
         recommendations.push({
           type: 'database',
           priority: 'low',
           title: 'Database Health Check',
-          description: `Monitor ${overview.totalUsers} users - check Users tab for detailed analytics`,
+          description: `Monitor ${totalUsers} users - check Users tab for detailed analytics`,
           potentialSavings: 2.50,
           action: 'Review user activity via Users tab and run cleanup operations'
         })
