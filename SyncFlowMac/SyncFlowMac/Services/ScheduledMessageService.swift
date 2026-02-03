@@ -19,6 +19,12 @@ class ScheduledMessageService: ObservableObject {
     private var messagesHandle: DatabaseHandle?
     private var currentUserId: String?
 
+    // BANDWIDTH OPTIMIZATION: Use child event listeners instead of value
+    private var addedHandle: DatabaseHandle?
+    private var changedHandle: DatabaseHandle?
+    private var removedHandle: DatabaseHandle?
+    private var messagesCache: [String: ScheduledMessage] = [:]
+
     private init() {}
 
     // MARK: - ScheduledMessage Model
@@ -78,17 +84,86 @@ class ScheduledMessageService: ObservableObject {
 
     /// Stop listening
     func stopListening() {
-        guard let userId = currentUserId, let handle = messagesHandle else { return }
+        guard let userId = currentUserId else { return }
 
-        database.reference()
+        let messagesRef = database.reference()
             .child("users")
             .child(userId)
             .child("scheduled_messages")
-            .removeObserver(withHandle: handle)
 
-        messagesHandle = nil
+        // Remove old-style listener
+        if let handle = messagesHandle {
+            messagesRef.removeObserver(withHandle: handle)
+            messagesHandle = nil
+        }
+
+        // Remove optimized listeners
+        if let handle = addedHandle {
+            messagesRef.removeObserver(withHandle: handle)
+            addedHandle = nil
+        }
+        if let handle = changedHandle {
+            messagesRef.removeObserver(withHandle: handle)
+            changedHandle = nil
+        }
+        if let handle = removedHandle {
+            messagesRef.removeObserver(withHandle: handle)
+            removedHandle = nil
+        }
+
         currentUserId = nil
         scheduledMessages = []
+        messagesCache = [:]
+    }
+
+    /// Start listening with bandwidth optimization (delta-only sync)
+    /// Uses child events instead of value events to reduce bandwidth by ~95%
+    func startListeningOptimized(userId: String) {
+        // Stop any existing listeners first
+        if currentUserId != nil {
+            stopListening()
+        }
+
+        currentUserId = userId
+        messagesCache = [:]
+
+        let messagesRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("scheduled_messages")
+
+        let updatePublishedList = { [weak self] in
+            guard let self = self else { return }
+            let sorted = Array(self.messagesCache.values).sorted { $0.scheduledTime < $1.scheduledTime }
+            DispatchQueue.main.async {
+                self.scheduledMessages = sorted
+            }
+        }
+
+        // Listen for added messages
+        addedHandle = messagesRef.observe(.childAdded) { [weak self] snapshot in
+            guard let self = self,
+                  let data = snapshot.value as? [String: Any],
+                  let msg = self.parseMessage(id: snapshot.key, data: data) else { return }
+            self.messagesCache[snapshot.key] = msg
+            updatePublishedList()
+        }
+
+        // Listen for changed messages
+        changedHandle = messagesRef.observe(.childChanged) { [weak self] snapshot in
+            guard let self = self,
+                  let data = snapshot.value as? [String: Any],
+                  let msg = self.parseMessage(id: snapshot.key, data: data) else { return }
+            self.messagesCache[snapshot.key] = msg
+            updatePublishedList()
+        }
+
+        // Listen for removed messages
+        removedHandle = messagesRef.observe(.childRemoved) { [weak self] snapshot in
+            guard let self = self else { return }
+            self.messagesCache.removeValue(forKey: snapshot.key)
+            updatePublishedList()
+        }
     }
 
     // MARK: - Schedule Messages

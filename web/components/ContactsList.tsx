@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import {
   Contact,
-  listenToContacts,
+  listenToContactsOptimized,
   createContact,
   updateContact,
   deleteContact,
@@ -35,7 +35,8 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
   useEffect(() => {
     if (!userId) return
 
-    const unsubContacts = listenToContacts(userId, (androidContacts) => {
+    // Optimized contacts listener - uses child events instead of full snapshot
+    const unsubContacts = listenToContactsOptimized(userId, (androidContacts) => {
       setContacts(androidContacts)
       setIsLoading(false)
     })
@@ -99,7 +100,7 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
 
   const openEditModal = (contact: Contact) => {
     setFormName(contact.displayName)
-    setFormPhone(contact.phoneNumber)
+    setFormPhone(contact.phoneNumber ?? '')
     setFormPhoneType(contact.phoneType)
     setFormEmail(contact.email || '')
     setFormNotes(contact.notes || '')

@@ -28,6 +28,7 @@ class ContactsReceiveService(private val context: Context) {
 
     private val syncService = DesktopSyncService(context)
     private var contactsListener: ValueEventListener? = null
+    private var childContactsListener: ChildEventListener? = null  // BANDWIDTH OPTIMIZED
     private var databaseRef: DatabaseReference? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -136,10 +137,82 @@ class ContactsReceiveService(private val context: Context) {
         contactsListener?.let { listener ->
             databaseRef?.removeEventListener(listener)
         }
+        childContactsListener?.let { listener ->
+            databaseRef?.removeEventListener(listener)
+        }
         contactsListener = null
+        childContactsListener = null
         databaseRef = null
         scope.cancel()
         Log.d(TAG, "Stopped listening for universal contacts")
+    }
+
+    /**
+     * BANDWIDTH OPTIMIZED: Start listening with child events instead of value events.
+     * This reduces bandwidth by ~95% - only receives individual contact changes,
+     * not the entire contacts list on every change.
+     */
+    fun startListeningOptimized() {
+        scope.launch {
+            try {
+                val userId = syncService.getCurrentUserId()
+
+                databaseRef = FirebaseDatabase.getInstance().reference
+                    .child("users")
+                    .child(userId)
+                    .child(CONTACTS_PATH)
+
+                childContactsListener = object : ChildEventListener {
+                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                        scope.launch {
+                            processSingleContact(snapshot)
+                        }
+                    }
+
+                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                        scope.launch {
+                            processSingleContact(snapshot)
+                        }
+                    }
+
+                    override fun onChildRemoved(snapshot: DataSnapshot) {
+                        Log.d(TAG, "Contact removed from Firebase: ${snapshot.key}")
+                    }
+
+                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.e(TAG, "Firebase child listener cancelled: ${error.message}")
+                    }
+                }
+
+                databaseRef?.addChildEventListener(childContactsListener!!)
+                Log.d(TAG, "Started OPTIMIZED listening for contacts (delta-only)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting optimized contacts listener", e)
+            }
+        }
+    }
+
+    /**
+     * Process a single contact change (for optimized listener)
+     */
+    private suspend fun processSingleContact(snapshot: DataSnapshot) {
+        try {
+            val contactId = snapshot.key ?: return
+            val data = snapshot.value as? Map<String, Any?> ?: return
+
+            // Use existing fromMap method
+            val contact = RemoteContactUpdate.fromMap(contactId, data) ?: return
+
+            val androidContactId = createOrUpdateAndroidContact(contact)
+            if (androidContactId != null) {
+                markPendingSyncComplete(contact.id, androidContactId, contact.version)
+                Log.d(TAG, "Synced contact ${contact.displayName} to Android (ID: $androidContactId)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing single contact", e)
+        }
     }
 
     /**

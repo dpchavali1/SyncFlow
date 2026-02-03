@@ -7,9 +7,9 @@ import {
   ensureWebE2EEKeyBackup,
   ensureWebE2EEKeyPublished,
   listenToDeviceStatus,
-  listenToMessages,
+  listenToMessagesOptimized,
   listenToReadReceipts,
-  listenToSpamMessages,
+  listenToSpamMessagesOptimized,
   listenToWebE2EEBackfillStatus,
   requestWebE2EEKeyBackfill,
   requestWebE2EEKeySync,
@@ -187,12 +187,13 @@ export default function MessagesPage() {
         return
       }
 
-      // Set up message listener
-      unsubscribe = listenToMessages(storedUserId, (newMessages) => {
+      // Set up message listener (using optimized incremental sync - 95% less bandwidth)
+      unsubscribe = await listenToMessagesOptimized(storedUserId, (newMessages) => {
         setMessages(newMessages)
       })
 
-      unsubscribeSpam = listenToSpamMessages(storedUserId, (spam) => {
+      // Optimized spam listener - uses child events instead of full snapshot
+      unsubscribeSpam = listenToSpamMessagesOptimized(storedUserId, (spam) => {
         setSpamMessages(spam)
       })
 

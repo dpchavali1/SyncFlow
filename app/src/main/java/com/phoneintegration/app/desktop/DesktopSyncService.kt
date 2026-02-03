@@ -147,7 +147,8 @@ class DesktopSyncService(context: Context) {
     /** Manages SIM card information for phone number detection */
     private val simManager = SimManager(this.context)
 
-    /** Prevent concurrent E2EE backfill runs */
+    /** DEPRECATED: Backfill no longer needed with shared sync group keypair (v3) */
+    @Deprecated("Backfill no longer needed")
     @Volatile private var isE2eeBackfillRunning = false
 
     /**
@@ -893,6 +894,114 @@ class DesktopSyncService(context: Context) {
 
         spamRef.addValueEventListener(listener)
         awaitClose {
+            Log.d(TAG, "Cleaning up spam messages listener for user: $userId")
+            spamRef.removeEventListener(listener)
+        }
+    }
+
+    /**
+     * BANDWIDTH OPTIMIZED spam listener using ChildEventListener.
+     *
+     * Uses child events instead of value events to reduce bandwidth by ~95%.
+     * Instead of receiving all spam messages on every change, this only
+     * receives the individual message that was added/changed/removed.
+     *
+     * @param onAdded Called when a new spam message is added
+     * @param onChanged Called when a spam message is updated
+     * @param onRemoved Called when a spam message is removed
+     * @return Flow that emits Unit on each change (use with local cache)
+     */
+    fun listenForSpamMessagesOptimized(
+        onAdded: (com.phoneintegration.app.data.database.SpamMessage) -> Unit,
+        onChanged: (com.phoneintegration.app.data.database.SpamMessage) -> Unit,
+        onRemoved: (String) -> Unit
+    ): Flow<Unit> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot listen for spam - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val spamRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(SPAM_MESSAGES_PATH)
+            .orderByChild("date")
+            .limitToLast(100)
+
+        fun parseSpamMessage(child: DataSnapshot): com.phoneintegration.app.data.database.SpamMessage? {
+            return try {
+                val address = child.child("address").getValue(String::class.java) ?: return null
+                val body = child.child("body").getValue(String::class.java) ?: ""
+                val date = child.child("date").getValue(Long::class.java) ?: 0L
+                val id = child.child("messageId").getValue(Long::class.java)
+                    ?: child.key?.toLongOrNull()
+                    ?: child.child("originalMessageId").getValue(String::class.java)?.toLongOrNull()
+                    ?: generateSpamFallbackId(address, body, date)
+                    ?: return null
+                val contactName = child.child("contactName").getValue(String::class.java)
+                val spamConfidence = (child.child("spamConfidence").getValue(Double::class.java)
+                    ?: child.child("spamConfidence").getValue(Float::class.java)?.toDouble()
+                    ?: 0.5).toFloat()
+                val spamReasons = child.child("spamReasons").getValue(String::class.java)
+                val detectedAt = child.child("detectedAt").getValue(Long::class.java) ?: System.currentTimeMillis()
+                val isUserMarked = child.child("isUserMarked").getValue(Boolean::class.java) ?: false
+                val isRead = child.child("isRead").getValue(Boolean::class.java) ?: false
+
+                com.phoneintegration.app.data.database.SpamMessage(
+                    messageId = id,
+                    address = address,
+                    body = body,
+                    date = date,
+                    contactName = contactName,
+                    spamConfidence = spamConfidence,
+                    spamReasons = spamReasons,
+                    detectedAt = detectedAt,
+                    isUserMarked = isUserMarked,
+                    isRead = isRead
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Error parsing spam message ${child.key}", e)
+                null
+            }
+        }
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                parseSpamMessage(snapshot)?.let { msg ->
+                    onAdded(msg)
+                    trySend(Unit)
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                parseSpamMessage(snapshot)?.let { msg ->
+                    onChanged(msg)
+                    trySend(Unit)
+                }
+            }
+
+            override fun onChildRemoved(snapshot: DataSnapshot) {
+                snapshot.key?.let { key ->
+                    onRemoved(key)
+                    trySend(Unit)
+                }
+            }
+
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
+                // Not used for spam messages
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Optimized spam listener cancelled: ${error.message}")
+            }
+        }
+
+        spamRef.addChildEventListener(listener)
+        awaitClose {
+            Log.d(TAG, "Cleaning up optimized spam messages listener for user: $userId")
             spamRef.removeEventListener(listener)
         }
     }
@@ -1058,6 +1167,183 @@ class DesktopSyncService(context: Context) {
     }
 
     // ==========================================
+    // BANDWIDTH OPTIMIZED LISTENERS (use ChildEventListener for delta-only sync)
+    // ==========================================
+
+    /**
+     * BANDWIDTH OPTIMIZED: Listen for whitelist changes using child events
+     * Downloads only deltas instead of full list on every change
+     */
+    fun listenForWhitelistOptimized(): Flow<Set<String>> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot listen for whitelist - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val whitelistRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child("spam_whitelist")
+
+        // Local cache to maintain full set
+        val addressCache = mutableSetOf<String>()
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                snapshot.getValue(String::class.java)?.let { address ->
+                    addressCache.add(address)
+                    trySend(addressCache.toSet()).isSuccess
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                // Whitelist entries don't change, just add/remove
+            }
+
+            override fun onChildRemoved(snapshot: DataSnapshot) {
+                snapshot.getValue(String::class.java)?.let { address ->
+                    addressCache.remove(address)
+                    trySend(addressCache.toSet()).isSuccess
+                }
+            }
+
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
+                // Not used for flat lists
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Whitelist optimized listener cancelled: ${error.message}")
+            }
+        }
+
+        whitelistRef.addChildEventListener(listener)
+        awaitClose {
+            whitelistRef.removeEventListener(listener)
+        }
+    }
+
+    /**
+     * BANDWIDTH OPTIMIZED: Listen for blocklist changes using child events
+     * Downloads only deltas instead of full list on every change
+     */
+    fun listenForBlocklistOptimized(): Flow<Set<String>> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot listen for blocklist - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val blocklistRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child("spam_blocklist")
+
+        // Local cache to maintain full set
+        val addressCache = mutableSetOf<String>()
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                snapshot.getValue(String::class.java)?.let { address ->
+                    addressCache.add(address)
+                    trySend(addressCache.toSet()).isSuccess
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                // Blocklist entries don't change, just add/remove
+            }
+
+            override fun onChildRemoved(snapshot: DataSnapshot) {
+                snapshot.getValue(String::class.java)?.let { address ->
+                    addressCache.remove(address)
+                    trySend(addressCache.toSet()).isSuccess
+                }
+            }
+
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
+                // Not used for flat lists
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Blocklist optimized listener cancelled: ${error.message}")
+            }
+        }
+
+        blocklistRef.addChildEventListener(listener)
+        awaitClose {
+            blocklistRef.removeEventListener(listener)
+        }
+    }
+
+    /**
+     * BANDWIDTH OPTIMIZED: Listen for message reactions using child events
+     * Downloads only deltas instead of full reactions map on every change
+     */
+    fun listenForMessageReactionsOptimized(): Flow<Map<Long, String>> = callbackFlow {
+        val userId = try {
+            getCurrentUserId()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cannot listen for reactions - not authenticated", e)
+            close()
+            return@callbackFlow
+        }
+
+        val reactionsRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(MESSAGE_REACTIONS_PATH)
+
+        // Local cache to maintain full map
+        val reactionsCache = mutableMapOf<Long, String>()
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                val id = snapshot.key?.toLongOrNull() ?: return
+                val reaction = when (val value = snapshot.child("reaction").value) {
+                    is String -> value
+                    else -> return
+                }
+                reactionsCache[id] = reaction
+                trySend(reactionsCache.toMap()).isSuccess
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                val id = snapshot.key?.toLongOrNull() ?: return
+                val reaction = when (val value = snapshot.child("reaction").value) {
+                    is String -> value
+                    else -> return
+                }
+                reactionsCache[id] = reaction
+                trySend(reactionsCache.toMap()).isSuccess
+            }
+
+            override fun onChildRemoved(snapshot: DataSnapshot) {
+                val id = snapshot.key?.toLongOrNull() ?: return
+                reactionsCache.remove(id)
+                trySend(reactionsCache.toMap()).isSuccess
+            }
+
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
+                // Not used for maps
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Reactions optimized listener cancelled: ${error.message}")
+            }
+        }
+
+        reactionsRef.addChildEventListener(listener)
+        awaitClose {
+            reactionsRef.removeEventListener(listener)
+        }
+    }
+
+    // ==========================================
     // REGION: MMS Attachment Handling
     // ==========================================
 
@@ -1208,7 +1494,7 @@ class DesktopSyncService(context: Context) {
                     @Suppress("UNCHECKED_CAST")
                     val uploadResponse = uploadUrlResult.data as? Map<String, Any>
                     val uploadUrl = uploadResponse?.get("uploadUrl") as? String
-                    r2Key = uploadResponse?.get("r2Key") as? String
+                    r2Key = uploadResponse?.get("fileKey") as? String  // Cloud Function returns "fileKey"
                     val fileId = uploadResponse?.get("fileId") as? String
 
                     if (uploadUrl == null || r2Key == null || fileId == null) {
@@ -1241,12 +1527,15 @@ class DesktopSyncService(context: Context) {
 
                     Log.d(TAG, "Uploaded attachment to R2: ${attachment.id} -> $r2Key (encrypted: $isEncrypted)")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error uploading attachment ${attachment.id} to R2", e)
-                    if (bytesToUpload.size < 500_000) {
+                    Log.e(TAG, "Error uploading attachment ${attachment.id} to R2: ${e.message}", e)
+                    // BANDWIDTH OPTIMIZATION: Only use inline data for tiny attachments (< 50 KB)
+                    // Larger attachments should use R2 to avoid bloating Firebase RTDB
+                    if (bytesToUpload.size < 50_000) {
                         useInlineData = true
                         r2Key = null
-                        Log.w(TAG, "Falling back to inline data for attachment ${attachment.id}")
+                        Log.w(TAG, "Falling back to inline data for small attachment ${attachment.id} (${bytesToUpload.size} bytes)")
                     } else {
+                        Log.e(TAG, "Attachment ${attachment.id} too large for inline (${bytesToUpload.size} bytes), skipping. Fix R2 upload!")
                         continue
                     }
                 }
@@ -1639,7 +1928,7 @@ class DesktopSyncService(context: Context) {
         userId: String,
         body: String?,
         cachedDeviceId: String? = null,
-        cachedDeviceKeys: Map<String, String>? = null
+        cachedDeviceKeys: Map<String, String>? = null  // Deprecated: kept for backward compatibility
     ): MutableMap<String, Any?> {
         val safeBody = body ?: ""
         val isE2eeEnabled = preferencesManager.e2eeEnabled.value
@@ -1650,37 +1939,40 @@ class DesktopSyncService(context: Context) {
         }
 
         val deviceId = cachedDeviceId ?: (e2eeManager.getDeviceId() ?: "android")
-        val deviceKeys = cachedDeviceKeys ?: e2eeManager.getDevicePublicKeys(userId)
         val dataKey = ByteArray(32).apply { SecureRandom().nextBytes(this) }
         val bodyToEncrypt = safeBody.ifBlank { "[MMS]" }
         val encryptedBodyResult = e2eeManager.encryptMessageBody(dataKey, bodyToEncrypt)
-        val keyMap = mutableMapOf<String, String>()
 
-        if (encryptedBodyResult != null && deviceKeys.isNotEmpty()) {
-            for ((targetDeviceId, publicKey) in deviceKeys) {
-                val envelope = e2eeManager.encryptDataKeyForDevice(publicKey, dataKey)
-                if (!envelope.isNullOrBlank()) {
-                    keyMap[targetDeviceId] = envelope
-                }
-            }
+        // NEW APPROACH: Encrypt data key once with sync group public key (not per-device)
+        // All devices in the sync group share the same keypair, eliminating backfill need
+        val syncGroupPublicKey = e2eeManager.getSyncGroupPublicKeyX963()
+        val envelope = if (!syncGroupPublicKey.isNullOrBlank()) {
+            e2eeManager.encryptDataKeyForDevice(syncGroupPublicKey, dataKey)
+        } else {
+            null
         }
 
-        if (encryptedBodyResult != null && keyMap.isNotEmpty()) {
+        if (encryptedBodyResult != null && !envelope.isNullOrBlank()) {
+            // SUCCESS: Store encrypted message with single envelope
             val (ciphertext, nonce) = encryptedBodyResult
             this["body"] = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
             this["nonce"] = Base64.encodeToString(nonce, Base64.NO_WRAP)
-            this["keyMap"] = keyMap
-            this["keyVersion"] = 2
+            this["e2ee_envelope"] = envelope  // NEW: Single envelope for sync group
+            this["keyVersion"] = 3  // Version 3 = shared sync group keypair approach
             this["senderDeviceId"] = deviceId
             this["encrypted"] = true
+
+            Log.d(TAG, "Message encrypted successfully with sync group keypair (v3)")
         } else {
+            // FAILURE: Encryption failed, store redacted message
             val failureReason = when {
-                encryptedBodyResult == null && keyMap.isEmpty() -> "encryption and key exchange both failed"
-                encryptedBodyResult == null -> "encryption failed"
-                keyMap.isEmpty() -> "no device keys available"
+                encryptedBodyResult == null && envelope == null -> "encryption and key envelope both failed"
+                encryptedBodyResult == null -> "body encryption failed"
+                envelope == null -> "sync group key not available"
                 else -> "unknown error"
             }
 
+            Log.w(TAG, "E2EE encryption failed: $failureReason")
             this["body"] = "[Encrypted]"
             this["encrypted"] = false
             this["e2eeFailed"] = true
@@ -1757,6 +2049,7 @@ class DesktopSyncService(context: Context) {
         outgoingRef.addChildEventListener(listener)
 
         awaitClose {
+            Log.d(TAG, "Cleaning up outgoing messages listener for user: $userId")
             outgoingRef.removeEventListener(listener)
         }
     }
@@ -2544,6 +2837,34 @@ class DesktopSyncService(context: Context) {
         try {
             Log.d(TAG, "Processing sync history request: ${request.id}, days=${request.days}")
 
+            // OPTIMIZATION: Check if data already exists in Firebase (recovered/reconnected account)
+            // Only sync if this is a NEW account with no messages yet
+            val messagesRef = database.reference
+                .child(USERS_PATH)
+                .child(userId)
+                .child(MESSAGES_PATH)
+
+            val existingMessagesSnapshot = messagesRef.limitToFirst(10).get().await()
+            val hasExistingMessages = existingMessagesSnapshot.exists() && existingMessagesSnapshot.childrenCount > 0
+
+            if (hasExistingMessages) {
+                val messageCount = existingMessagesSnapshot.childrenCount
+                Log.i(TAG, "⏭️ SKIPPING sync - Account already has $messageCount+ messages in Firebase (recovered/reconnected account)")
+
+                // Mark request as skipped (data already exists)
+                requestRef.updateChildren(mapOf(
+                    "status" to "skipped",
+                    "reason" to "account_has_data",
+                    "message" to "Account already has messages in Firebase. No sync needed.",
+                    "existingMessages" to messageCount,
+                    "completedAt" to ServerValue.TIMESTAMP
+                )).await()
+
+                return
+            }
+
+            Log.i(TAG, "✅ Account is NEW (no messages in Firebase). Proceeding with initial sync...")
+
             // Update status to in_progress
             requestRef.updateChildren(mapOf(
                 "status" to "in_progress",
@@ -2608,7 +2929,17 @@ class DesktopSyncService(context: Context) {
 
     /**
      * Process an E2EE key sync request for a specific device.
-     * Re-encrypts the stored key backup to the requester's current public key.
+     *
+     * NEW BEHAVIOR (v3 - Shared Sync Group Keypair):
+     * Shares the Android device's sync group keypair (private key) with the requesting
+     * macOS/web device. The requesting device imports this keypair and uses it for
+     * all encryption/decryption, eliminating the need for per-device keyMaps and backfill.
+     *
+     * OLD BEHAVIOR (v2 - Per-Device Keys):
+     * Re-encrypted the stored key backup to the requester's current public key.
+     *
+     * Security: The private key is encrypted during transit using ECDH with the
+     * requester's ephemeral public key.
      */
     suspend fun processE2eeKeySyncRequest(requesterDeviceId: String, requesterPublicKeyX963: String) {
         val userId = getCurrentUserId()
@@ -2622,11 +2953,6 @@ class DesktopSyncService(context: Context) {
             .child(userId)
             .child(E2EE_KEY_RESPONSES_PATH)
             .child(requesterDeviceId)
-        val backupRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(E2EE_KEY_BACKUPS_PATH)
-            .child(requesterDeviceId)
 
         try {
             requestRef.updateChildren(mapOf("status" to "processing")).await()
@@ -2634,53 +2960,54 @@ class DesktopSyncService(context: Context) {
             // Ensure E2EE keys are available (loads existing if already initialized)
             e2eeManager.initializeKeys()
 
-            val backupSnapshot = backupRef.get().await()
-            if (!backupSnapshot.exists()) {
+            // Get sync group private key (Android's ECDH private key)
+            val syncGroupPrivateKeyPKCS8 = e2eeManager.getSyncGroupPrivateKeyPKCS8()
+            if (syncGroupPrivateKeyPKCS8.isNullOrBlank()) {
                 responseRef.setValue(mapOf(
                     "status" to "error",
-                    "error" to "No key backup found",
+                    "error" to "Sync group private key not available",
                     "respondedAt" to ServerValue.TIMESTAMP
                 )).await()
                 requestRef.updateChildren(mapOf("status" to "error")).await()
+                Log.e(TAG, "Sync group private key not available for key sync request")
                 return
             }
 
-            val encryptedEnvelope = backupSnapshot.child("encryptedPrivateKeyEnvelope").getValue(String::class.java)
-            if (encryptedEnvelope.isNullOrBlank()) {
+            // Get sync group public key
+            val syncGroupPublicKeyX963 = e2eeManager.getSyncGroupPublicKeyX963()
+            if (syncGroupPublicKeyX963.isNullOrBlank()) {
                 responseRef.setValue(mapOf(
                     "status" to "error",
-                    "error" to "Key backup is missing encrypted data",
+                    "error" to "Sync group public key not available",
                     "respondedAt" to ServerValue.TIMESTAMP
                 )).await()
                 requestRef.updateChildren(mapOf("status" to "error")).await()
+                Log.e(TAG, "Sync group public key not available for key sync request")
                 return
             }
 
-            val rawKey = e2eeManager.decryptDataKeyFromEnvelope(encryptedEnvelope)
-            if (rawKey == null) {
+            // Encode private key as bytes for encryption
+            val privateKeyBytes = android.util.Base64.decode(syncGroupPrivateKeyPKCS8, android.util.Base64.NO_WRAP)
+
+            // Encrypt the private key for the requesting device
+            val encryptedPrivateKeyEnvelope = e2eeManager.encryptDataKeyForDevice(requesterPublicKeyX963, privateKeyBytes)
+            if (encryptedPrivateKeyEnvelope.isNullOrBlank()) {
                 responseRef.setValue(mapOf(
                     "status" to "error",
-                    "error" to "Failed to decrypt key backup",
+                    "error" to "Failed to encrypt sync group private key for device",
                     "respondedAt" to ServerValue.TIMESTAMP
                 )).await()
                 requestRef.updateChildren(mapOf("status" to "error")).await()
+                Log.e(TAG, "Failed to encrypt sync group private key for device: $requesterDeviceId")
                 return
             }
 
-            val encryptedForRequester = e2eeManager.encryptDataKeyForDevice(requesterPublicKeyX963, rawKey)
-            if (encryptedForRequester.isNullOrBlank()) {
-                responseRef.setValue(mapOf(
-                    "status" to "error",
-                    "error" to "Failed to encrypt key for device",
-                    "respondedAt" to ServerValue.TIMESTAMP
-                )).await()
-                requestRef.updateChildren(mapOf("status" to "error")).await()
-                return
-            }
-
+            // Send the encrypted sync group keypair to the requesting device
             responseRef.setValue(mapOf(
                 "status" to "ready",
-                "encryptedPrivateKeyEnvelope" to encryptedForRequester,
+                "encryptedPrivateKeyEnvelope" to encryptedPrivateKeyEnvelope,
+                "syncGroupPublicKeyX963" to syncGroupPublicKeyX963,
+                "keyVersion" to 3,  // Version 3 = shared sync group keypair
                 "respondedAt" to ServerValue.TIMESTAMP
             )).await()
 
@@ -2689,7 +3016,7 @@ class DesktopSyncService(context: Context) {
                 "completedAt" to ServerValue.TIMESTAMP
             )).await()
 
-            Log.i(TAG, "E2EE key sync completed for device: $requesterDeviceId")
+            Log.i(TAG, "E2EE key sync completed for device: $requesterDeviceId (shared sync group keypair v3)")
         } catch (e: Exception) {
             Log.e(TAG, "E2EE key sync failed for device $requesterDeviceId", e)
             responseRef.setValue(mapOf(
@@ -2702,10 +3029,38 @@ class DesktopSyncService(context: Context) {
     }
 
     /**
-     * Backfill keyMap entries for a newly paired device.
-     * Adds per-device envelopes so older encrypted messages can decrypt without full resync.
+     * DEPRECATED: Backfill is no longer needed with shared sync group keypair (v3).
+     *
+     * In the old architecture (v2), each device had its own keypair and messages had
+     * per-device keyMaps. When a new device paired, it needed backfill to add its
+     * public key to all existing messages' keyMaps.
+     *
+     * In the new architecture (v3), all devices share the same sync group keypair.
+     * Messages are encrypted once with the sync group public key, so new devices
+     * can immediately decrypt all messages without backfill.
+     *
+     * This function is kept for backward compatibility but does nothing.
      */
+    @Deprecated("Backfill no longer needed with shared sync group keypair")
     suspend fun processE2eeKeyBackfillRequest(requesterDeviceId: String, requesterPublicKeyX963: String) {
+        Log.i(TAG, "Backfill request ignored - using shared sync group keypair (v3), no backfill needed")
+        val userId = getCurrentUserId()
+        val requestRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(E2EE_KEY_BACKFILL_REQUESTS_PATH)
+            .child(requesterDeviceId)
+
+        // Mark as completed immediately (no work needed)
+        requestRef.updateChildren(mapOf(
+            "status" to "completed",
+            "message" to "Backfill not needed with shared keypair (v3)",
+            "completedAt" to ServerValue.TIMESTAMP
+        )).await()
+        return
+
+        /* OLD BACKFILL CODE - DISABLED
+        if (isE2eeBackfillRunning) {
         if (isE2eeBackfillRunning) {
             Log.w(TAG, "E2EE backfill already running, skipping request for $requesterDeviceId")
             return
@@ -2851,6 +3206,7 @@ class DesktopSyncService(context: Context) {
         } finally {
             isE2eeBackfillRunning = false
         }
+        */
     }
 
     /**

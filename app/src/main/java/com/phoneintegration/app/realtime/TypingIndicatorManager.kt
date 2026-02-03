@@ -250,6 +250,97 @@ class TypingIndicatorManager(private val context: Context) {
     }
 
     /**
+     * BANDWIDTH OPTIMIZED: Observe all typing statuses using child events
+     * Downloads only deltas instead of full typing map on every keystroke
+     */
+    fun observeAllTypingStatusesOptimized(): Flow<Map<String, TypingStatus>> = callbackFlow {
+        val userId = auth.currentUser?.uid
+        if (userId == null) {
+            trySend(emptyMap())
+            close()
+            return@callbackFlow
+        }
+
+        val typingRef = database.reference
+            .child(USERS_PATH)
+            .child(userId)
+            .child(TYPING_PATH)
+
+        // Local cache to maintain full state
+        val statusesCache = mutableMapOf<String, TypingStatus>()
+
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                processTypingSnapshot(snapshot)?.let { status ->
+                    statusesCache[status.conversationAddress] = status
+                    trySend(statusesCache.toMap()).isSuccess
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                processTypingSnapshot(snapshot)?.let { status ->
+                    statusesCache[status.conversationAddress] = status
+                    trySend(statusesCache.toMap()).isSuccess
+                }
+            }
+
+            override fun onChildRemoved(snapshot: DataSnapshot) {
+                val address = snapshot.child("conversationAddress").getValue(String::class.java)
+                if (address != null) {
+                    statusesCache.remove(address)
+                    trySend(statusesCache.toMap()).isSuccess
+                }
+            }
+
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
+                // Not used
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Typing statuses optimized listener cancelled", error.toException())
+            }
+        }
+
+        typingRef.addChildEventListener(listener)
+
+        awaitClose {
+            typingRef.removeEventListener(listener)
+        }
+    }
+
+    /**
+     * Helper to process a typing status snapshot
+     */
+    private fun processTypingSnapshot(snapshot: DataSnapshot): TypingStatus? {
+        return try {
+            val address = snapshot.child("conversationAddress").getValue(String::class.java)
+                ?: return null
+            val device = snapshot.child("device").getValue(String::class.java) ?: "unknown"
+
+            // Don't include our own typing
+            if (device == "android") return null
+
+            val isTyping = snapshot.child("isTyping").getValue(Boolean::class.java) ?: false
+            val timestamp = snapshot.child("timestamp").getValue(Long::class.java) ?: 0L
+
+            // Skip stale entries
+            if (System.currentTimeMillis() - timestamp > TYPING_TIMEOUT_MS * 2) return null
+
+            if (isTyping) {
+                TypingStatus(
+                    conversationAddress = address,
+                    isTyping = true,
+                    device = device,
+                    timestamp = timestamp
+                )
+            } else null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing typing status", e)
+            null
+        }
+    }
+
+    /**
      * Clear all typing indicators (call on app close)
      */
     fun clearAllTyping() {

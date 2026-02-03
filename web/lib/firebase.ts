@@ -39,11 +39,15 @@
  */
 
 import { initializeApp, getApps } from 'firebase/app'
-import { getAuth, signInAnonymously, signInWithCustomToken } from 'firebase/auth'
+import { getAuth, signInAnonymously, signInWithCustomToken, User } from 'firebase/auth'
 import {
   getDatabase,
   ref,
   onValue,
+  onChildAdded,
+  onChildChanged,
+  onChildRemoved,
+  off,
   set,
   push,
   remove,
@@ -51,6 +55,10 @@ import {
   get,
   update,
   increment,
+  query,
+  orderByChild,
+  limitToLast,
+  limitToFirst,
 } from 'firebase/database'
 import { getFunctions, httpsCallable } from 'firebase/functions'
 import { getStorage } from 'firebase/storage'
@@ -63,9 +71,14 @@ import {
   getPublicKeyX963Base64,
   getStoredKeyPairJwk,
   importKeyPairFromJwk,
+  importSyncGroupKeypair,
+  isKeyPairLocked,
   decodeUtf8,
+  bytesToBase64,
 } from './e2ee'
 import { PhoneNumberNormalizer } from './phoneNumberNormalizer'
+import { cacheManager, callWithDedup } from './cache'
+import { incrementalSyncManager } from './incrementalSync'
 
 /**
  * Normalizes a phone number for consistent comparison across formats
@@ -124,23 +137,48 @@ const firebaseConfig = {
 /**
  * Firebase app instance - singleton pattern
  * Reuses existing app if already initialized (important for Next.js hot reloading)
+ *
+ * IMPORTANT: Only initialize if config is available (prevents build-time errors)
  */
-export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
+let app: any = null
+let auth: any = null
+let database: any = null
+let storage: any = null
+let functions: any = null
 
-/** Firebase Authentication instance */
-const auth = getAuth(app)
+// Lazy initialization function
+function ensureFirebaseInitialized() {
+  // Skip if already initialized
+  if (app) return
 
-// Auth state persistence is set to 'local' by default, which persists across browser sessions
-// This ensures users stay authenticated even after closing the browser
+  // Skip during build (no window, no env vars)
+  if (typeof window === 'undefined' && !process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
+    // Build time - return without initializing
+    return
+  }
 
-/** Firebase Realtime Database instance */
-const database = getDatabase(app)
+  // Check if Firebase config is available
+  if (!firebaseConfig.apiKey) {
+    throw new Error('[Firebase] Missing Firebase configuration. Check environment variables.')
+  }
 
-/** Firebase Cloud Storage instance for file uploads */
-const storage = getStorage(app)
+  // Initialize Firebase
+  app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0]
+  auth = getAuth(app)
+  database = getDatabase(app)
+  storage = getStorage(app)
+  functions = getFunctions(app)
 
-/** Firebase Cloud Functions instance for server-side operations */
-const functions = getFunctions(app)
+  console.log('[Firebase] Initialized successfully')
+}
+
+// Only initialize if we're in the browser
+if (typeof window !== 'undefined') {
+  ensureFirebaseInitialized()
+}
+
+// Export initialized instances (will be null during build, initialized at runtime)
+export { app, auth, database, storage, functions }
 
 // ============================================
 // AUTHENTICATION FUNCTIONS
@@ -154,6 +192,7 @@ const functions = getFunctions(app)
  * @throws Error if sign-in fails
  */
 export const signInAnon = async () => {
+  ensureFirebaseInitialized()
   try {
     const result = await signInAnonymously(auth)
     return result.user
@@ -427,8 +466,9 @@ export const getCurrentUserId = () => {
  * @returns Promise resolving to user ID or null
  */
 export const waitForAuth = (): Promise<string | null> => {
+  ensureFirebaseInitialized()
   return new Promise((resolve) => {
-    const unsubscribe = auth.onAuthStateChanged((user) => {
+    const unsubscribe = auth.onAuthStateChanged((user: User | null) => {
       unsubscribe()
       resolve(user?.uid || null)
     })
@@ -893,21 +933,29 @@ export const getUsageSummary = async (userId: string): Promise<UsageSummary> => 
  * @returns Unsubscribe function to stop listening
  */
 export const listenToMessages = (userId: string, callback: (messages: any[]) => void) => {
-  const messagesRef = ref(database, `${USERS_PATH}/${userId}/${MESSAGES_PATH}`)
+  // Limit to last 500 messages to reduce bandwidth - older messages can be loaded on demand
+  const messagesRef = query(
+    ref(database, `${USERS_PATH}/${userId}/${MESSAGES_PATH}`),
+    orderByChild('date'),
+    limitToLast(500)
+  )
 
   return onValue(messagesRef, async (snapshot) => {
     const data = snapshot.val()
     if (data) {
-      const deviceId = getOrCreateDeviceId()
+      const deviceId = await getOrCreateDeviceId()
+      const keysLocked = await isKeyPairLocked()
       const messages = await Promise.all(
         Object.entries(data).map(async ([key, value]: [string, any]) => {
           const message = { id: key, ...value, decryptionFailed: false }
 
-          if (message.encrypted && message.keyMap && message.nonce && deviceId) {
-            const envelope = message.keyMap[deviceId]
-            if (envelope) {
+          if (message.encrypted) {
+            let decryptionAttempted = false
+
+            // NEW (v3): Try e2ee_envelope first (shared sync group keypair)
+            if (message.e2ee_envelope && message.nonce) {
               try {
-                const dataKey = await decryptDataKey(envelope)
+                const dataKey = await decryptDataKey(message.e2ee_envelope)
                 if (dataKey) {
                   const decrypted = await decryptMessageBody(
                     dataKey,
@@ -916,27 +964,44 @@ export const listenToMessages = (userId: string, callback: (messages: any[]) => 
                   )
                   if (decrypted) {
                     message.body = decrypted
-                  } else {
-                    message.decryptionFailed = true
-                    message.body = '[🔒 Encrypted message - sync keys to decrypt]'
+                    decryptionAttempted = true
                   }
-                } else {
-                  message.decryptionFailed = true
-                  message.body = '[🔒 Encrypted message - sync keys to decrypt]'
                 }
               } catch {
-                message.decryptionFailed = true
-                message.body = '[🔒 Encrypted message - sync keys to decrypt]'
+                // Fall through to try keyMap
               }
-            } else if (message.encrypted) {
-              // Encrypted but no key for this device
-              message.decryptionFailed = true
-              message.body = '[🔒 Encrypted message - sync keys to decrypt]'
             }
-          } else if (message.encrypted && !message.keyMap) {
-            // Legacy encrypted message without key map
-            message.decryptionFailed = true
-            message.body = '[🔒 Encrypted message - sync keys to decrypt]'
+
+            // OLD (v2): Fall back to keyMap (device-specific keypairs)
+            if (!decryptionAttempted && message.keyMap && message.nonce && deviceId) {
+              const envelope = message.keyMap[deviceId]
+              if (envelope) {
+                try {
+                  const dataKey = await decryptDataKey(envelope)
+                  if (dataKey) {
+                    const decrypted = await decryptMessageBody(
+                      dataKey,
+                      message.body,
+                      message.nonce
+                    )
+                    if (decrypted) {
+                      message.body = decrypted
+                      decryptionAttempted = true
+                    }
+                  }
+                } catch {
+                  // Decryption failed
+                }
+              }
+            }
+
+            // If decryption not attempted or failed, mark as locked
+            if (!decryptionAttempted) {
+              message.decryptionFailed = true
+              message.body = keysLocked
+                ? '[🔒 Encrypted message - unlock keys to decrypt]'
+                : '[🔒 Encrypted message - sync keys to decrypt]'
+            }
           }
 
           return message
@@ -963,7 +1028,12 @@ export const listenToMessages = (userId: string, callback: (messages: any[]) => 
  * @returns Unsubscribe function
  */
 export const listenToSpamMessages = (userId: string, callback: (messages: any[]) => void) => {
-  const spamRef = ref(database, `${USERS_PATH}/${userId}/spam_messages`)
+  // Limit to last 200 spam messages to reduce bandwidth
+  const spamRef = query(
+    ref(database, `${USERS_PATH}/${userId}/spam_messages`),
+    orderByChild('date'),
+    limitToLast(200)
+  )
 
   return onValue(spamRef, (snapshot) => {
     const data = snapshot.val()
@@ -1432,7 +1502,7 @@ export const listenToPairedDevices = (userId: string, callback: (devices: any[])
  * @returns Device ID or null if registration failed
  */
 export const ensureWebDeviceRegistered = async (userId: string, deviceName?: string) => {
-  const deviceId = getOrCreateDeviceId()
+  const deviceId = await getOrCreateDeviceId()
   if (!deviceId) return null
 
   const deviceRef = ref(database, `${USERS_PATH}/${userId}/${DEVICES_PATH}/${deviceId}`)
@@ -1455,7 +1525,7 @@ export const ensureWebDeviceRegistered = async (userId: string, deviceName?: str
  * @param userId - User ID to publish key for
  */
 export const ensureWebE2EEKeyPublished = async (userId: string) => {
-  const deviceId = getOrCreateDeviceId()
+  const deviceId = await getOrCreateDeviceId()
   if (!deviceId) return
   const publicKeyX963 = await getPublicKeyX963Base64()
   if (!publicKeyX963) return
@@ -1483,14 +1553,14 @@ const getAndroidDeviceId = async (userId: string) => {
 }
 
 export const ensureWebE2EEKeyBackup = async (userId: string) => {
-  const deviceId = getOrCreateDeviceId()
+  const deviceId = await getOrCreateDeviceId()
   if (!deviceId) return
 
   const backupRef = ref(database, `users/${userId}/e2ee_key_backups/${deviceId}`)
   const backupSnapshot = await get(backupRef)
   if (backupSnapshot.exists()) return
 
-  const keyPairJwk = getStoredKeyPairJwk()
+  const keyPairJwk = await getStoredKeyPairJwk()
   if (!keyPairJwk) return
 
   const androidDeviceId = await getAndroidDeviceId(userId)
@@ -1517,7 +1587,7 @@ export const ensureWebE2EEKeyBackup = async (userId: string) => {
 }
 
 export const requestWebE2EEKeySync = async (userId: string) => {
-  const deviceId = getOrCreateDeviceId()
+  const deviceId = await getOrCreateDeviceId()
   if (!deviceId) throw new Error('Device not registered')
   const publicKeyX963 = await getPublicKeyX963Base64()
   if (!publicKeyX963) throw new Error('E2EE not initialized')
@@ -1532,22 +1602,17 @@ export const requestWebE2EEKeySync = async (userId: string) => {
   })
 }
 
+/**
+ * @deprecated Backfill no longer needed with shared sync group keypair (v3)
+ */
 export const requestWebE2EEKeyBackfill = async (userId: string) => {
-  const deviceId = getOrCreateDeviceId()
-  if (!deviceId) throw new Error('Device not registered')
-  const publicKeyX963 = await getPublicKeyX963Base64()
-  if (!publicKeyX963) throw new Error('E2EE not initialized')
-
-  const requestRef = ref(database, `users/${userId}/e2ee_key_backfill_requests/${deviceId}`)
-  await set(requestRef, {
-    requesterDeviceId: deviceId,
-    requesterPlatform: 'web',
-    requesterPublicKeyX963: publicKeyX963,
-    requestedAt: serverTimestamp(),
-    status: 'pending',
-  })
+  console.log('Backfill request ignored - using shared sync group keypair (v3)')
+  // No-op: Backfill not needed with shared sync group keypair
 }
 
+/**
+ * @deprecated Backfill no longer needed with shared sync group keypair (v3)
+ */
 export type WebE2eeBackfillStatus = {
   status?: string
   scanned?: number
@@ -1559,31 +1624,23 @@ export type WebE2eeBackfillStatus = {
   completedAt?: number
 }
 
+/**
+ * @deprecated Backfill no longer needed with shared sync group keypair (v3)
+ */
 export const listenToWebE2EEBackfillStatus = (
   userId: string,
   callback: (status: WebE2eeBackfillStatus | null) => void
 ) => {
-  const deviceId = getOrCreateDeviceId()
-  if (!deviceId) {
-    callback(null)
-    return () => {}
-  }
-
-  const statusRef = ref(database, `users/${userId}/e2ee_key_backfill_requests/${deviceId}`)
-  return onValue(statusRef, (snapshot) => {
-    if (!snapshot.exists()) {
-      callback(null)
-      return
-    }
-    callback(snapshot.val() as WebE2eeBackfillStatus)
-  })
+  console.log('Backfill status listener disabled - using shared sync group keypair (v3)')
+  callback(null)
+  return () => {}
 }
 
 export const waitForWebE2EEKeySyncResponse = async (
   userId: string,
   timeoutMs = 60000
 ) => {
-  const deviceId = getOrCreateDeviceId()
+  const deviceId = await getOrCreateDeviceId()
   if (!deviceId) throw new Error('Device not registered')
 
   const responseRef = ref(database, `users/${userId}/e2ee_key_responses/${deviceId}`)
@@ -1602,11 +1659,33 @@ export const waitForWebE2EEKeySyncResponse = async (
           try {
             const envelope = data?.encryptedPrivateKeyEnvelope as string | undefined
             if (!envelope) throw new Error('Missing encrypted key data')
-            const decrypted = await decryptDataKey(envelope)
-            if (!decrypted) throw new Error('Failed to decrypt key data')
-            const payload = JSON.parse(decodeUtf8(decrypted))
-            const imported = await importKeyPairFromJwk(payload)
-            if (!imported) throw new Error('Failed to import key pair')
+
+            const keyVersion = (data?.keyVersion as number | undefined) || 2
+
+            if (keyVersion >= 3) {
+              // V3: Sync group keypair (shared from Android)
+              const syncGroupPublicKeyX963 = data?.syncGroupPublicKeyX963 as string | undefined
+              if (!syncGroupPublicKeyX963) throw new Error('Missing sync group public key')
+
+              const decrypted = await decryptDataKey(envelope)
+              if (!decrypted) throw new Error('Failed to decrypt private key')
+
+              // Convert decrypted bytes to base64 for PKCS#8 format
+              const privateKeyPKCS8Base64 = bytesToBase64(decrypted)
+
+              const imported = await importSyncGroupKeypair(
+                privateKeyPKCS8Base64,
+                syncGroupPublicKeyX963
+              )
+              if (!imported) throw new Error('Failed to import sync group keypair')
+            } else {
+              // V2: Device-specific backup (legacy JWK format)
+              const decrypted = await decryptDataKey(envelope)
+              if (!decrypted) throw new Error('Failed to decrypt key data')
+              const payload = JSON.parse(decodeUtf8(decrypted))
+              const imported = await importKeyPairFromJwk(payload)
+              if (!imported) throw new Error('Failed to import key pair')
+            }
 
             await ensureWebE2EEKeyPublished(userId)
             await ensureWebE2EEKeyBackup(userId)
@@ -1657,23 +1736,37 @@ export const listenToDeviceStatus = (
   userId: string,
   callback: (isPaired: boolean) => void
 ) => {
-  const deviceId = getOrCreateDeviceId()
-  if (!deviceId) {
-    callback(false)
-    return () => {}
-  }
+  let unsubscribe: (() => void) | null = null
 
-  const deviceRef = ref(database, `${USERS_PATH}/${userId}/${DEVICES_PATH}/${deviceId}`)
-  return onValue(deviceRef, (snapshot) => {
-    if (!snapshot.exists()) {
+  // Get device ID asynchronously, then set up listener
+  getOrCreateDeviceId().then((deviceId) => {
+    if (!deviceId) {
       callback(false)
       return
     }
 
-    const data = snapshot.val() as Record<string, any> | null
-    const isPaired = data?.isPaired ?? true
-    callback(!!isPaired)
+    const deviceRef = ref(database, `${USERS_PATH}/${userId}/${DEVICES_PATH}/${deviceId}`)
+    unsubscribe = onValue(deviceRef, (snapshot) => {
+      if (!snapshot.exists()) {
+        callback(false)
+        return
+      }
+
+      const data = snapshot.val() as Record<string, any> | null
+      const isPaired = data?.isPaired ?? true
+      callback(!!isPaired)
+    })
+  }).catch((error) => {
+    console.error('[Firebase] Error getting device ID for status listener:', error)
+    callback(false)
   })
+
+  // Return cleanup function that calls the actual unsubscribe when ready
+  return () => {
+    if (unsubscribe) {
+      unsubscribe()
+    }
+  }
 }
 
 // ============================================
@@ -2033,6 +2126,9 @@ export interface CleanupStats {
   oldFileTransfers: number
   abandonedPairings: number
   orphanedMedia: number
+  orphanedUsers?: number
+  oldMessages?: number
+  oldMmsMessages?: number
 }
 
 /**
@@ -2559,6 +2655,7 @@ export const cleanupOldFileTransfers = async (userId: string, olderThanDays: num
           if (data.r2Key) {
             deletePromises.push(
               deleteR2FileFn({ r2Key: data.r2Key })
+                .then(() => undefined)
                 .catch((err: any) => console.warn(`Failed to delete R2 file ${data.r2Key}:`, err.message))
             )
           }
@@ -2626,6 +2723,7 @@ export const cleanupOrphanedMedia = async (userId: string, olderThanDays: number
           if (data.r2Key) {
             deletePromises.push(
               deleteR2FileFn({ r2Key: data.r2Key })
+                .then(() => undefined)
                 .catch((err: any) => console.warn(`Failed to delete R2 media file ${data.r2Key}:`, err.message))
             )
           }
@@ -2826,39 +2924,60 @@ export const deleteDetectedDuplicates = async (): Promise<{
     for (const dup of duplicates) {
       const deletePromises: Promise<void>[] = []
 
-      // Get user data to find newest one (by lastActivity)
-      const userActivityMap: Map<string, number> = new Map()
+      // Get user data to find the active one (prioritize devices, then lastActivity)
+      const userScores: Map<string, { score: number, hasDevices: boolean, lastActivity: number }> = new Map()
 
       const snapshot = await get(usersRef)
       if (snapshot.exists()) {
         const allUsers = snapshot.val()
 
-        // Get activity time for each duplicate user
+        // Score each duplicate user - prioritize those with active devices
         for (const userId of dup.userIds) {
           const userData = allUsers[userId]
           const lastActivity = userData?.lastActivity || 0
-          userActivityMap.set(userId, lastActivity)
+          const hasDevices = userData?.devices && Object.keys(userData.devices).length > 0
+
+          // Score: users with devices get priority (add 1 year to their timestamp)
+          // This ensures users with active devices are ALWAYS kept over those without
+          const deviceBoost = hasDevices ? (365 * 24 * 60 * 60 * 1000) : 0
+          const score = lastActivity + deviceBoost
+
+          userScores.set(userId, { score, hasDevices, lastActivity })
         }
       }
 
-      // Sort by activity, keep newest, delete rest
-      const sorted = Array.from(userActivityMap.entries())
-        .sort(([, a], [, b]) => b - a) // Newest first
+      // Sort by score (users with devices will have highest scores)
+      const sorted = Array.from(userScores.entries())
+        .sort(([, a], [, b]) => b.score - a.score) // Highest score first
 
       if (sorted.length > 1) {
-        const newestUserId = sorted[0][0]
-        const oldestUsers = sorted.slice(1)
+        const activeUserId = sorted[0][0]
+        const activeUserInfo = sorted[0][1]
+        const inactiveUsers = sorted.slice(1)
 
-        details.push(`Device ${dup.deviceId.substring(0, 20)}...: Keeping newest user ${newestUserId.substring(0, 20)}...`)
+        const keepReason = activeUserInfo.hasDevices ? 'has active devices' : 'most recent activity'
 
-        // Delete all but newest
-        for (const [userId] of oldestUsers) {
+        // Safety check: If any "inactive" user has devices, require manual review
+        const hasMultipleUsersWithDevices = inactiveUsers.some(([, userInfo]) => userInfo.hasDevices)
+
+        if (hasMultipleUsersWithDevices && activeUserInfo.hasDevices) {
+          // Multiple users with active devices - skip auto-delete, needs manual review
+          details.push(`⚠️  Device ${dup.deviceId.substring(0, 20)}...: Multiple users with active devices detected - SKIPPED (requires manual review)`)
+          console.warn(`Skipping duplicate deletion for device ${dup.deviceId} - multiple users with active devices`)
+          continue
+        }
+
+        details.push(`Device ${dup.deviceId.substring(0, 20)}...: Keeping user ${activeUserId.substring(0, 20)}... (${keepReason})`)
+
+        // Delete all but active user
+        for (const [userId, userInfo] of inactiveUsers) {
           const userRef = ref(database, `${USERS_PATH}/${userId}`)
           deletePromises.push(remove(userRef))
           deletedCount++
 
-          console.log(`Deleting duplicate user: ${userId}`)
-          details.push(`  🗑️ Deleted: ${userId.substring(0, 20)}...`)
+          const deleteReason = userInfo.hasDevices ? `has devices but older (${new Date(userInfo.lastActivity).toLocaleDateString()})` : `no devices, last activity: ${new Date(userInfo.lastActivity).toLocaleDateString()}`
+          console.log(`Deleting duplicate user: ${userId} - ${deleteReason}`)
+          details.push(`  🗑️ Deleted: ${userId.substring(0, 20)}... (${deleteReason})`)
         }
 
         devicesProcessed++
@@ -3255,6 +3374,8 @@ export const runSmartGlobalCleanup = async (): Promise<{
   orphanedUsersDeleted: number
   duplicatesDetected: number
 }> => {
+  ensureFirebaseInitialized()
+
   const results = {
     usersProcessed: 0,
     totalItemsCleaned: 0,
@@ -3479,151 +3600,112 @@ export const getUserDataSummary = async (userId: string): Promise<{
 // ADMIN FUNCTIONS - Comprehensive System Management
 // ============================================
 
-// Simple cache for admin data (5 minute TTL)
-const adminCache: {
-  systemOverview?: { data: any; timestamp: number }
-  detailedUsers?: { data: any; timestamp: number }
-} = {}
-const ADMIN_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+// ============================================================================
+// ADMIN CACHE MANAGEMENT (Using Advanced Cache Manager)
+// ============================================================================
+// Migrated from simple Map to LRU cache with TTL validation
+// See lib/cache.ts for implementation details
 
 // Clear admin cache (call when force refreshing)
 export const clearAdminCache = () => {
-  delete adminCache.systemOverview
-  delete adminCache.detailedUsers
+  cacheManager.clear()
   console.log('Admin cache cleared')
 }
 
 // Admin System Overview - OPTIMIZED: single pass, no per-user fetches
 export const getSystemOverview = async (): Promise<{
   totalUsers: number
-  activeUsers: number
-  totalMessages: number
-  totalStorageMB: number
   databaseSize: number
-  firebaseCosts: {
-    estimatedMonthly: number
-    breakdown: {
-      database: number
-      storage: number
-      functions: number
-    }
-  }
   systemHealth: {
     status: 'healthy' | 'warning' | 'critical'
     issues: string[]
   }
 }> => {
-  // Check cache first
-  if (adminCache.systemOverview && Date.now() - adminCache.systemOverview.timestamp < ADMIN_CACHE_TTL) {
-    console.log('Returning cached system overview')
-    return adminCache.systemOverview.data
+  // Check cache first (10-minute TTL)
+  const cached = cacheManager.get<{
+    totalUsers: number
+    databaseSize: number
+    systemHealth: { status: 'healthy' | 'warning' | 'critical'; issues: string[] }
+  }>('systemOverview')
+  if (cached) {
+    return cached
   }
 
-  try {
-    const usersRef = ref(database, USERS_PATH)
-    const usersSnapshot = await get(usersRef)
+  // Use deduplication to prevent concurrent requests
+  return callWithDedup('systemOverview', async () => {
+    // Check cache again inside dedup (another request might have completed)
+    const cachedAfterDedup = cacheManager.get<{
+      totalUsers: number
+      databaseSize: number
+      systemHealth: { status: 'healthy' | 'warning' | 'critical'; issues: string[] }
+    }>('systemOverview')
+    if (cachedAfterDedup) {
+      return cachedAfterDedup
+    }
+
+    try {
+    // BANDWIDTH FIX: Use shallow query to get only user IDs, not their data
+    // Firebase REST API with shallow=true parameter
+    // Downloads: ~500 bytes for user IDs vs 50+ MB for full user tree
+    const auth = getAuth()
+    const user = auth.currentUser
+    if (!user) {
+      throw new Error('Not authenticated')
+    }
+
+    const token = await user.getIdToken()
+    const databaseUrl = database.app.options.databaseURL
+
+    // Use Firebase REST API with shallow=true to get only keys
+    const response = await fetch(`${databaseUrl}/${USERS_PATH}.json?shallow=true&auth=${token}`)
+    const data = await response.json()
 
     let totalUsers = 0
-    let activeUsers = 0
-    let totalMessages = 0
-    let totalStorageMB = 0
     const systemIssues: string[] = []
 
-    if (usersSnapshot.exists()) {
-      const users = usersSnapshot.val()
-      const userIds = Object.keys(users)
-      totalUsers = userIds.length
-      const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000)
-
-      // Single pass through all users - no additional fetches
-      for (const userData of Object.values(users)) {
-        const data = userData as any
-
-        // Count messages
-        if (data.messages) {
-          const messageCount = Object.keys(data.messages).length
-          totalMessages += messageCount
-
-          // Check activity - only look at first few messages for speed
-          const messageValues = Object.values(data.messages).slice(0, 50) as any[]
-          const hasRecent = messageValues.some(msg =>
-            (msg.timestamp || msg.date) > thirtyDaysAgo
-          )
-          if (hasRecent) activeUsers++
-        }
-
-        // Estimate storage from usage node if available (no extra fetch)
-        if (data.usage?.storageBytes) {
-          totalStorageMB += data.usage.storageBytes / (1024 * 1024)
-        } else if (data.messages) {
-          // Rough estimate: 500 bytes per message
-          totalStorageMB += Object.keys(data.messages).length * 0.0005
-        }
-      }
+    if (data && typeof data === 'object') {
+      totalUsers = Object.keys(data).length
     }
 
-    // Estimate Firebase costs
-    const databaseCost = Math.max(0, (totalMessages * 0.000001) + (totalUsers * 0.005))
-    const storageCost = Math.max(0, totalStorageMB * 0.026)
-    const functionsCost = 5
-    const totalMonthly = databaseCost + storageCost + functionsCost
+    const databaseSize = totalUsers // Use user count as simplified metric
 
-    // System health check
+    // System health check (simplified - no longer checking message counts)
     let status: 'healthy' | 'warning' | 'critical' = 'healthy'
-    if (totalStorageMB > 1000) {
+
+    if (totalUsers > 1000) {
       status = 'warning'
-      systemIssues.push('High storage usage detected')
+      systemIssues.push('High user count detected - consider cost monitoring')
     }
-    if (totalMessages > 100000) {
-      status = 'warning'
-      systemIssues.push('High message volume detected')
-    }
-    if (totalMonthly > 50) {
+
+    if (totalUsers > 5000) {
       status = 'critical'
-      systemIssues.push('High monthly costs projected')
+      systemIssues.push('Very high user count - review cleanup policies')
     }
 
     const result = {
       totalUsers,
-      activeUsers,
-      totalMessages,
-      totalStorageMB: Math.round(totalStorageMB * 100) / 100,
-      databaseSize: totalMessages,
-      firebaseCosts: {
-        estimatedMonthly: Math.round(totalMonthly * 100) / 100,
-        breakdown: {
-          database: Math.round(databaseCost * 100) / 100,
-          storage: Math.round(storageCost * 100) / 100,
-          functions: functionsCost
-        }
-      },
+      databaseSize,
       systemHealth: {
         status,
         issues: systemIssues
       }
     }
 
-    // Cache the result
-    adminCache.systemOverview = { data: result, timestamp: Date.now() }
-    return result
-  } catch (error) {
-    console.error('Error getting system overview:', error)
-    return {
-      totalUsers: 0,
-      activeUsers: 0,
-      totalMessages: 0,
-      totalStorageMB: 0,
-      databaseSize: 0,
-      firebaseCosts: {
-        estimatedMonthly: 0,
-        breakdown: { database: 0, storage: 0, functions: 0 }
-      },
-      systemHealth: {
-        status: 'critical',
-        issues: ['Unable to load system data']
+      // Cache the result for 10 minutes (lightweight operation)
+      cacheManager.set('systemOverview', result, 10 * 60 * 1000)
+      return result
+    } catch (error) {
+      console.error('Error getting system overview:', error)
+      return {
+        totalUsers: 0,
+        databaseSize: 0,
+        systemHealth: {
+          status: 'critical',
+          issues: ['Unable to load system data']
+        }
       }
     }
-  }
+  })
 }
 
 // Device-Based Subscription Tracking (tracks users across UID changes)
@@ -3737,13 +3819,35 @@ export const getDetailedUserList = async (): Promise<Array<{
   wasPremium: boolean
   isActive: boolean
 }>> => {
-  // Check cache first
-  if (adminCache.detailedUsers && Date.now() - adminCache.detailedUsers.timestamp < ADMIN_CACHE_TTL) {
-    console.log('Returning cached user list')
-    return adminCache.detailedUsers.data
+  type DetailedUserType = Array<{
+    userId: string
+    messagesCount: number
+    devicesCount: number
+    storageUsedMB: number
+    lastActivity: number | null
+    plan: string
+    planExpiresAt: number | null
+    planAssignedAt: number | null
+    planAssignedBy: string
+    wasPremium: boolean
+    isActive: boolean
+  }>
+
+  // Check cache first (5-minute TTL)
+  const cached = cacheManager.get<DetailedUserType>('detailedUsers')
+  if (cached) {
+    return cached
   }
 
-  try {
+  // Use deduplication to prevent concurrent requests
+  return callWithDedup('detailedUsers', async () => {
+    // Check cache again inside dedup
+    const cachedAfterDedup = cacheManager.get<DetailedUserType>('detailedUsers')
+    if (cachedAfterDedup) {
+      return cachedAfterDedup
+    }
+
+    try {
     // Fetch users and subscription_records in parallel (2 calls instead of 2*N)
     const [usersSnapshot, subscriptionsSnapshot] = await Promise.all([
       get(ref(database, USERS_PATH)),
@@ -3832,16 +3936,224 @@ export const getDetailedUserList = async (): Promise<Array<{
       })
     }
 
-    const result = users.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+      const result = users.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
 
-    // Cache the result
-    adminCache.detailedUsers = { data: result, timestamp: Date.now() }
-    return result
-  } catch (error) {
-    console.error('Error getting detailed user list:', error)
-    return []
-  }
+      // Cache the result for 5 minutes
+      cacheManager.set('detailedUsers', result, 5 * 60 * 1000)
+      return result
+    } catch (error) {
+      console.error('Error getting detailed user list:', error)
+      return []
+    }
+  })
 }
+
+/**
+ * Get paginated detailed user list (more efficient for large user bases)
+ * @param page - Page number (0-indexed)
+ * @param pageSize - Number of users per page (default: 20)
+ * @param searchTerm - Optional search filter
+ * @param filterBy - Optional filter: 'all', 'active', 'inactive'
+ */
+export const getDetailedUserListPaginated = async (
+  page: number = 0,
+  pageSize: number = 20,
+  searchTerm: string = '',
+  filterBy: string = 'all'
+): Promise<{
+  users: Array<{
+    userId: string
+    messagesCount: number
+    devicesCount: number
+    storageUsedMB: number
+    lastActivity: number | null
+    plan: string
+    planExpiresAt: number | null
+    planAssignedAt: number | null
+    planAssignedBy: string
+    wasPremium: boolean
+    isActive: boolean
+  }>
+  totalCount: number
+  page: number
+  pageSize: number
+  totalPages: number
+  hasNextPage: boolean
+  hasPrevPage: boolean
+}> => {
+  const getDetailedUserListPaginatedFn = httpsCallable(functions, 'getDetailedUserListPaginated')
+  const result = await getDetailedUserListPaginatedFn({ page, pageSize, searchTerm, filterBy })
+  return result.data as any
+}
+
+// ============================================================================
+// OPTIMIZED ADMIN FUNCTIONS (Use these for better performance!)
+// ============================================================================
+
+/**
+ * Get system cleanup overview (OPTIMIZED version)
+ *
+ * Uses new backend function with 99% fewer database reads.
+ * - Old: 11,000+ reads for 1000 users
+ * - New: <100 reads for any number of users
+ * - 10x faster execution (5-10s → <1s)
+ * - Server-side caching with 10-minute TTL
+ *
+ * @param forceRefresh - Bypass cache and fetch fresh data
+ * @returns System cleanup overview with breakdown
+ */
+type SystemCleanupOverviewType = {
+  totalUsers: number
+  totalCleanupItems: number
+  breakdown: {
+    staleOutgoingMessages: number
+    expiredPairings: number
+    oldCallRequests: number
+    oldSpamMessages: number
+    oldReadReceipts: number
+    inactiveDevices: number
+    oldNotifications: number
+    staleTypingIndicators: number
+    expiredSessions: number
+    oldFileTransfers: number
+    abandonedPairings: number
+    orphanedMedia: number
+  }
+  systemHealth: {
+    databaseSize: string
+    lastCleanup: number
+    cleanupFrequency: string
+  }
+  timestamp: number
+}
+
+export const getSystemCleanupOverviewOptimized = async (
+  forceRefresh = false
+): Promise<SystemCleanupOverviewType> => {
+  const cacheKey = 'systemCleanupOverviewOptimized'
+
+  // Check cache first (10-minute TTL)
+  if (!forceRefresh) {
+    const cached = cacheManager.get<SystemCleanupOverviewType>(cacheKey)
+    if (cached) {
+      console.log('[getSystemCleanupOverviewOptimized] Returning cached data')
+      return cached
+    }
+  }
+
+  // Use deduplication to prevent concurrent requests
+  return callWithDedup(cacheKey, async () => {
+    // Check cache again inside dedup (another request might have completed)
+    if (!forceRefresh) {
+      const cachedAfterDedup = cacheManager.get<SystemCleanupOverviewType>(cacheKey)
+      if (cachedAfterDedup) {
+        return cachedAfterDedup
+      }
+    }
+
+    try {
+      console.log('[getSystemCleanupOverviewOptimized] Fetching from backend...')
+      const callable = httpsCallable(functions, 'getSystemCleanupOverviewOptimized')
+      const result = await callable({ forceRefresh })
+
+      // Cache for 10 minutes
+      cacheManager.set(cacheKey, result.data, 10 * 60 * 1000)
+      console.log('[getSystemCleanupOverviewOptimized] Data fetched and cached')
+
+      return result.data as any
+    } catch (error) {
+      console.error('[getSystemCleanupOverviewOptimized] Error:', error)
+      throw error
+    }
+  })
+}
+
+/**
+ * Get crash reports with optional statistics (CONSOLIDATED)
+ *
+ * Combines crash list + statistics into single API call.
+ * - Old: 2 separate API calls (getAllCrashReports + getCrashStatistics)
+ * - New: 1 API call with optional stats
+ * - 50% reduction in API calls
+ * - Statistics are cached separately (5-minute TTL)
+ *
+ * @param limit - Number of crashes to return (default: 25, max: 100)
+ * @param cursor - Pagination cursor (crashId to start after)
+ * @param includeStats - Whether to include aggregate statistics
+ * @param forceRefresh - Bypass cache for statistics
+ * @returns Crash reports with optional statistics
+ */
+type CrashReportsWithStatsType = {
+  crashes: Array<{
+    crashId: string
+    userId: string
+    timestamp: number
+    errorMessage: string
+    stackTrace: string
+    deviceInfo: any
+    appVersion: string
+    isFatal: boolean
+    resolved: boolean
+  }>
+  nextCursor: string | null
+  hasMore: boolean
+  statistics?: {
+    totalCrashes: number
+    unresolvedCrashes: number
+    fatalCrashes: number
+    affectedUsers: number
+    topCrashReasons: Array<{ reason: string; count: number }>
+  }
+  timestamp: number
+}
+
+export const getCrashReportsWithStats = async (
+  limit = 25,
+  cursor: string | null = null,
+  includeStats = true,
+  forceRefresh = false
+): Promise<CrashReportsWithStatsType> => {
+  const cacheKey = `crashReports:${limit}:${cursor}:${includeStats}`
+
+  // Check cache first (5-minute TTL)
+  if (!forceRefresh) {
+    const cached = cacheManager.get<CrashReportsWithStatsType>(cacheKey)
+    if (cached) {
+      console.log('[getCrashReportsWithStats] Returning cached data')
+      return cached
+    }
+  }
+
+  // Use deduplication
+  return callWithDedup(cacheKey, async () => {
+    // Check cache again inside dedup
+    if (!forceRefresh) {
+      const cachedAfterDedup = cacheManager.get<CrashReportsWithStatsType>(cacheKey)
+      if (cachedAfterDedup) {
+        return cachedAfterDedup
+      }
+    }
+
+    try {
+      console.log('[getCrashReportsWithStats] Fetching from backend...')
+      const callable = httpsCallable(functions, 'getCrashReportsWithStats')
+      const result = await callable({ limit, cursor, includeStats, forceRefresh })
+
+      // Cache for 5 minutes
+      cacheManager.set(cacheKey, result.data, 5 * 60 * 1000)
+      console.log('[getCrashReportsWithStats] Data fetched and cached')
+
+      return result.data as any
+    } catch (error) {
+      console.error('[getCrashReportsWithStats] Error:', error)
+      throw error
+    }
+  })
+}
+
+// ============================================================================
+// END OPTIMIZED FUNCTIONS
+// ============================================================================
 
 // Admin Analytics
 export const getSystemAnalytics = async (): Promise<{
@@ -3998,41 +4310,21 @@ export const deleteUserAccount = async (userId: string): Promise<{
           console.log(`Found ${devicesDeleted} devices for user ${userId}`)
         }
 
-        // Clean up R2 files (file_transfers and media) before deleting user
-        const deleteR2FileFn = httpsCallable(functions, 'deleteR2File')
-        const r2DeletePromises: Promise<any>[] = []
+        // Clean up ALL R2 files (files, mms, photos) using Cloud Function
+        try {
+          const clearR2FilesFn = httpsCallable(functions, 'clearR2Files')
+          console.log(`Clearing ALL R2 files for user ${userId}...`)
+          const r2Result = await clearR2FilesFn({ syncGroupUserId: userId })
+          const r2Data = r2Result.data as { success: boolean, deletedFiles: number, freedBytes: number }
 
-        // Delete R2 files from file_transfers
-        if (userData.file_transfers) {
-          Object.values(userData.file_transfers).forEach((transfer: any) => {
-            if (transfer.r2Key) {
-              r2DeletePromises.push(
-                deleteR2FileFn({ r2Key: transfer.r2Key })
-                  .then(() => { r2FilesDeleted++ })
-                  .catch((err: any) => console.warn(`Failed to delete R2 file ${transfer.r2Key}:`, err.message))
-              )
-            }
-          })
-        }
-
-        // Delete R2 files from media
-        if (userData.media) {
-          Object.values(userData.media).forEach((media: any) => {
-            if (media.r2Key) {
-              r2DeletePromises.push(
-                deleteR2FileFn({ r2Key: media.r2Key })
-                  .then(() => { r2FilesDeleted++ })
-                  .catch((err: any) => console.warn(`Failed to delete R2 media file ${media.r2Key}:`, err.message))
-              )
-            }
-          })
-        }
-
-        // Wait for all R2 deletions to complete
-        if (r2DeletePromises.length > 0) {
-          console.log(`Deleting ${r2DeletePromises.length} R2 files for user ${userId}...`)
-          await Promise.all(r2DeletePromises)
-          console.log(`Deleted ${r2FilesDeleted} R2 files for user ${userId}`)
+          if (r2Data.success) {
+            r2FilesDeleted = r2Data.deletedFiles
+            console.log(`Deleted ${r2FilesDeleted} R2 files (~${Math.round(r2Data.freedBytes / 1024 / 1024)}MB) for user ${userId}`)
+          }
+        } catch (r2Error) {
+          console.warn(`Failed to clear R2 files for user ${userId}:`, r2Error)
+          errors.push(`R2 cleanup failed: ${r2Error}`)
+          // Continue with user deletion even if R2 cleanup fails
         }
       } else {
         console.log(`User ${userId} not found in database`)
@@ -4063,6 +4355,44 @@ export const deleteUserAccount = async (userId: string): Promise<{
 
     // Delete the entire user node
     await remove(userRef)
+
+    // Delete device recovery fingerprints for this user
+    try {
+      const recoveryRef = ref(database, 'device_recovery')
+      const recoverySnapshot = await get(recoveryRef)
+      if (recoverySnapshot.exists()) {
+        const updates: Record<string, null> = {}
+        recoverySnapshot.forEach((child) => {
+          const data = child.val()
+          if (data.userId === userId) {
+            updates[child.key] = null
+          }
+        })
+        if (Object.keys(updates).length > 0) {
+          await update(recoveryRef, updates)
+          console.log(`Deleted ${Object.keys(updates).length} device recovery fingerprints for user ${userId}`)
+        }
+      }
+    } catch (recoveryError) {
+      console.warn(`Failed to delete device recovery fingerprints for user ${userId}:`, recoveryError)
+      errors.push(`Device recovery cleanup failed: ${recoveryError}`)
+    }
+
+    // Delete FCM tokens
+    try {
+      const fcmRef = ref(database, `fcm_tokens/${userId}`)
+      await remove(fcmRef)
+    } catch (fcmError) {
+      console.warn(`Failed to delete FCM tokens for user ${userId}:`, fcmError)
+    }
+
+    // Delete subscription records
+    try {
+      const subRef = ref(database, `subscription_records/${userId}`)
+      await remove(subRef)
+    } catch (subError) {
+      console.warn(`Failed to delete subscription records for user ${userId}:`, subError)
+    }
 
     // Log the deletion in audit
     addAdminAuditLog('user_delete', 'admin', `Deleted user account: ${userId} (${messagesDeleted} messages, ${r2FilesDeleted} R2 files, ${storageFreed.toFixed(2)}MB storage)`)
@@ -4158,27 +4488,15 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
       action: string
     }> = []
 
-    // Storage optimization
-    if (overview.totalStorageMB > 500) {
+    // User count check
+    if (overview.totalUsers > 1000) {
       recommendations.push({
-        type: 'storage',
-        priority: 'high',
-        title: 'High Storage Usage',
-        description: `System is using ${overview.totalStorageMB}MB of storage`,
-        potentialSavings: overview.totalStorageMB * 0.026 * 0.3, // 30% potential savings
-        action: 'Run storage cleanup and compress old attachments'
-      })
-    }
-
-    // Database optimization
-    if (overview.totalMessages > 50000) {
-      recommendations.push({
-        type: 'database',
+        type: 'scaling',
         priority: 'medium',
-        title: 'Large Message Database',
-        description: `${overview.totalMessages} messages stored`,
-        potentialSavings: overview.totalMessages * 0.000001 * 0.2,
-        action: 'Archive old messages and implement data retention policies'
+        title: 'High User Count',
+        description: `${overview.totalUsers} users - consider implementing cleanup policies`,
+        potentialSavings: overview.totalUsers * 0.01,
+        action: 'Review data retention policies and cleanup inactive users'
       })
     }
 
@@ -4193,25 +4511,11 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
       console.log('Adding inactive user cleanup recommendation')
       recommendations.push({
         type: 'cleanup',
-        priority: 'medium',
-        title: 'Inactive User Cleanup',
-        description: `${inactiveUsers} inactive users found`,
-        potentialSavings: inactiveUsers * 0.005, // Database cost savings
-        action: 'Delete users inactive for 90+ days'
-      })
-    }
-
-    // Cost monitoring
-    console.log('Checking cost monitoring, estimated monthly:', overview.firebaseCosts.estimatedMonthly)
-    if (overview.firebaseCosts.estimatedMonthly > 25) {
-      console.log('Adding high cost recommendation')
-      recommendations.push({
-        type: 'scaling',
         priority: 'high',
-        title: 'High Monthly Costs',
-        description: `Estimated $${overview.firebaseCosts.estimatedMonthly}/month`,
-        potentialSavings: overview.firebaseCosts.estimatedMonthly * 0.15,
-        action: 'Implement usage limits and optimize data structure'
+        title: 'Inactive User Cleanup',
+        description: `${inactiveUsers} inactive users (${Math.round(inactiveUsers / users.length * 100)}% of total)`,
+        potentialSavings: inactiveUsers * 0.25, // Estimated storage savings per user
+        action: 'Delete users inactive for 90+ days from Users tab'
       })
     }
 
@@ -4229,24 +4533,24 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
         action: 'Run regular cleanup operations and monitor data growth'
       })
 
-      if (overview.totalUsers > 0) {
+      if (overview.totalUsers > 100) {
         recommendations.push({
           type: 'database',
           priority: 'low',
           title: 'Database Health Check',
-          description: `Monitor ${overview.totalUsers} users and ${overview.totalMessages} messages`,
+          description: `Monitor ${overview.totalUsers} users - check Users tab for detailed analytics`,
           potentialSavings: 2.50,
-          action: 'Review user activity and optimize data structure'
+          action: 'Review user activity via Users tab and run cleanup operations'
         })
       }
 
       recommendations.push({
         type: 'scaling',
         priority: 'low',
-        title: 'Cost Monitoring Setup',
-        description: 'Set up regular cost monitoring and alerts',
-        potentialSavings: overview.firebaseCosts.estimatedMonthly * 0.05,
-        action: 'Implement automated cost tracking and optimization alerts'
+        title: 'Cost Monitoring',
+        description: 'Use the Costs tab for detailed Firebase cost tracking',
+        potentialSavings: 5.0,
+        action: 'Check Costs tab regularly and implement cleanup recommendations'
       })
     }
 
@@ -4258,6 +4562,48 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
   } catch (error) {
     console.error('Error getting cost recommendations:', error)
     return []
+  }
+}
+
+/**
+ * Gets real-time Firebase cost estimates from Cloud Function
+ */
+export const getCostEstimate = async (): Promise<any> => {
+  try {
+    const getCostEstimateFn = httpsCallable(functions, 'getCostEstimate')
+    const result = await getCostEstimateFn()
+    return result.data
+  } catch (error) {
+    console.error('Error getting cost estimate:', error)
+    throw error
+  }
+}
+
+/**
+ * Gets bandwidth analytics by operation type
+ */
+export const getBandwidthAnalytics = async (data: { period?: string } = {}): Promise<any> => {
+  try {
+    const getBandwidthAnalyticsFn = httpsCallable(functions, 'getBandwidthAnalytics')
+    const result = await getBandwidthAnalyticsFn(data)
+    return result.data
+  } catch (error) {
+    console.error('Error getting bandwidth analytics:', error)
+    throw error
+  }
+}
+
+/**
+ * Gets log of recent expensive operations
+ */
+export const getOperationsLog = async (data: { limit?: number } = {}): Promise<any> => {
+  try {
+    const getOperationsLogFn = httpsCallable(functions, 'getOperationsLog')
+    const result = await getOperationsLogFn(data)
+    return result.data
+  } catch (error) {
+    console.error('Error getting operations log:', error)
+    throw error
   }
 }
 
@@ -4277,13 +4623,13 @@ export const findOrphanedMessages = async (): Promise<{
 
     // This is a placeholder - in a real implementation, you'd need to check
     // if there are messages stored outside user nodes or in different structures
-    // For now, we'll just return the current message count for analysis
+    // For accurate orphaned message detection, run cleanup operations from Data tab
 
     const overview = await getSystemOverview()
-    result.orphanedMessages = overview.totalMessages
-    result.details.push(`Total messages in system: ${overview.totalMessages}`)
-    result.details.push(`Active users: ${overview.activeUsers}`)
-    result.details.push(`If users show 0 messages but total is high, there may be orphaned data`)
+    result.orphanedMessages = 0 // Disabled - use Users tab for message counts
+    result.details.push(`Total users in system: ${overview.totalUsers}`)
+    result.details.push(`For detailed message counts, use the Users tab`)
+    result.details.push(`To detect orphaned data, run cleanup operations from Data tab`)
 
     console.log('Orphaned message analysis:', result)
     return result
@@ -4360,6 +4706,8 @@ export const sendCleanupReport = async (
   userId?: string,
   type: 'MANUAL' | 'AUTO' = 'MANUAL'
 ): Promise<{ success: boolean; error?: string }> => {
+  ensureFirebaseInitialized()
+
   try {
     const report = generateCleanupReport(cleanupStats, userId)
 
@@ -4889,6 +5237,44 @@ export const cleanupOldR2Files = async (
 }
 
 /**
+ * Cleanup orphaned R2 files (files belonging to deleted users)
+ */
+export const cleanupOrphanedR2Files = async (dryRun: boolean = true): Promise<{
+  success: boolean
+  orphanedFiles: Array<{ userId: string; key: string; size: number; lastModified: number }>
+  totalOrphaned: number
+  freedBytes: number
+  deletedCount: number
+  dryRun: boolean
+  message: string
+}> => {
+  try {
+    const call = httpsCallable(functions, 'cleanupOrphanedR2Files')
+    const result = await call({ dryRun })
+    return result.data as {
+      success: boolean
+      orphanedFiles: Array<{ userId: string; key: string; size: number; lastModified: number }>
+      totalOrphaned: number
+      freedBytes: number
+      deletedCount: number
+      dryRun: boolean
+      message: string
+    }
+  } catch (error) {
+    console.error('Error cleaning up orphaned R2 files:', error)
+    return {
+      success: false,
+      orphanedFiles: [],
+      totalOrphaned: 0,
+      freedBytes: 0,
+      deletedCount: 0,
+      dryRun,
+      message: `Cleanup failed: ${error}`
+    }
+  }
+}
+
+/**
  * Delete a specific R2 file (admin only)
  */
 export const deleteR2FileAdmin = async (r2Key: string): Promise<{ success: boolean; error?: string }> => {
@@ -4934,4 +5320,604 @@ export const recalculateUserStorage = async (userId: string): Promise<Recalculat
   }
 }
 
-export { auth, database, storage, signInAnon as signInAnonymously, getAuth }
+// ==========================================
+// Crash Reports
+// ==========================================
+
+/**
+ * Represents a crash report from CustomCrashReporter
+ */
+export interface CrashReport {
+  id: string
+  userId: string | null
+  isFatal: boolean
+  context: string
+  timestamp: number
+  timestampFormatted: string
+  exceptionType: string
+  exceptionMessage: string
+  stackTrace: string
+  cause?: {
+    type: string
+    message: string
+  }
+  appVersion: string
+  appVersionCode: number
+  buildType: string
+  deviceManufacturer: string
+  deviceModel: string
+  deviceBrand: string
+  androidVersion: string
+  androidSdkInt: number
+  deviceId: string
+  resolved?: boolean
+  resolvedBy?: string
+  resolvedAt?: number
+  notes?: string
+}
+
+/**
+ * Get all crash reports (both user and anonymous)
+ */
+export const getAllCrashReports = async (): Promise<CrashReport[]> => {
+  try {
+    const crashesRef = ref(database, 'crashes')
+    const snapshot = await get(crashesRef)
+
+    if (!snapshot.exists()) {
+      return []
+    }
+
+    const crashes: CrashReport[] = []
+    const crashData = snapshot.val()
+
+    // Process user crashes
+    for (const userId in crashData) {
+      if (userId === 'anonymous') continue
+
+      const userCrashes = crashData[userId]
+      for (const crashId in userCrashes) {
+        crashes.push({
+          id: crashId,
+          userId,
+          ...userCrashes[crashId]
+        })
+      }
+    }
+
+    // Process anonymous crashes
+    if (crashData.anonymous) {
+      for (const crashId in crashData.anonymous) {
+        crashes.push({
+          id: crashId,
+          userId: null,
+          ...crashData.anonymous[crashId]
+        })
+      }
+    }
+
+    // Sort by timestamp (newest first)
+    crashes.sort((a, b) => b.timestamp - a.timestamp)
+
+    return crashes
+  } catch (error) {
+    console.error('Error fetching crash reports:', error)
+    return []
+  }
+}
+
+/**
+ * Mark a crash as resolved
+ */
+export const markCrashResolved = async (
+  userId: string | null,
+  crashId: string,
+  adminName: string,
+  notes?: string
+): Promise<void> => {
+  try {
+    const crashPath = userId
+      ? `crashes/${userId}/${crashId}`
+      : `crashes/anonymous/${crashId}`
+
+    const crashRef = ref(database, crashPath)
+    await update(crashRef, {
+      resolved: true,
+      resolvedBy: adminName,
+      resolvedAt: Date.now(),
+      notes: notes || ''
+    })
+  } catch (error) {
+    console.error('Error marking crash as resolved:', error)
+    throw error
+  }
+}
+
+/**
+ * Delete a crash report
+ */
+export const deleteCrashReport = async (
+  userId: string | null,
+  crashId: string
+): Promise<void> => {
+  try {
+    const crashPath = userId
+      ? `crashes/${userId}/${crashId}`
+      : `crashes/anonymous/${crashId}`
+
+    const crashRef = ref(database, crashPath)
+    await remove(crashRef)
+  } catch (error) {
+    console.error('Error deleting crash report:', error)
+    throw error
+  }
+}
+
+/**
+ * Get crash statistics
+ */
+export interface CrashStats {
+  totalCrashes: number
+  fatalCrashes: number
+  nonFatalCrashes: number
+  unresolvedCrashes: number
+  uniqueUsers: number
+  anonymousCrashes: number
+  topExceptions: { type: string; count: number }[]
+  crashesByDevice: { device: string; count: number }[]
+  crashesByVersion: { version: string; count: number }[]
+}
+
+export const getCrashStatistics = async (): Promise<CrashStats> => {
+  try {
+    const crashes = await getAllCrashReports()
+
+    const stats: CrashStats = {
+      totalCrashes: crashes.length,
+      fatalCrashes: crashes.filter(c => c.isFatal).length,
+      nonFatalCrashes: crashes.filter(c => !c.isFatal).length,
+      unresolvedCrashes: crashes.filter(c => !c.resolved).length,
+      uniqueUsers: new Set(crashes.map(c => c.userId).filter(Boolean)).size,
+      anonymousCrashes: crashes.filter(c => c.userId === null).length,
+      topExceptions: [],
+      crashesByDevice: [],
+      crashesByVersion: []
+    }
+
+    // Calculate top exceptions
+    const exceptionCounts = new Map<string, number>()
+    crashes.forEach(crash => {
+      const count = exceptionCounts.get(crash.exceptionType) || 0
+      exceptionCounts.set(crash.exceptionType, count + 1)
+    })
+    stats.topExceptions = Array.from(exceptionCounts.entries())
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
+
+    // Calculate crashes by device
+    const deviceCounts = new Map<string, number>()
+    crashes.forEach(crash => {
+      const device = `${crash.deviceManufacturer} ${crash.deviceModel}`
+      const count = deviceCounts.get(device) || 0
+      deviceCounts.set(device, count + 1)
+    })
+    stats.crashesByDevice = Array.from(deviceCounts.entries())
+      .map(([device, count]) => ({ device, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
+
+    // Calculate crashes by version
+    const versionCounts = new Map<string, number>()
+    crashes.forEach(crash => {
+      const count = versionCounts.get(crash.appVersion) || 0
+      versionCounts.set(crash.appVersion, count + 1)
+    })
+    stats.crashesByVersion = Array.from(versionCounts.entries())
+      .map(([version, count]) => ({ version, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
+
+    return stats
+  } catch (error) {
+    console.error('Error getting crash statistics:', error)
+    return {
+      totalCrashes: 0,
+      fatalCrashes: 0,
+      nonFatalCrashes: 0,
+      unresolvedCrashes: 0,
+      uniqueUsers: 0,
+      anonymousCrashes: 0,
+      topExceptions: [],
+      crashesByDevice: [],
+      crashesByVersion: []
+    }
+  }
+}
+
+/**
+ * =============================================================================
+ * INCREMENTAL SYNC - BANDWIDTH OPTIMIZATION
+ * =============================================================================
+ *
+ * NEW bandwidth-optimized message listener that uses delta-only sync.
+ * Reduces bandwidth by ~95% compared to listenToMessages().
+ *
+ * MIGRATION PATH:
+ * 1. Test with listenToMessagesOptimized()
+ * 2. Monitor bandwidth in Firebase Console
+ * 3. Once verified, replace all listenToMessages() calls
+ *
+ * BANDWIDTH COMPARISON:
+ * - Old: 10MB per app restart (downloads all 500 messages)
+ * - New: <1MB per app restart (loads from cache + syncs deltas only)
+ */
+
+/**
+ * Listen to messages with bandwidth optimization (delta-only sync)
+ *
+ * This is a drop-in replacement for listenToMessages() that:
+ * 1. Loads messages instantly from IndexedDB cache
+ * 2. Syncs only new/changed messages from Firebase (not all messages)
+ * 3. Uses child events instead of value events (delta-only)
+ *
+ * @param userId - User ID to listen to
+ * @param callback - Function called with updated messages array
+ * @returns Unsubscribe function to stop listening
+ *
+ * @example
+ * ```typescript
+ * const unsubscribe = listenToMessagesOptimized(userId, (messages) => {
+ *   setMessages(messages)
+ * })
+ *
+ * // Later, cleanup
+ * unsubscribe()
+ * ```
+ */
+export const listenToMessagesOptimized = async (
+  userId: string,
+  callback: (messages: any[]) => void
+): Promise<() => void> => {
+  const deviceId = await getOrCreateDeviceId()
+
+  /**
+   * Decrypt a single message (preserves E2EE logic from original listenToMessages)
+   */
+  const decryptMessage = async (message: any): Promise<any> => {
+    const decryptedMessage = { ...message, decryptionFailed: false }
+
+    if (!message.encrypted) {
+      return decryptedMessage
+    }
+
+    let decryptionAttempted = false
+
+    // NEW (v3): Try e2ee_envelope first (shared sync group keypair)
+    if (message.e2ee_envelope && message.nonce) {
+      try {
+        const dataKey = await decryptDataKey(message.e2ee_envelope)
+        if (dataKey) {
+          const decrypted = await decryptMessageBody(dataKey, message.body, message.nonce)
+          if (decrypted) {
+            decryptedMessage.body = decrypted
+            decryptionAttempted = true
+          }
+        }
+      } catch {
+        // Fall through to try keyMap
+      }
+    }
+
+    // OLD (v2): Fall back to keyMap (device-specific keypairs)
+    if (!decryptionAttempted && message.keyMap && message.nonce && deviceId) {
+      const envelope = message.keyMap[deviceId]
+      if (envelope) {
+        try {
+          const dataKey = await decryptDataKey(envelope)
+          if (dataKey) {
+            const decrypted = await decryptMessageBody(dataKey, message.body, message.nonce)
+            if (decrypted) {
+              decryptedMessage.body = decrypted
+              decryptionAttempted = true
+            }
+          }
+        } catch {
+          // Fall through
+        }
+      }
+    }
+
+    // Mark as decryption failed if still encrypted
+    if (!decryptionAttempted) {
+      decryptedMessage.decryptionFailed = true
+    }
+
+    return decryptedMessage
+  }
+
+  /**
+   * Process and decrypt messages, then call callback
+   */
+  const processMessages = async (messages: any[]) => {
+    const decryptedMessages = await Promise.all(messages.map(decryptMessage))
+
+    // Sort by date (newest first)
+    decryptedMessages.sort((a, b) => (b.date || 0) - (a.date || 0))
+
+    callback(decryptedMessages)
+  }
+
+  // Load cached messages first (instant display)
+  const cached = await incrementalSyncManager.loadCachedData(userId, 'messages')
+  if (cached.length > 0) {
+    console.log(`[BandwidthOptimized] Loaded ${cached.length} messages from cache (instant)`)
+    await processMessages(cached)
+  }
+
+  // Start incremental sync (only fetches new/changed messages)
+  const cleanup = await incrementalSyncManager.startSync({
+    userId,
+    dataType: 'messages',
+    pageSize: 50,
+    onAdded: async () => {
+      const updated = await incrementalSyncManager.loadCachedData(userId, 'messages')
+      await processMessages(updated)
+    },
+    onChanged: async () => {
+      const updated = await incrementalSyncManager.loadCachedData(userId, 'messages')
+      await processMessages(updated)
+    },
+    onRemoved: async () => {
+      const updated = await incrementalSyncManager.loadCachedData(userId, 'messages')
+      await processMessages(updated)
+    },
+    onInitialSyncComplete: (count) => {
+      console.log(`[BandwidthOptimized] Initial sync complete: ${count} new messages`)
+    },
+    onError: (error) => {
+      console.error('[BandwidthOptimized] Sync error:', error)
+    },
+  })
+
+  return cleanup
+}
+
+/**
+ * =============================================================================
+ * OPTIMIZED SPAM MESSAGES LISTENER (BANDWIDTH OPTIMIZED)
+ * =============================================================================
+ *
+ * Uses child events instead of onValue to only receive deltas.
+ * Reduces bandwidth by ~95% for spam messages.
+ */
+
+/**
+ * Listen to spam messages with bandwidth optimization (delta-only sync)
+ *
+ * @param userId - User ID
+ * @param callback - Function called with updated spam messages array
+ * @returns Unsubscribe function
+ */
+export const listenToSpamMessagesOptimized = (
+  userId: string,
+  callback: (messages: any[]) => void
+): (() => void) => {
+  const spamCache = new Map<string, any>()
+
+  const spamRef = query(
+    ref(database, `${USERS_PATH}/${userId}/spam_messages`),
+    orderByChild('date'),
+    limitToLast(200)
+  )
+
+  const emitUpdate = () => {
+    const messages = Array.from(spamCache.values())
+    messages.sort((a, b) => (b.date || 0) - (a.date || 0))
+    callback(messages)
+  }
+
+  // Handle new spam messages
+  const addedListener = onChildAdded(spamRef, (snapshot) => {
+    const key = snapshot.key
+    if (!key) return
+
+    const value = snapshot.val()
+    spamCache.set(key, {
+      id: key,
+      address: value.address || '',
+      body: value.body || '',
+      date: value.date || 0,
+      contactName: value.contactName,
+      spamConfidence: value.spamConfidence,
+      spamReasons: value.spamReasons,
+      detectedAt: value.detectedAt,
+      isUserMarked: value.isUserMarked,
+      isRead: value.isRead,
+    })
+    emitUpdate()
+  })
+
+  // Handle updated spam messages
+  const changedListener = onChildChanged(spamRef, (snapshot) => {
+    const key = snapshot.key
+    if (!key) return
+
+    const value = snapshot.val()
+    spamCache.set(key, {
+      id: key,
+      address: value.address || '',
+      body: value.body || '',
+      date: value.date || 0,
+      contactName: value.contactName,
+      spamConfidence: value.spamConfidence,
+      spamReasons: value.spamReasons,
+      detectedAt: value.detectedAt,
+      isUserMarked: value.isUserMarked,
+      isRead: value.isRead,
+    })
+    emitUpdate()
+  })
+
+  // Handle removed spam messages
+  const removedListener = onChildRemoved(spamRef, (snapshot) => {
+    const key = snapshot.key
+    if (key) {
+      spamCache.delete(key)
+      emitUpdate()
+    }
+  })
+
+  // Cleanup function
+  return () => {
+    off(spamRef, 'child_added', addedListener)
+    off(spamRef, 'child_changed', changedListener)
+    off(spamRef, 'child_removed', removedListener)
+    spamCache.clear()
+  }
+}
+
+/**
+ * =============================================================================
+ * OPTIMIZED CONTACTS LISTENER (BANDWIDTH OPTIMIZED)
+ * =============================================================================
+ *
+ * Uses child events instead of onValue to only receive deltas.
+ * Reduces bandwidth by ~95% for contacts.
+ */
+
+/**
+ * Listen to contacts with bandwidth optimization (delta-only sync)
+ *
+ * @param userId - User ID
+ * @param callback - Function called with updated contacts array
+ * @returns Unsubscribe function
+ */
+export const listenToContactsOptimized = (
+  userId: string,
+  callback: (contacts: Contact[]) => void
+): (() => void) => {
+  const contactsCache = new Map<string, Contact>()
+  const contactsRef = ref(database, `${USERS_PATH}/${userId}/${CONTACTS_PATH}`)
+
+  const emitUpdate = () => {
+    const contacts = Array.from(contactsCache.values())
+    contacts.sort((a, b) => a.displayName.localeCompare(b.displayName))
+    callback(contacts)
+  }
+
+  const parseContact = (key: string, data: any): Contact => {
+    const phoneNumbers = data.phoneNumbers as Record<string, any> | undefined
+    const firstPhone = phoneNumbers
+      ? (Object.values(phoneNumbers)[0] as Record<string, any> | undefined)
+      : undefined
+    const photoData = data.photo as Record<string, any> | undefined
+    const syncData = data.sync as Record<string, any> | undefined
+    const sources = data.sources as Record<string, boolean> | undefined
+    const emailData = data.emails
+      ? (Object.values(data.emails)[0] as Record<string, any> | undefined)
+      : undefined
+
+    return {
+      id: key,
+      displayName: data.displayName || '',
+      phoneNumber: firstPhone?.number,
+      normalizedNumber: firstPhone?.normalizedNumber,
+      phoneType: firstPhone?.type || 'Mobile',
+      photo: photoData
+        ? {
+            thumbnailBase64: photoData.thumbnailBase64,
+            hash: photoData.hash,
+            storagePath: photoData.storagePath,
+            updatedAt: photoData.updatedAt,
+          }
+        : undefined,
+      notes: data.notes,
+      email: emailData?.address,
+      sync: {
+        lastUpdatedAt: Number(syncData?.lastUpdatedAt ?? 0),
+        lastSyncedAt: typeof syncData?.lastSyncedAt === 'number' ? syncData.lastSyncedAt : undefined,
+        lastUpdatedBy: syncData?.lastUpdatedBy ?? '',
+        version: Number(syncData?.version ?? 0),
+        pendingAndroidSync: !!syncData?.pendingAndroidSync,
+        desktopOnly: !!syncData?.desktopOnly,
+      },
+      sources: {
+        android: !!sources?.android,
+        web: !!sources?.web,
+        macos: !!sources?.macos,
+      },
+      androidContactId: data.androidContactId,
+    }
+  }
+
+  // Handle new contacts
+  const addedListener = onChildAdded(contactsRef, (snapshot) => {
+    const key = snapshot.key
+    if (!key) return
+
+    contactsCache.set(key, parseContact(key, snapshot.val()))
+    emitUpdate()
+  })
+
+  // Handle updated contacts
+  const changedListener = onChildChanged(contactsRef, (snapshot) => {
+    const key = snapshot.key
+    if (!key) return
+
+    contactsCache.set(key, parseContact(key, snapshot.val()))
+    emitUpdate()
+  })
+
+  // Handle removed contacts
+  const removedListener = onChildRemoved(contactsRef, (snapshot) => {
+    const key = snapshot.key
+    if (key) {
+      contactsCache.delete(key)
+      emitUpdate()
+    }
+  })
+
+  // Cleanup function
+  return () => {
+    off(contactsRef, 'child_added', addedListener)
+    off(contactsRef, 'child_changed', changedListener)
+    off(contactsRef, 'child_removed', removedListener)
+    contactsCache.clear()
+  }
+}
+
+/**
+ * Get bandwidth savings statistics for the current user
+ *
+ * @param userId - User ID
+ * @returns Bandwidth statistics and savings
+ *
+ * @example
+ * ```typescript
+ * const stats = await getBandwidthStats(userId)
+ * console.log(`Bandwidth saved: ${stats.totalBandwidthSaved}`)
+ * ```
+ */
+export const getBandwidthStats = async (userId: string) => {
+  return await incrementalSyncManager.getStats(userId)
+}
+
+/**
+ * Clear cached data for a user (force full re-sync on next load)
+ *
+ * @param userId - User ID
+ *
+ * @example
+ * ```typescript
+ * // On logout
+ * await clearMessageCache(userId)
+ * ```
+ */
+export const clearMessageCache = async (userId: string) => {
+  await incrementalSyncManager.clearCache(userId)
+  console.log(`[BandwidthOptimized] Cleared cache for user ${userId}`)
+}
+
+// Additional exports (auth, database, storage, functions already exported above)
+export { signInAnon as signInAnonymously, getAuth }

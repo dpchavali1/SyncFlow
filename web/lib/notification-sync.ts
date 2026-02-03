@@ -1,5 +1,5 @@
 // Web Notification Sync Functions - BASIC VERSION WITH SECURITY SAFEGUARDS
-import { getDatabase, ref, onValue, remove } from 'firebase/database'
+import { getDatabase, ref, onValue, remove, query, orderByChild, limitToLast } from 'firebase/database'
 import { getAuth } from 'firebase/auth'
 
 // Initialize Firebase services
@@ -161,7 +161,12 @@ export const listenToMirroredNotifications = (
     return () => {}
   }
 
-  const notificationsRef = ref(database, `users/${userId}/mirrored_notifications`)
+  // BANDWIDTH OPTIMIZATION: Limit to last 50 notifications to prevent unbounded downloads
+  const notificationsRef = query(
+    ref(database, `users/${userId}/mirrored_notifications`),
+    orderByChild('timestamp'),
+    limitToLast(50)
+  )
   auditLog('notification_sync_started', { userId })
 
   return onValue(notificationsRef, (snapshot) => {

@@ -113,6 +113,89 @@ class ScheduledMessageService(context: Context) {
             }
         }
         scheduledMessagesListener = null
+        // Also stop optimized listener
+        stopListeningOptimized()
+    }
+
+    // ==========================================
+    // BANDWIDTH OPTIMIZED LISTENERS
+    // ==========================================
+
+    private var optimizedListener: ChildEventListener? = null
+
+    /**
+     * BANDWIDTH OPTIMIZED: Start listening using child events
+     * Only downloads new/changed messages instead of full list on every change
+     */
+    fun startListeningOptimized() {
+        Log.d(TAG, "Starting scheduled message service (optimized)")
+        database.goOnline()
+        listenForScheduledMessagesOptimized()
+    }
+
+    private fun listenForScheduledMessagesOptimized() {
+        scope.launch {
+            try {
+                val currentUser = auth.currentUser ?: return@launch
+                val userId = currentUser.uid
+
+                val messagesRef = database.reference
+                    .child(USERS_PATH)
+                    .child(userId)
+                    .child(SCHEDULED_MESSAGES_PATH)
+
+                val listener = object : ChildEventListener {
+                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                        processScheduledMessage(snapshot)
+                    }
+
+                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                        // Status changes - re-process to check if needs sending
+                        processScheduledMessage(snapshot)
+                    }
+
+                    override fun onChildRemoved(snapshot: DataSnapshot) {
+                        // Message cancelled/removed - cancel any pending work
+                        snapshot.key?.let { messageId ->
+                            WorkManager.getInstance(context).cancelUniqueWork("scheduled_message_$messageId")
+                            Log.d(TAG, "Cancelled work for removed message: $messageId")
+                        }
+                    }
+
+                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
+                        // Not used
+                    }
+
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.e(TAG, "Scheduled messages optimized listener cancelled: ${error.message}")
+                    }
+                }
+
+                optimizedListener = listener
+                messagesRef.addChildEventListener(listener)
+                Log.d(TAG, "Scheduled messages optimized listener registered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting scheduled messages optimized listener", e)
+            }
+        }
+    }
+
+    private fun stopListeningOptimized() {
+        optimizedListener?.let { listener ->
+            scope.launch {
+                try {
+                    val userId = auth.currentUser?.uid ?: return@launch
+                    database.reference
+                        .child(USERS_PATH)
+                        .child(userId)
+                        .child(SCHEDULED_MESSAGES_PATH)
+                        .removeEventListener(listener)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error removing scheduled messages optimized listener", e)
+                }
+            }
+        }
+        optimizedListener = null
     }
 
     /**

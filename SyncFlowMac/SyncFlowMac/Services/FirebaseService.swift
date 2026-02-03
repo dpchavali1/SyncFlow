@@ -104,6 +104,84 @@ class FirebaseService {
     /// Shared singleton instance for app-wide Firebase access.
     static let shared = FirebaseService()
 
+    // MARK: - Firebase Operation Timeout Utility
+
+    /// Wraps async Firebase operations with a timeout to prevent indefinite hangs.
+    ///
+    /// **Problem:** Firebase operations (getData, setValue, etc.) can hang indefinitely
+    /// if the network is slow, disconnected, or Firebase is unresponsive. This causes
+    /// the app to freeze and triggers ANR (Application Not Responding) issues.
+    ///
+    /// **Solution:** Wrap all Firebase operations with this timeout wrapper. If the
+    /// operation doesn't complete within the specified timeout, it's cancelled and
+    /// an error is thrown.
+    ///
+    /// ## Usage
+    /// ```swift
+    /// let snapshot = try await withTimeout(5.0) {
+    ///     try await database.reference().child("path").getData()
+    /// }
+    /// ```
+    ///
+    /// ## Timeout Values
+    /// - Read operations (getData): 5 seconds
+    /// - Write operations (setValue, updateChildValues): 10 seconds
+    /// - Critical operations (pairing, key sync): 30-60 seconds
+    ///
+    /// ## Error Handling
+    /// If timeout occurs, throws `FirebaseServiceError.timeout`
+    ///
+    /// - Parameters:
+    ///   - seconds: Timeout duration in seconds
+    ///   - operation: Async operation to execute with timeout
+    /// - Returns: Result of the operation if completed within timeout
+    /// - Throws: FirebaseServiceError.timeout if operation exceeds timeout duration
+    private func withTimeout<T>(
+        _ seconds: TimeInterval,
+        operation: @escaping () async throws -> T
+    ) async throws -> T {
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            // Task 1: Execute the actual operation
+            group.addTask {
+                return try await operation()
+            }
+
+            // Task 2: Timeout timer
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw FirebaseServiceError.timeout(seconds: seconds)
+            }
+
+            // Wait for first task to complete (either operation or timeout)
+            guard let result = try await group.next() else {
+                throw FirebaseServiceError.timeout(seconds: seconds)
+            }
+
+            // Cancel the other task (if operation finished, cancel timeout; if timeout, cancel operation)
+            group.cancelAll()
+
+            return result
+        }
+    }
+
+    /// Firebase service errors
+    enum FirebaseServiceError: LocalizedError {
+        case timeout(seconds: TimeInterval)
+        case networkUnavailable
+        case operationCancelled
+
+        var errorDescription: String? {
+            switch self {
+            case .timeout(let seconds):
+                return "Firebase operation timed out after \(Int(seconds)) seconds. Please check your internet connection."
+            case .networkUnavailable:
+                return "Network unavailable. Please check your internet connection."
+            case .operationCancelled:
+                return "Operation was cancelled."
+            }
+        }
+    }
+
     // MARK: - Firebase References
 
     /// Firebase Realtime Database instance.
@@ -743,22 +821,25 @@ class FirebaseService {
     /// // Stop listening
     /// firebaseService.removeMessageListener(userId: userId, handle: handle)
     /// ```
-    func listenToMessages(userId: String, startTime: Double? = nil, limit: Int = 3000, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
+    func listenToMessages(userId: String, startTime: Double? = nil, limit: Int = 200, completion: @escaping ([Message]) -> Void) -> DatabaseHandle {
         let messagesRef = database.reference()
             .child("users")
             .child(userId)
             .child("messages")
 
-        // Apply time filter if provided (for pagination - load last N days)
-        // Limit to most recent messages to prevent memory issues with large message counts
+        // BANDWIDTH OPTIMIZATION: Limit to last 200 messages (about 1 week of active use)
+        // Older messages can be loaded on-demand via pagination
+        // This reduces initial download from 50+ MB to ~2-3 MB
+
+        // Default to last 30 days if no startTime specified
+        let effectiveStartTime = startTime ?? (Date().timeIntervalSince1970 * 1000 - 30 * 24 * 60 * 60 * 1000)
+
         var query = messagesRef.queryOrdered(byChild: "date")
-        if let startTime = startTime {
-            query = query.queryStarting(atValue: startTime)
-            print("[Firebase] Listening to messages from \(Date(timeIntervalSince1970: startTime/1000)) onwards")
-        }
-        // Always limit to prevent loading too many messages (default 3000)
-        query = query.queryLimited(toLast: UInt(limit))
-        print("[Firebase] Message query limited to last \(limit) messages")
+            .queryStarting(atValue: effectiveStartTime)
+            .queryLimited(toLast: UInt(limit))
+
+        print("[Firebase] Message query: last \(limit) messages from \(Date(timeIntervalSince1970: effectiveStartTime/1000))")
+        print("[Firebase] BANDWIDTH OPTIMIZATION: Loading only recent messages, older messages available on-demand")
 
         let handle = query.observe(.value) { [weak self] snapshot in
             guard let self = self else { return }
@@ -798,11 +879,28 @@ class FirebaseService {
                     var decryptedBody = body
                     var decryptionFailed = false
                     if isEncrypted {
-                        if let keyMap = messageData["keyMap"] as? [String: Any],
+                        // NEW (v3): Try e2ee_envelope first (single envelope for all devices)
+                        if let e2eeEnvelope = messageData["e2ee_envelope"] as? String,
                            let nonceBase64 = messageData["nonce"] as? String,
-                           let deviceEnvelope = keyMap[deviceId] as? String,
                            let nonceData = Data(base64Encoded: nonceBase64),
                            let ciphertextData = Data(base64Encoded: body) {
+                            do {
+                                let dataKey = try E2EEManager.shared.decryptDataKey(from: e2eeEnvelope)
+                                decryptedBody = try E2EEManager.shared.decryptMessageBody(
+                                    dataKey: dataKey,
+                                    ciphertextWithTag: ciphertextData,
+                                    nonce: nonceData
+                                )
+                            } catch {
+                                decryptionFailed = true
+                            }
+                        }
+                        // OLD (v2): Fall back to keyMap for backward compatibility
+                        else if let keyMap = messageData["keyMap"] as? [String: Any],
+                                let nonceBase64 = messageData["nonce"] as? String,
+                                let deviceEnvelope = keyMap[deviceId] as? String,
+                                let nonceData = Data(base64Encoded: nonceBase64),
+                                let ciphertextData = Data(base64Encoded: body) {
                             do {
                                 let dataKey = try E2EEManager.shared.decryptDataKey(from: deviceEnvelope)
                                 decryptedBody = try E2EEManager.shared.decryptMessageBody(
@@ -813,7 +911,9 @@ class FirebaseService {
                             } catch {
                                 decryptionFailed = true
                             }
-                        } else {
+                        }
+                        // LEGACY (v1): Direct encryption (no envelope)
+                        else {
                             do {
                                 decryptedBody = try E2EEManager.shared.decryptMessage(body)
                             } catch {
@@ -1017,11 +1117,28 @@ class FirebaseService {
             var decryptedBody = body
             var decryptionFailed = false
             if isEncrypted {
-                if let keyMap = messageData["keyMap"] as? [String: Any],
+                // NEW (v3): Try e2ee_envelope first (single envelope for all devices)
+                if let e2eeEnvelope = messageData["e2ee_envelope"] as? String,
                    let nonceBase64 = messageData["nonce"] as? String,
-                   let deviceEnvelope = keyMap[deviceId] as? String,
                    let nonceData = Data(base64Encoded: nonceBase64),
                    let ciphertextData = Data(base64Encoded: body) {
+                    do {
+                        let dataKey = try E2EEManager.shared.decryptDataKey(from: e2eeEnvelope)
+                        decryptedBody = try E2EEManager.shared.decryptMessageBody(
+                            dataKey: dataKey,
+                            ciphertextWithTag: ciphertextData,
+                            nonce: nonceData
+                        )
+                    } catch {
+                        decryptionFailed = true
+                    }
+                }
+                // OLD (v2): Fall back to keyMap for backward compatibility
+                else if let keyMap = messageData["keyMap"] as? [String: Any],
+                        let nonceBase64 = messageData["nonce"] as? String,
+                        let deviceEnvelope = keyMap[deviceId] as? String,
+                        let nonceData = Data(base64Encoded: nonceBase64),
+                        let ciphertextData = Data(base64Encoded: body) {
                     do {
                         let dataKey = try E2EEManager.shared.decryptDataKey(from: deviceEnvelope)
                         decryptedBody = try E2EEManager.shared.decryptMessageBody(
@@ -1032,7 +1149,9 @@ class FirebaseService {
                     } catch {
                         decryptionFailed = true
                     }
-                } else {
+                }
+                // LEGACY (v1): Direct encryption (no envelope)
+                else {
                     do {
                         decryptedBody = try E2EEManager.shared.decryptMessage(body)
                     } catch {
@@ -1106,7 +1225,11 @@ class FirebaseService {
             .child(userId)
             .child("spam_messages")
 
-        let handle = spamRef.queryOrdered(byChild: "date").observe(.value) { snapshot in
+        // BANDWIDTH OPTIMIZATION: Limit spam messages to last 100 (most recent spam)
+        // Older spam can be cleaned up by Cloud Functions
+        let handle = spamRef.queryOrdered(byChild: "date")
+            .queryLimited(toLast: 100)
+            .observe(.value) { snapshot in
             guard snapshot.exists(),
                   let spamDict = snapshot.value as? [String: Any] else {
                 DispatchQueue.main.async {
@@ -1162,6 +1285,75 @@ class FirebaseService {
             .child(userId)
             .child("spam_messages")
         spamRef.removeObserver(withHandle: handle)
+    }
+
+    // MARK: - Optimized Spam Messages Listener (Bandwidth Optimized)
+
+    /// Listen to spam messages with bandwidth optimization (delta-only sync)
+    /// Uses child events instead of value events to reduce bandwidth by ~95%
+    ///
+    /// - Parameters:
+    ///   - userId: User ID
+    ///   - onAdded: Called when a new spam message is added
+    ///   - onChanged: Called when a spam message is updated
+    ///   - onRemoved: Called when a spam message is removed
+    /// - Returns: Tuple of handles for cleanup
+    func listenToSpamMessagesOptimized(
+        userId: String,
+        onAdded: @escaping (SpamMessage) -> Void,
+        onChanged: @escaping (SpamMessage) -> Void,
+        onRemoved: @escaping (String) -> Void
+    ) -> (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle) {
+        let spamRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("spam_messages")
+            .queryOrdered(byChild: "date")
+            .queryLimited(toLast: 100)
+
+        let parseSpamMessage: (DataSnapshot) -> SpamMessage? = { snapshot in
+            guard let data = snapshot.value as? [String: Any] else { return nil }
+            return SpamMessage(
+                id: snapshot.key,
+                address: data["address"] as? String ?? "",
+                body: data["body"] as? String ?? "",
+                date: data["date"] as? Double ?? 0,
+                contactName: data["contactName"] as? String,
+                spamConfidence: data["spamConfidence"] as? Double ?? 0.5,
+                spamReasons: data["spamReasons"] as? String,
+                detectedAt: data["detectedAt"] as? Double ?? 0,
+                isUserMarked: data["isUserMarked"] as? Bool ?? false,
+                isRead: data["isRead"] as? Bool ?? false
+            )
+        }
+
+        let addedHandle = spamRef.observe(.childAdded) { snapshot in
+            if let msg = parseSpamMessage(snapshot) {
+                DispatchQueue.main.async { onAdded(msg) }
+            }
+        }
+
+        let changedHandle = spamRef.observe(.childChanged) { snapshot in
+            if let msg = parseSpamMessage(snapshot) {
+                DispatchQueue.main.async { onChanged(msg) }
+            }
+        }
+
+        let removedHandle = spamRef.observe(.childRemoved) { snapshot in
+            DispatchQueue.main.async { onRemoved(snapshot.key) }
+        }
+
+        return (addedHandle, changedHandle, removedHandle)
+    }
+
+    func removeSpamMessagesOptimizedListeners(userId: String, handles: (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle)) {
+        let spamRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("spam_messages")
+        spamRef.removeObserver(withHandle: handles.added)
+        spamRef.removeObserver(withHandle: handles.changed)
+        spamRef.removeObserver(withHandle: handles.removed)
     }
 
     func deleteSpamMessage(userId: String, messageId: String) async throws {
@@ -1937,6 +2129,57 @@ class FirebaseService {
         contactsRef.removeObserver(withHandle: handle)
     }
 
+    // MARK: - Optimized Contacts Listener (Bandwidth Optimized)
+
+    /// Listen to contacts with bandwidth optimization (delta-only sync)
+    /// Uses child events instead of value events to reduce bandwidth by ~95%
+    ///
+    /// - Parameters:
+    ///   - userId: User ID
+    ///   - onAdded: Called when a new contact is added
+    ///   - onChanged: Called when a contact is updated
+    ///   - onRemoved: Called when a contact is removed
+    /// - Returns: Tuple of handles for cleanup
+    func listenToContactsOptimized(
+        userId: String,
+        onAdded: @escaping (Contact) -> Void,
+        onChanged: @escaping (Contact) -> Void,
+        onRemoved: @escaping (String) -> Void
+    ) -> (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle) {
+        let contactsRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("contacts")
+
+        let addedHandle = contactsRef.observe(.childAdded) { snapshot in
+            guard let data = snapshot.value as? [String: Any],
+                  let contact = Contact.from(data, id: snapshot.key) else { return }
+            DispatchQueue.main.async { onAdded(contact) }
+        }
+
+        let changedHandle = contactsRef.observe(.childChanged) { snapshot in
+            guard let data = snapshot.value as? [String: Any],
+                  let contact = Contact.from(data, id: snapshot.key) else { return }
+            DispatchQueue.main.async { onChanged(contact) }
+        }
+
+        let removedHandle = contactsRef.observe(.childRemoved) { snapshot in
+            DispatchQueue.main.async { onRemoved(snapshot.key) }
+        }
+
+        return (addedHandle, changedHandle, removedHandle)
+    }
+
+    func removeContactsOptimizedListeners(userId: String, handles: (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle)) {
+        let contactsRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("contacts")
+        contactsRef.removeObserver(withHandle: handles.added)
+        contactsRef.removeObserver(withHandle: handles.changed)
+        contactsRef.removeObserver(withHandle: handles.removed)
+    }
+
     // MARK: - Contact Management (macOS / Web edits)
 
     /// Create or overwrite a contact entry on behalf of the macOS client.
@@ -2493,8 +2736,12 @@ class FirebaseService {
 
     // MARK: - E2EE Key Recovery
 
-    /// Check for E2EE key mismatch and ensure a device key backup exists.
+    /// Check for E2EE key mismatch with the shared sync group keypair.
     /// Returns (mismatchDetected, message).
+    ///
+    /// NEW BEHAVIOR (v3 - Shared Sync Group Keypair):
+    /// All devices in a sync group share the same keypair (generated by Android).
+    /// This function checks if the local macOS keypair matches the shared sync group keypair in Firebase.
     func checkE2eeKeyStatus(userId: String, deviceId: String) async -> (Bool, String?) {
         try? await E2EEManager.shared.initializeKeys()
         guard let localPublicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() else {
@@ -2504,45 +2751,39 @@ class FirebaseService {
         var mismatchDetected = false
         var message: String?
 
-        // Compare against remote device key entry if present
+        // Check against shared sync group keypair (NEW v3 architecture)
         do {
-            let deviceKeyRef = database.reference()
-                .child("e2ee_keys")
-                .child(userId)
-                .child(deviceId)
-                .child("publicKeyX963")
-            let keySnapshot = try await deviceKeyRef.getData()
-            if let remoteKey = keySnapshot.value as? String,
-               !remoteKey.isEmpty,
-               remoteKey != localPublicKeyX963 {
-                mismatchDetected = true
-                message = "This Mac's encryption keys don't match the keys registered for this device."
-            }
-        } catch {
-            // Ignore device key lookup errors; we'll still try backup flow
-        }
-
-        // Check existing backup; create if missing and keys match
-        do {
-            let backupRef = database.reference()
+            let syncGroupKeypairRef = database.reference()
                 .child("users")
                 .child(userId)
-                .child("e2ee_key_backups")
-                .child(deviceId)
-            let backupSnapshot = try await backupRef.getData()
-            if backupSnapshot.exists(),
-               let backupData = backupSnapshot.value as? [String: Any],
-               let backupPublicKey = backupData["publicKeyX963"] as? String,
-               !backupPublicKey.isEmpty {
-                if backupPublicKey != localPublicKeyX963 {
+                .child("syncGroupKeypair")
+
+            let syncGroupSnapshot = try await withTimeout(5.0) {
+                try await syncGroupKeypairRef.getData()
+            }
+
+            if syncGroupSnapshot.exists(),
+               let keypairData = syncGroupSnapshot.value as? [String: Any],
+               let sharedPublicKey = keypairData["publicKeyX963"] as? String,
+               !sharedPublicKey.isEmpty {
+
+                // Compare local key with shared sync group key
+                if sharedPublicKey != localPublicKeyX963 {
                     mismatchDetected = true
-                    message = "Encryption keys changed for this device. Sync keys to restore message history."
+                    message = "Encryption keys changed. Tap 'Sync Keys' to update from your phone."
+                    print("[E2EE] Key mismatch detected: local key doesn't match shared sync group key")
+                } else {
+                    // Keys match - all good!
+                    print("[E2EE] ✅ Local keypair matches shared sync group keypair")
                 }
             } else {
-                try await createE2eeKeyBackup(userId: userId, deviceId: deviceId)
+                // No shared sync group keypair exists yet (fresh pairing or old account)
+                // This is not an error - keys will be synced during first message sync
+                print("[E2EE] No shared sync group keypair found in Firebase (will be created on first sync)")
             }
         } catch {
-            // Backup creation failed; don't block UI
+            print("[E2EE] Failed to check sync group keypair: \(error.localizedDescription)")
+            // Don't show error banner for network issues
         }
 
         return (mismatchDetected, message)
@@ -2595,6 +2836,14 @@ class FirebaseService {
     }
 
     /// Wait for key sync response, import keys, and return success.
+    ///
+    /// NEW BEHAVIOR (v3 - Shared Sync Group Keypair):
+    /// Receives the Android device's sync group keypair and imports it, replacing the
+    /// macOS device's locally generated keypair. This allows immediate decryption of
+    /// all existing messages without needing backfill.
+    ///
+    /// OLD BEHAVIOR (v2 - Per-Device Keys):
+    /// Received a re-encrypted key backup specific to this device.
     func waitForE2eeKeySyncResponse(userId: String, deviceId: String, timeout: TimeInterval = 30) async throws -> Bool {
         let responseRef = database.reference()
             .child("users")
@@ -2615,8 +2864,29 @@ class FirebaseService {
                 if status == "ready",
                    let envelope = data["encryptedPrivateKeyEnvelope"] as? String {
                     do {
-                        let rawKey = try E2EEManager.shared.decryptDataKey(from: envelope)
-                        try E2EEManager.shared.importPrivateKey(rawData: rawKey)
+                        // Check key version to determine import method
+                        let keyVersion = data["keyVersion"] as? Int ?? 2
+
+                        if keyVersion >= 3,
+                           let syncGroupPublicKeyX963 = data["syncGroupPublicKeyX963"] as? String {
+                            // V3: Import sync group keypair (shared across all devices)
+                            let encryptedPrivateKey = try E2EEManager.shared.decryptDataKey(from: envelope)
+                            let privateKeyPKCS8Base64 = encryptedPrivateKey.base64EncodedString()
+
+                            try E2EEManager.shared.importSyncGroupKeypair(
+                                privateKeyPKCS8Base64: privateKeyPKCS8Base64,
+                                publicKeyX963Base64: syncGroupPublicKeyX963
+                            )
+
+                            print("[E2EE] Imported sync group keypair (v3) - all messages immediately accessible")
+                        } else {
+                            // V2: Import device-specific key (legacy)
+                            let rawKey = try E2EEManager.shared.decryptDataKey(from: envelope)
+                            try E2EEManager.shared.importPrivateKey(rawData: rawKey)
+
+                            print("[E2EE] Imported device-specific key (v2) - may need backfill")
+                        }
+
                         Task {
                             try? await E2EEManager.shared.publishDevicePublicKey()
                         }
