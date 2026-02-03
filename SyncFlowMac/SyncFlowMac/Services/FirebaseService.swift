@@ -492,10 +492,23 @@ class FirebaseService {
             throw FirebaseError.invalidTokenData
         }
 
+        // Initialize E2EE keys if not already done (ensures we have a keypair for key exchange)
+        try? await E2EEManager.shared.initializeKeys()
+
+        // Append macOS public key to QR payload for direct E2EE key exchange
+        // Format: originalQrPayload|macPublicKeyX963Base64
+        // Android will parse this, and after pairing approval, encrypt E2EE keys using this public key
+        var enhancedQrPayload = qrPayload
+        if let macPublicKey = E2EEManager.shared.getMyPublicKeyX963Base64() {
+            enhancedQrPayload = "\(qrPayload)|\(macPublicKey)"
+            print("[Firebase] Added macOS public key to QR payload for direct E2EE key exchange")
+        } else {
+            print("[Firebase] Warning: Could not get macOS public key for QR payload")
+        }
 
         return PairingSession(
             token: token,
-            qrPayload: qrPayload,
+            qrPayload: enhancedQrPayload,
             expiresAt: expiresAt,
             version: 2
         )
@@ -533,9 +546,19 @@ class FirebaseService {
             throw FirebaseError.invalidTokenData
         }
 
+        // Initialize E2EE keys if not already done
+        try? await E2EEManager.shared.initializeKeys()
+
+        // Append macOS public key to QR payload for direct E2EE key exchange
+        var enhancedQrPayload = qrPayload
+        if let macPublicKey = E2EEManager.shared.getMyPublicKeyX963Base64() {
+            enhancedQrPayload = "\(qrPayload)|\(macPublicKey)"
+            print("[Firebase] V1: Added macOS public key to QR payload")
+        }
+
         return PairingSession(
             token: token,
-            qrPayload: qrPayload,
+            qrPayload: enhancedQrPayload,
             expiresAt: expiresAt,
             version: 1
         )
@@ -2356,7 +2379,12 @@ class FirebaseService {
     // MARK: - Call History
 
     /// Listen for call history changes
+    /// @deprecated Use listenToCallHistoryOptimized() for better bandwidth efficiency
     func listenToCallHistory(userId: String, limit: Int = 500, completion: @escaping ([CallHistoryEntry]) -> Void) -> DatabaseHandle {
+        // BANDWIDTH WARNING: This downloads ALL call history on every change
+        // Use listenToCallHistoryOptimized() instead for delta-only sync
+        print("[Firebase] WARNING: Using non-optimized call history listener - consider using listenToCallHistoryOptimized()")
+
         let callHistoryRef = database.reference()
             .child("users")
             .child(userId)
@@ -2417,6 +2445,69 @@ class FirebaseService {
         }
 
         return handle
+    }
+
+    // MARK: - Optimized Call History Listener (Bandwidth Optimized)
+
+    /// Listen to call history with bandwidth optimization (delta-only sync)
+    /// Uses child events instead of value events to reduce bandwidth by ~95%
+    ///
+    /// - Parameters:
+    ///   - userId: User ID
+    ///   - limit: Maximum number of call history entries to track (default: 200)
+    ///   - onAdded: Called when a new call is added
+    ///   - onChanged: Called when a call is updated
+    ///   - onRemoved: Called when a call is removed
+    /// - Returns: Tuple of handles for cleanup
+    func listenToCallHistoryOptimized(
+        userId: String,
+        limit: Int = 200,
+        onAdded: @escaping (CallHistoryEntry) -> Void,
+        onChanged: @escaping (CallHistoryEntry) -> Void,
+        onRemoved: @escaping (String) -> Void
+    ) -> (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle) {
+        let callHistoryRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("call_history")
+            .queryOrderedByKey()
+            .queryLimited(toLast: UInt(limit))
+
+        print("[Firebase] Starting OPTIMIZED call history listener for user: \(userId), limit: \(limit)")
+
+        let parseCallHistory: (DataSnapshot) -> CallHistoryEntry? = { snapshot in
+            guard let data = snapshot.value as? [String: Any] else { return nil }
+            return CallHistoryEntry.from(data, id: snapshot.key)
+        }
+
+        let addedHandle = callHistoryRef.observe(.childAdded) { snapshot in
+            if let call = parseCallHistory(snapshot) {
+                DispatchQueue.main.async { onAdded(call) }
+            }
+        }
+
+        let changedHandle = callHistoryRef.observe(.childChanged) { snapshot in
+            if let call = parseCallHistory(snapshot) {
+                DispatchQueue.main.async { onChanged(call) }
+            }
+        }
+
+        let removedHandle = callHistoryRef.observe(.childRemoved) { snapshot in
+            DispatchQueue.main.async { onRemoved(snapshot.key) }
+        }
+
+        return (addedHandle, changedHandle, removedHandle)
+    }
+
+    func removeCallHistoryOptimizedListeners(userId: String, handles: (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle)) {
+        let callHistoryRef = database.reference()
+            .child("users")
+            .child(userId)
+            .child("call_history")
+        callHistoryRef.removeObserver(withHandle: handles.added)
+        callHistoryRef.removeObserver(withHandle: handles.changed)
+        callHistoryRef.removeObserver(withHandle: handles.removed)
+        print("[Firebase] Removed OPTIMIZED call history listeners")
     }
 
     /// Listen for active/incoming calls

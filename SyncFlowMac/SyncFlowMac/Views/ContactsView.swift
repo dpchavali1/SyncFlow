@@ -149,7 +149,7 @@ struct ContactsView: View {
                         if !filteredSyncedContacts.isEmpty {
                             Section {
                                 ForEach(filteredSyncedContacts) { contact in
-                                    ContactRow(contact: contact, selectedContact: $selectedContact)
+                                    ContactRow(contact: contact, selectedContact: $selectedContact, contactsStore: contactsStore)
                                         .environmentObject(appState)
                                 }
                             } header: {
@@ -309,16 +309,18 @@ struct ContactRow: View {
     let contact: Contact
     @Binding var selectedContact: Contact?
     @EnvironmentObject var appState: AppState
+    @ObservedObject var contactsStore: ContactsStore  // BANDWIDTH OPTIMIZATION: Use shared cache
 
     @State private var isHovered = false
     @State private var showCallAlert = false
     @State private var callStatus: CallRequestStatus? = nil
     @State private var isCallInProgress = false
-    @State private var availableSims: [SimInfo] = []
     @State private var selectedSim: SimInfo? = nil
-    @State private var hasLoadedSims = false
-    @State private var pairedDevices: [SyncFlowDevice] = []
-    @State private var hasLoadedDevices = false
+
+    // BANDWIDTH OPTIMIZATION: Use cached SIMs and devices from contactsStore
+    // instead of loading them per-row (saves ~2 fetches per contact hover)
+    private var availableSims: [SimInfo] { contactsStore.cachedSims }
+    private var pairedDevices: [SyncFlowDevice] { contactsStore.cachedDevices }
 
     var body: some View {
         HStack(spacing: 16) {
@@ -446,11 +448,11 @@ struct ContactRow: View {
         .cornerRadius(8)
         .onHover { hovering in
             isHovered = hovering
-            if hovering && !hasLoadedSims {
-                loadAvailableSims()
-            }
-            if hovering && !hasLoadedDevices {
-                loadPairedDevices()
+            // BANDWIDTH OPTIMIZATION: Load SIMs and devices once at app level (not per-row)
+            // This saves ~2 Firebase fetches per contact hover
+            if hovering {
+                contactsStore.loadSimsIfNeeded()
+                contactsStore.loadDevicesIfNeeded()
             }
         }
         .alert("Calling \(contact.displayName)", isPresented: $showCallAlert) {
@@ -461,28 +463,6 @@ struct ContactRow: View {
         } message: {
             if let status = callStatus {
                 Text(status.description)
-            }
-        }
-    }
-
-    private func loadAvailableSims() {
-        guard let userId = appState.userId else { return }
-        guard !hasLoadedSims else { return }
-
-        hasLoadedSims = true
-
-        Task {
-            do {
-                let sims = try await FirebaseService.shared.getAvailableSims(userId: userId)
-                await MainActor.run {
-                    availableSims = sims
-                    if selectedSim == nil {
-                        selectedSim = sims.first
-                    }
-                }
-            } catch {
-                print("Error loading SIMs: \(error)")
-                hasLoadedSims = false
             }
         }
     }
@@ -519,25 +499,6 @@ struct ContactRow: View {
         // Update app state to show conversation and switch to messages tab
         appState.selectedConversation = conversation
         appState.selectedTab = .messages
-    }
-
-    private func loadPairedDevices() {
-        guard let userId = appState.userId else { return }
-        guard !hasLoadedDevices else { return }
-
-        hasLoadedDevices = true
-
-        Task {
-            do {
-                let devices = try await FirebaseService.shared.getPairedDevices(userId: userId)
-                await MainActor.run {
-                    pairedDevices = devices
-                }
-            } catch {
-                print("Error loading paired devices: \(error)")
-                hasLoadedDevices = false
-            }
-        }
     }
 
     private func initiateSyncFlowCall(isVideo: Bool) {
@@ -836,9 +797,52 @@ class ContactsStore: ObservableObject {
     @Published var contacts: [Contact] = []
     @Published var isLoading = true
 
+    // BANDWIDTH OPTIMIZATION: Cache SIMs and devices at app level (not per-row)
+    // This prevents repeated fetches when hovering over different contacts
+    @Published var cachedSims: [SimInfo] = []
+    @Published var cachedDevices: [SyncFlowDevice] = []
+    private var hasLoadedSims = false
+    private var hasLoadedDevices = false
+
     // BANDWIDTH OPTIMIZATION: Use optimized child observers for delta-only sync
     private var contactsListenerHandles: (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle)?
     private var currentUserId: String?
+
+    /// Load SIMs once and cache them (called on first hover across any contact)
+    func loadSimsIfNeeded() {
+        guard let userId = currentUserId, !hasLoadedSims else { return }
+        hasLoadedSims = true
+
+        Task {
+            do {
+                let sims = try await FirebaseService.shared.getAvailableSims(userId: userId)
+                await MainActor.run {
+                    self.cachedSims = sims
+                }
+            } catch {
+                print("[ContactsStore] Error loading SIMs: \(error)")
+                hasLoadedSims = false  // Allow retry on error
+            }
+        }
+    }
+
+    /// Load devices once and cache them (called on first hover across any contact)
+    func loadDevicesIfNeeded() {
+        guard let userId = currentUserId, !hasLoadedDevices else { return }
+        hasLoadedDevices = true
+
+        Task {
+            do {
+                let devices = try await FirebaseService.shared.getPairedDevices(userId: userId)
+                await MainActor.run {
+                    self.cachedDevices = devices
+                }
+            } catch {
+                print("[ContactsStore] Error loading devices: \(error)")
+                hasLoadedDevices = false  // Allow retry on error
+            }
+        }
+    }
 
     var pendingContacts: [Contact] {
         contacts.filter { $0.isPendingSync }
